@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "sigen-modbus"
 version = "0.1.0"
 description = "Read and safely control a Sigenergy SigenStor over local Modbus TCP"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 authors = [{ name = "Mitchell Ludwig" }]
 dependencies = [
@@ -29,6 +31,10 @@ dev = [
     "requests",
     "eccodes",
 ]
+
+[project.urls]
+Homepage = "https://github.com/maludwig/sigen-modbus"
+Issues = "https://github.com/maludwig/sigen-modbus/issues"
 
 [project.scripts]
 sigen = "sigen.cli:main"

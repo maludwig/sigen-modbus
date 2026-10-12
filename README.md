@@ -26,7 +26,12 @@ so `sigen` always finds it at the same IP.
 
 ## Install
 
-Python 3.9 or newer. Clone the repository, then in a virtual environment:
+Python 3.9 or newer. Clone the repository:
+```
+git clone https://github.com/maludwig/sigen-modbus.git
+cd sigen-modbus
+```
+then, in a virtual environment:
 
 **Windows** (PowerShell):
 ```
@@ -411,3 +416,8 @@ or more; for anything shorter, use the power readings (`…_kw`).
   protocol document: unsupported registers, quirks, the battery's behaviour.
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): the code's layout, tests, how reads and writes
   work, the register map, migrations, the fake server.
+
+## License
+
+MIT: use it for anything, at your own risk. See [LICENSE](LICENSE). Sigenergy and SigenStor are
+Sigenergy's trademarks; this project isn't affiliated with them.
