@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sigen-modbus"
+version = "0.1.0"
+description = "Read and safely control a Sigenergy SigenStor over local Modbus TCP"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Mitchell Ludwig" }]
+dependencies = [
+    "psycopg[binary]>=3.1",
+    "numpy",
+    "h5py",
+    "fsspec[http]",
+    "tzdata; sys_platform == 'win32'",
+    "flask",
+    "jinja2",
+    "matplotlib",
+    "pvlib",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "jupyter",
+    "pandas",
+    "requests",
+    "eccodes",
+]
+
+[project.scripts]
+sigen = "sigen.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sigen = ["migrations/*.sql", "migrations/backfill/*.sql", "templates/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

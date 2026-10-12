@@ -1,0 +1,25 @@
+# Real captures from your system stay local by default
+captures/*
+!captures/.gitkeep
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+/config.json
+
+# Third-party documents (protocol PDFs, datasheets): not ours to redistribute
+/ext_doc/
+
+# Personal working files: scripts, notes and notebooks about one particular system
+/scratch/
+/notebooks/
+
+# IDEs
+/.idea/
+

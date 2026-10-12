@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% if live %}<meta http-equiv="refresh" content="{{ refresh }}">{% endif %}
+  <title>sigen: {{ description or "charts" }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0 auto; padding: 12px 16px; max-width: 1150px;
+           background: #fff; color: #222; }
+    nav a { display: inline-block; margin: 0 10px 6px 0; padding: 4px 10px; border: 1px solid #bbb;
+            border-radius: 6px; text-decoration: none; color: #222; }
+    nav a.on { background: #222; color: #fff; border-color: #222; }
+    h1 { font-size: 1.2em; margin: 6px 0; }
+    h2 { font-size: 1em; margin: 18px 0 4px; }
+    img { width: 100%; height: auto; display: block; }
+    .meta { color: #666; font-size: 0.85em; }
+    .error { color: #a00; }
+  </style>
+</head>
+<body>
+  <nav>
+    {% for label, params in quick %}
+      <a href="{{ url_for('page', **params) }}" class="{{ 'on' if params == query else '' }}">{{ label }}</a>
+    {% endfor %}
+    {% for label, params in nav %}
+      <a href="{{ url_for('page', **params) }}">{{ label }}</a>
+    {% endfor %}
+  </nav>
+  {% if error %}
+    <p class="error">Bad window: {{ error }}</p>
+  {% else %}
+    <h1>{{ description }}</h1>
+    <p class="meta">Drawn {{ drawn.strftime("%Y-%m-%d %H:%M:%S") }} ({{ tz }}).
+      {% if live %}Reloads every {{ refresh // 60 }} minutes.{% endif %}</p>
+    {% for name, title in charts.items() %}
+      <h2>{{ title }}</h2>
+      <img src="{{ url_for('chart', name=name, **query) }}" alt="{{ title }}" loading="lazy">
+    {% endfor %}
+  {% endif %}
+</body>
+</html>

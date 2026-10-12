@@ -1,0 +1,37 @@
+{
+  "smart_loads": [
+    {"slot": 1, "name": "Garage"},
+    {"slot": 3, "name": "Heat Pump"},
+    {"slot": 5, "name": "Dryer"}
+  ],
+  "database": {
+    "url": "postgresql://sigen:CHANGE_ME@localhost:5432/sigen",
+    "test_url": "postgresql://sigen_test:CHANGE_ME@localhost:5432/sigen_test"
+  },
+  "devices": {
+    "inverter": {"ip": "192.168.1.100", "mac": "02:ab:cd:ef:00:01", "units": [1]},
+    "loadhub": {"ip": "192.168.1.101", "mac": "02:ab:cd:ef:00:02"}
+  },
+  "site": {
+    "latitude": 51.0443,
+    "longitude": -114.0631,
+    "timezone": "America/Edmonton",
+    "altitude_m": 1045
+  },
+  "alerts": {
+    "ntfy_topic": "replace-with-a-long-random-topic",
+    "ntfy_server": "https://ntfy.sh"
+  },
+  "array": {
+    "panel": {"kw": 0.5, "gamma_pct_per_c": -0.28, "mount": "close_mount_glass_glass"},
+    "albedo": 0.2,
+    "faces": {
+      "south": {"tilt": 20, "azimuth": 180},
+      "west": {"tilt": 20, "azimuth": 270}
+    },
+    "strings": {
+      "1": {"panels": 10, "face": "south"},
+      "2": {"panels": 8, "face": "west"}
+    }
+  }
+}

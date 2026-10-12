@@ -1,0 +1,1555 @@
+{
+  "_comment": "Written by sigen-modbus. Also loadable as fake data by `sigen fake-server`.",
+  "source": {
+    "ip": "192.168.1.100",
+    "port": 502,
+    "tool": "sigen-modbus 0.1.0",
+    "read_at": "2026-10-07T23:58:02+00:00"
+  },
+  "unit_id": 247,
+  "derived": {
+    "house_load_estimate_kw": 3.005,
+    "battery_direction": "discharging",
+    "grid_direction": "importing",
+    "house_load_reported_kw": 3.018,
+    "battery_available_kwh": 13.67,
+    "battery_room_kwh": 1.86,
+    "battery_total_estimate_kwh": 15.53,
+    "battery_soc_x_nominal_kwh": 13.25,
+    "device_clock_local": "2026-10-07T17:58:01",
+    "device_clock_skew_hours_vs_utc": -6.0
+  },
+  "input_registers": {
+    "30000": {
+      "name": "plant_system_time",
+      "type": "u32",
+      "gain": 1,
+      "unit": "s",
+      "value": 1791395881,
+      "raw": [
+        27334,
+        34857
+      ]
+    },
+    "30002": {
+      "name": "plant_system_timezone",
+      "type": "s16",
+      "gain": 1,
+      "unit": "min",
+      "value": -420,
+      "raw": [
+        65116
+      ]
+    },
+    "30003": {
+      "name": "plant_ems_work_mode",
+      "type": "u16",
+      "gain": 1,
+      "value": 7,
+      "label": "Remote EMS",
+      "raw": [
+        7
+      ]
+    },
+    "30004": {
+      "name": "plant_grid_sensor_status",
+      "type": "u16",
+      "gain": 1,
+      "value": 1,
+      "label": "Connected",
+      "raw": [
+        1
+      ]
+    },
+    "30005": {
+      "name": "plant_grid_sensor_active_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.22,
+      "raw": [
+        0,
+        220
+      ]
+    },
+    "30007": {
+      "name": "plant_grid_sensor_reactive_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kvar",
+      "value": -0.759,
+      "raw": [
+        65535,
+        64777
+      ]
+    },
+    "30009": {
+      "name": "plant_on_off_grid_status",
+      "type": "u16",
+      "gain": 1,
+      "value": 0,
+      "label": "On-grid",
+      "raw": [
+        0
+      ]
+    },
+    "30010": {
+      "name": "plant_max_active_power",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 11.5,
+      "raw": [
+        0,
+        11500
+      ]
+    },
+    "30012": {
+      "name": "plant_max_apparent_power",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kVA",
+      "value": 11.5,
+      "raw": [
+        0,
+        11500
+      ]
+    },
+    "30014": {
+      "name": "plant_ess_soc",
+      "type": "u16",
+      "gain": 10,
+      "unit": "%",
+      "value": 88.0,
+      "raw": [
+        880
+      ]
+    },
+    "30015": {
+      "name": "plant_phase_a_active_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 1.162,
+      "raw": [
+        0,
+        1162
+      ]
+    },
+    "30017": {
+      "name": "plant_phase_b_active_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 1.636,
+      "raw": [
+        0,
+        1636
+      ]
+    },
+    "30019": {
+      "name": "plant_phase_c_active_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30021": {
+      "name": "plant_phase_a_reactive_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kvar",
+      "value": 0.002,
+      "raw": [
+        0,
+        2
+      ]
+    },
+    "30023": {
+      "name": "plant_phase_b_reactive_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kvar",
+      "value": 0.001,
+      "raw": [
+        0,
+        1
+      ]
+    },
+    "30025": {
+      "name": "plant_phase_c_reactive_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kvar",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30027": {
+      "name": "plant_merged_alarm_1",
+      "type": "u16",
+      "gain": 1,
+      "value": 0,
+      "raw": [
+        0
+      ]
+    },
+    "30028": {
+      "name": "plant_merged_alarm_2",
+      "type": "u16",
+      "gain": 1,
+      "value": 0,
+      "raw": [
+        0
+      ]
+    },
+    "30029": {
+      "name": "plant_merged_alarm_3",
+      "type": "u16",
+      "gain": 1,
+      "value": 0,
+      "raw": [
+        0
+      ]
+    },
+    "30030": {
+      "name": "plant_merged_alarm_4",
+      "type": "u16",
+      "gain": 1,
+      "value": 0,
+      "raw": [
+        0
+      ]
+    },
+    "30031": {
+      "name": "plant_active_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 2.474,
+      "raw": [
+        0,
+        2474
+      ]
+    },
+    "30033": {
+      "name": "plant_reactive_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kvar",
+      "value": 0.003,
+      "raw": [
+        0,
+        3
+      ]
+    },
+    "30035": {
+      "name": "plant_photovoltaic_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.926,
+      "raw": [
+        0,
+        926
+      ]
+    },
+    "30037": {
+      "name": "plant_ess_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": -1.859,
+      "raw": [
+        65535,
+        63677
+      ]
+    },
+    "30039": {
+      "name": "plant_available_max_active_power",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 11.4,
+      "raw": [
+        0,
+        11400
+      ]
+    },
+    "30041": {
+      "name": "plant_available_min_active_power",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 11.4,
+      "raw": [
+        0,
+        11400
+      ]
+    },
+    "30043": {
+      "name": "plant_available_max_reactive_power",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kvar",
+      "value": 6.84,
+      "raw": [
+        0,
+        6840
+      ]
+    },
+    "30045": {
+      "name": "plant_available_min_reactive_power",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kvar",
+      "value": 6.84,
+      "raw": [
+        0,
+        6840
+      ]
+    },
+    "30047": {
+      "name": "plant_ess_available_max_charging_power",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 6.643,
+      "raw": [
+        0,
+        6643
+      ]
+    },
+    "30049": {
+      "name": "plant_ess_available_max_discharging_power",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 11.996,
+      "raw": [
+        0,
+        11996
+      ]
+    },
+    "30051": {
+      "name": "plant_running_state",
+      "type": "u16",
+      "gain": 1,
+      "value": 1,
+      "label": "Running",
+      "raw": [
+        1
+      ]
+    },
+    "30052": {
+      "name": "plant_grid_sensor_phase_a_active_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.334,
+      "raw": [
+        0,
+        334
+      ]
+    },
+    "30054": {
+      "name": "plant_grid_sensor_phase_b_active_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.025,
+      "raw": [
+        0,
+        25
+      ]
+    },
+    "30056": {
+      "name": "plant_grid_sensor_phase_c_active_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30058": {
+      "name": "plant_grid_sensor_phase_a_reactive_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kvar",
+      "value": -0.438,
+      "raw": [
+        65535,
+        65098
+      ]
+    },
+    "30060": {
+      "name": "plant_grid_sensor_phase_b_reactive_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kvar",
+      "value": -0.327,
+      "raw": [
+        65535,
+        65209
+      ]
+    },
+    "30062": {
+      "name": "plant_grid_sensor_phase_c_reactive_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kvar",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30064": {
+      "name": "plant_ess_available_max_charging_capacity",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 1.86,
+      "raw": [
+        0,
+        186
+      ]
+    },
+    "30066": {
+      "name": "plant_ess_available_max_discharging_capacity",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 13.67,
+      "raw": [
+        0,
+        1367
+      ]
+    },
+    "30068": {
+      "name": "plant_ess_rated_charging_power",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 7.3,
+      "raw": [
+        0,
+        7300
+      ]
+    },
+    "30070": {
+      "name": "plant_ess_rated_discharging_power",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 8.0,
+      "raw": [
+        0,
+        8000
+      ]
+    },
+    "30072": {
+      "name": "plant_merged_alarm_5",
+      "type": "u16",
+      "gain": 1,
+      "value": 0,
+      "raw": [
+        0
+      ]
+    },
+    "30083": {
+      "name": "plant_ess_rated_energy_capacity",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 15.06,
+      "raw": [
+        0,
+        1506
+      ]
+    },
+    "30085": {
+      "name": "plant_ess_charge_cut_off_soc",
+      "type": "u16",
+      "gain": 10,
+      "unit": "%",
+      "value": 100.0,
+      "raw": [
+        1000
+      ]
+    },
+    "30086": {
+      "name": "plant_ess_discharge_cut_off_soc",
+      "type": "u16",
+      "gain": 10,
+      "unit": "%",
+      "value": 0.0,
+      "raw": [
+        0
+      ]
+    },
+    "30087": {
+      "name": "plant_ess_soh",
+      "type": "u16",
+      "gain": 10,
+      "unit": "%",
+      "value": 100.0,
+      "raw": [
+        1000
+      ]
+    },
+    "30088": {
+      "name": "plant_accumulated_pv_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 63.41,
+      "raw": [
+        0,
+        0,
+        0,
+        6341
+      ]
+    },
+    "30092": {
+      "name": "plant_daily_consumed_energy",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 34.28,
+      "raw": [
+        0,
+        3428
+      ]
+    },
+    "30094": {
+      "name": "plant_accumulated_load_consumption",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 46.73,
+      "raw": [
+        0,
+        0,
+        0,
+        4673
+      ]
+    },
+    "30098": {
+      "name": "plant_smart_load_1_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 7.36,
+      "raw": [
+        0,
+        736
+      ]
+    },
+    "30100": {
+      "name": "plant_smart_load_2_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30102": {
+      "name": "plant_smart_load_3_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 2.03,
+      "raw": [
+        0,
+        203
+      ]
+    },
+    "30104": {
+      "name": "plant_smart_load_4_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30106": {
+      "name": "plant_smart_load_5_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 3.39,
+      "raw": [
+        0,
+        339
+      ]
+    },
+    "30108": {
+      "name": "plant_smart_load_6_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30110": {
+      "name": "plant_smart_load_7_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 6.42,
+      "raw": [
+        0,
+        642
+      ]
+    },
+    "30112": {
+      "name": "plant_smart_load_8_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 7.48,
+      "raw": [
+        0,
+        748
+      ]
+    },
+    "30114": {
+      "name": "plant_smart_load_9_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30116": {
+      "name": "plant_smart_load_10_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30118": {
+      "name": "plant_smart_load_11_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30120": {
+      "name": "plant_smart_load_12_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30122": {
+      "name": "plant_smart_load_13_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30124": {
+      "name": "plant_smart_load_14_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30126": {
+      "name": "plant_smart_load_15_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30128": {
+      "name": "plant_smart_load_16_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30130": {
+      "name": "plant_smart_load_17_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30132": {
+      "name": "plant_smart_load_18_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30134": {
+      "name": "plant_smart_load_19_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30136": {
+      "name": "plant_smart_load_20_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30138": {
+      "name": "plant_smart_load_21_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30140": {
+      "name": "plant_smart_load_22_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30142": {
+      "name": "plant_smart_load_23_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30144": {
+      "name": "plant_smart_load_24_total_consumption",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30146": {
+      "name": "plant_smart_load_1_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 1.457,
+      "raw": [
+        0,
+        1457
+      ]
+    },
+    "30148": {
+      "name": "plant_smart_load_2_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30150": {
+      "name": "plant_smart_load_3_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.006,
+      "raw": [
+        0,
+        6
+      ]
+    },
+    "30152": {
+      "name": "plant_smart_load_4_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30154": {
+      "name": "plant_smart_load_5_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30156": {
+      "name": "plant_smart_load_6_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30158": {
+      "name": "plant_smart_load_7_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.767,
+      "raw": [
+        0,
+        767
+      ]
+    },
+    "30160": {
+      "name": "plant_smart_load_8_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.01,
+      "raw": [
+        0,
+        10
+      ]
+    },
+    "30162": {
+      "name": "plant_smart_load_9_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30164": {
+      "name": "plant_smart_load_10_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30166": {
+      "name": "plant_smart_load_11_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30168": {
+      "name": "plant_smart_load_12_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30170": {
+      "name": "plant_smart_load_13_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30172": {
+      "name": "plant_smart_load_14_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30174": {
+      "name": "plant_smart_load_15_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30176": {
+      "name": "plant_smart_load_16_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30178": {
+      "name": "plant_smart_load_17_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30180": {
+      "name": "plant_smart_load_18_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30182": {
+      "name": "plant_smart_load_19_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30184": {
+      "name": "plant_smart_load_20_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30186": {
+      "name": "plant_smart_load_21_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30188": {
+      "name": "plant_smart_load_22_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30190": {
+      "name": "plant_smart_load_23_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30192": {
+      "name": "plant_smart_load_24_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30194": {
+      "name": "plant_third_party_inverter_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 0.0,
+      "raw": [
+        0,
+        0
+      ]
+    },
+    "30196": {
+      "name": "plant_accumulated_third_party_inverter_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "30200": {
+      "name": "plant_accumulated_battery_charge_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 21.64,
+      "raw": [
+        0,
+        0,
+        0,
+        2164
+      ]
+    },
+    "30204": {
+      "name": "plant_accumulated_battery_discharge_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 13.82,
+      "raw": [
+        0,
+        0,
+        0,
+        1382
+      ]
+    },
+    "30208": {
+      "name": "plant_accumulated_evdc_charge_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "30212": {
+      "name": "plant_accumulated_evdc_discharge_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "30216": {
+      "name": "plant_accumulated_grid_import_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 7.5,
+      "raw": [
+        0,
+        0,
+        0,
+        750
+      ]
+    },
+    "30220": {
+      "name": "plant_accumulated_grid_export_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 16.37,
+      "raw": [
+        0,
+        0,
+        0,
+        1637
+      ]
+    },
+    "30224": {
+      "name": "plant_accumulated_generator_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "30228": {
+      "name": "plant_si_common_load_consumption",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 46.73,
+      "raw": [
+        0,
+        0,
+        0,
+        4673
+      ]
+    },
+    "30232": {
+      "name": "plant_si_evac_charge_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "30236": {
+      "name": "plant_si_pv_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 63.37,
+      "raw": [
+        0,
+        0,
+        0,
+        6337
+      ]
+    },
+    "30240": {
+      "name": "plant_si_third_party_inverter_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "30244": {
+      "name": "plant_si_battery_charge_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 21.6,
+      "raw": [
+        0,
+        0,
+        0,
+        2160
+      ]
+    },
+    "30248": {
+      "name": "plant_si_battery_discharge_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 13.82,
+      "raw": [
+        0,
+        0,
+        0,
+        1382
+      ]
+    },
+    "30252": {
+      "name": "plant_si_evdc_charge_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "30256": {
+      "name": "plant_si_evdc_discharge_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "30260": {
+      "name": "plant_si_grid_import_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 7.5,
+      "raw": [
+        0,
+        0,
+        0,
+        750
+      ]
+    },
+    "30264": {
+      "name": "plant_si_grid_export_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 16.37,
+      "raw": [
+        0,
+        0,
+        0,
+        1637
+      ]
+    },
+    "30268": {
+      "name": "plant_si_generator_energy",
+      "type": "u64",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 0.0,
+      "raw": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "30272": {
+      "name": "plant_pv_total_daily_generation",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 41.49,
+      "raw": [
+        0,
+        4149
+      ]
+    },
+    "30274": {
+      "name": "plant_pv_total_previous_day_generation",
+      "type": "u32",
+      "gain": 100,
+      "unit": "kWh",
+      "value": 21.9,
+      "raw": [
+        0,
+        2190
+      ]
+    },
+    "30276": {
+      "name": "plant_grid_code_rated_frequency",
+      "type": "u16",
+      "gain": 100,
+      "unit": "Hz",
+      "value": 60.0,
+      "raw": [
+        6000
+      ]
+    },
+    "30277": {
+      "name": "plant_grid_code_rated_voltage",
+      "type": "u32",
+      "gain": 100,
+      "unit": "V",
+      "value": 120.0,
+      "raw": [
+        0,
+        12000
+      ]
+    },
+    "30280": {
+      "name": "plant_merged_alarm_6",
+      "type": "u16",
+      "gain": 1,
+      "value": 0,
+      "raw": [
+        0
+      ]
+    },
+    "30282": {
+      "name": "plant_general_load_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 3.018,
+      "raw": [
+        0,
+        3018
+      ]
+    },
+    "30284": {
+      "name": "plant_total_load_power",
+      "type": "s32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": 3.018,
+      "raw": [
+        0,
+        3018
+      ]
+    },
+    "30286": {
+      "name": "plant_ess_average_cell_temperature",
+      "type": "s16",
+      "gain": 10,
+      "unit": "°C",
+      "value": 27.2,
+      "raw": [
+        272
+      ]
+    }
+  },
+  "holding_registers": {
+    "40029": {
+      "name": "plant_remote_ems_enable",
+      "type": "u16",
+      "gain": 1,
+      "value": 1,
+      "label": "Enabled",
+      "raw": [
+        1
+      ]
+    },
+    "40031": {
+      "name": "plant_remote_ems_control_mode",
+      "type": "u16",
+      "gain": 1,
+      "value": 2,
+      "label": "Max Self-Consumption",
+      "raw": [
+        2
+      ]
+    },
+    "40032": {
+      "name": "plant_ess_max_charging_limit",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": null,
+      "label": "Not set (no limit)",
+      "raw": [
+        65535,
+        65535
+      ]
+    },
+    "40034": {
+      "name": "plant_ess_max_discharging_limit",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": null,
+      "label": "Not set (no limit)",
+      "raw": [
+        65535,
+        65535
+      ]
+    },
+    "40036": {
+      "name": "plant_pv_max_power_limit",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": null,
+      "label": "Not set (no limit)",
+      "raw": [
+        65535,
+        65535
+      ]
+    },
+    "40038": {
+      "name": "plant_grid_point_maximum_export_limitation",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": null,
+      "label": "Not set (no limit)",
+      "raw": [
+        65535,
+        65535
+      ]
+    },
+    "40040": {
+      "name": "plant_grid_maximum_import_limitation",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": null,
+      "label": "Not set (no limit)",
+      "raw": [
+        65535,
+        65535
+      ]
+    },
+    "40042": {
+      "name": "plant_pcs_maximum_export_limitation",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": null,
+      "label": "Not set (no limit)",
+      "raw": [
+        65535,
+        65535
+      ]
+    },
+    "40044": {
+      "name": "plant_pcs_maximum_import_limitation",
+      "type": "u32",
+      "gain": 1000,
+      "unit": "kW",
+      "value": null,
+      "label": "Not set (no limit)",
+      "raw": [
+        65535,
+        65535
+      ]
+    },
+    "40046": {
+      "name": "plant_backup_soc",
+      "type": "u16",
+      "gain": 10,
+      "unit": "%",
+      "value": 20.0,
+      "raw": [
+        200
+      ]
+    },
+    "40047": {
+      "name": "plant_charge_cut_off_soc",
+      "type": "u16",
+      "gain": 10,
+      "unit": "%",
+      "value": 100.0,
+      "raw": [
+        1000
+      ]
+    },
+    "40048": {
+      "name": "plant_discharge_cut_off_soc",
+      "type": "u16",
+      "gain": 10,
+      "unit": "%",
+      "value": 0.0,
+      "raw": [
+        0
+      ]
+    }
+  },
+  "errors": {}
+}

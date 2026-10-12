@@ -1,0 +1,27 @@
+{
+  "_comment": "Made-up starter values for the Sigen plant (unit 247): a sunny afternoon, battery charging, exporting to the grid. For a capture of a real system see fake_data/real-2026-10-06/",
+  "unit_id": 247,
+  "input_registers": {
+    "30000": {"name": "plant_system_time", "type": "u32", "value": 1791320000},
+    "30003": {"name": "plant_ems_work_mode", "type": "u16", "value": 7},
+    "30005": {"name": "plant_grid_sensor_active_power_kw", "type": "s32", "gain": 1000, "value": -2.0},
+    "30014": {"name": "plant_ess_soc_pct", "type": "u16", "gain": 10, "value": 62.3},
+    "30035": {"name": "plant_photovoltaic_power_kw", "type": "s32", "gain": 1000, "value": 4.21},
+    "30037": {"name": "plant_ess_power_kw", "type": "s32", "gain": 1000, "value": 1.5},
+    "30051": {"name": "plant_running_state", "type": "u16", "value": 1},
+    "30083": {"name": "plant_ess_rated_energy_capacity_kwh", "type": "u32", "gain": 100, "value": 16.0},
+    "30085": {"name": "plant_ess_charge_cut_off_soc_pct", "type": "u16", "gain": 10, "value": 100.0},
+    "30086": {"name": "plant_ess_discharge_cut_off_soc_pct", "type": "u16", "gain": 10, "value": 5.0},
+    "30087": {"name": "plant_ess_soh_pct", "type": "u16", "gain": 10, "value": 100.0},
+    "30216": {"name": "plant_accumulated_grid_import_energy_kwh", "type": "u64", "gain": 100, "value": 123.45},
+    "30220": {"name": "plant_accumulated_grid_export_energy_kwh", "type": "u64", "gain": 100, "value": 678.9},
+    "30286": {"name": "plant_ess_average_cell_temperature_c", "type": "s16", "gain": 10, "value": 18.5}
+  },
+  "holding_registers": {
+    "40029": {"name": "plant_remote_ems_enable", "type": "u16", "value": 1},
+    "40031": {"name": "plant_remote_ems_control_mode", "type": "u16", "value": 2},
+    "40032": {"name": "plant_ess_max_charging_limit_kw", "type": "u32", "gain": 1000, "value": 10.0},
+    "40034": {"name": "plant_ess_max_discharging_limit_kw", "type": "u32", "gain": 1000, "value": 10.0},
+    "40046": {"name": "plant_backup_soc_pct", "type": "u16", "gain": 10, "value": 20.0}
+  }
+}
