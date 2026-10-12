@@ -14,7 +14,7 @@ protocol V2.9. Other models and firmware may differ: check before relying on any
 - A **wrong unit ID times out**; it doesn't return Modbus exception 11.
 - The inverter ignores ping and has no open port besides 502.
 - The **LoadHub** (the North American backup gateway, with the smart circuits) is on the network
-  but has no Modbus and no open TCP ports; it talks to the inverter over RS485.
+  but has no Modbus and no open TCP ports; it talks to the inverter via as yet unknown means.
 
 ## Reading
 
