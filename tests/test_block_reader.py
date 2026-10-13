@@ -154,7 +154,7 @@ def test_strict_raises_on_a_rejected_block(server):
 
 def test_wrong_unit_id_times_out_like_the_real_device(full_server):
     # The real SigenStor doesn't answer for a unit ID it doesn't have; nor does the fake.
-    silent = functools.partial(ModbusClient, "127.0.0.1", full_server.port, 9, 0.5)
+    silent = functools.partial(ModbusClient, "127.0.0.1", full_server.port, 9, 0.2)
     with pytest.raises(ConnectionFailed, match="timed out"):
         BlockReader(silent).read_all()
 
@@ -180,7 +180,7 @@ def test_inverter_blocks_match_single_reads(both_server, strict):
 
 def test_connection_failure_raises():
     with pytest.raises(ConnectionFailed):
-        BlockReader(functools.partial(ModbusClient, "127.0.0.1", 9, 247, 1.0)).read_all()
+        BlockReader(functools.partial(ModbusClient, "127.0.0.1", 9, 247, 0.2)).read_all()
 
 
 def test_subset_of_registers():

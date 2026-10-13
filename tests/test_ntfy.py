@@ -34,7 +34,7 @@ def fake_ntfy():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.requests, server.status = [], 200
     server.url = f"http://127.0.0.1:{server.server_address[1]}"
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
     yield server
     server.shutdown()
     server.server_close()
@@ -83,24 +83,24 @@ def test_send(fake_ntfy):
         ntfy.send(alerts, "x", priority="loud")
 
 
-def test_post_says_how_it_went(fake_ntfy):
+def test_post_says_how_it_went(fake_ntfy, hangs_up):
     fake_ntfy.status = 429
     a = ntfy.post(Alerts(TOPIC, fake_ntfy.url), "x")
     assert (a.ok, a.http_code, a.ntfy_id) == (False, 429, None)
     assert a.error == '{"code":42901,"error":"limit reached"}'                 # the whole response body
-    a = ntfy.post(Alerts(TOPIC, "http://127.0.0.1:1"), "x", timeout=2)
+    a = ntfy.post(Alerts(TOPIC, f"http://127.0.0.1:{hangs_up}"), "x", timeout=2)
     assert (a.ok, a.http_code) == (False, None) and a.error
     s = ntfy.suppressed("still cold", kind="cold", priority="high")
     assert (s.was_suppressed, s.http_code, s.error, s.kind) == (True, None, None, "cold")
 
 
-def test_send_failures(fake_ntfy):
+def test_send_failures(fake_ntfy, hangs_up):
     fake_ntfy.status = 429
     with pytest.raises(ConnectionFailed, match=r"refused the message: HTTP 429 .*limit reached") as e:
         ntfy.send(Alerts(TOPIC, fake_ntfy.url), "x")
     assert TOPIC not in str(e.value) and "someone-solar-********" in str(e.value)
     with pytest.raises(ConnectionFailed, match="couldn't reach ntfy"):
-        ntfy.send(Alerts(TOPIC, "http://127.0.0.1:1"), "x", timeout=2)
+        ntfy.send(Alerts(TOPIC, f"http://127.0.0.1:{hangs_up}"), "x", timeout=2)
 
 
 # ---------- the command ----------
@@ -114,12 +114,13 @@ def test_ntfy_test_command(run, tmp_path, fake_ntfy):
     assert code == ExitCode.CONNECTION and "HTTP 500" in err and TOPIC not in err
 
 
-def test_ntfy_server_flag(run, tmp_path, fake_ntfy):
-    cfg = config_file(tmp_path, {"ntfy_topic": TOPIC, "ntfy_server": "http://127.0.0.1:1"})     # nothing there
+def test_ntfy_server_flag(run, tmp_path, fake_ntfy, hangs_up):
+    down = f"http://127.0.0.1:{hangs_up}"
+    cfg = config_file(tmp_path, {"ntfy_topic": TOPIC, "ntfy_server": down})
     code, out, _ = run("ntfy-test", "--config", cfg, "--ntfy-server", fake_ntfy.url + "/")
     assert code == ExitCode.OK and out.startswith(f"sent to {fake_ntfy.url}/someone-solar-********")
     code, _, err = run("ntfy-test", "--config", cfg)
-    assert code == ExitCode.CONNECTION and "couldn't reach ntfy at http://127.0.0.1:1/" in err
+    assert code == ExitCode.CONNECTION and f"couldn't reach ntfy at {down}/" in err
     with pytest.raises(SystemExit) as e:
         run("ntfy-test", "--config", cfg, "--ntfy-server", "localhost:8051")
     assert e.value.code == ExitCode.USAGE

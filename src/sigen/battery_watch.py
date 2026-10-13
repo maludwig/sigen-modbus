@@ -22,8 +22,16 @@ and, whether or not there's a heater:
 - charge limited: the BMS lets the battery charge at only a fraction of its rated power (the cold's real cost);
 - below reserve: SOC under the backup reserve, which the grid normally prevents (so: the grid is down, or something
   drains the battery faster than the grid refills it);
-- off-grid: the plant's grid status, or the "Grid power outage" alarm;
-- alarm bits: e.g. the ESS "Under-temperature" alarm.
+- alarm: any bit of the plant's six alarm registers, in plain words (PCS, battery, gateway, DC charger, plant);
+  the grid going down is one of them (PCS alarms 1 bit 9, or the plant's on/off-grid status);
+- fault: the plant or the inverter reports the running state Fault (e.g. after the rapid-shutdown button).
+
+Unless the system is Running its battery readings aren't real: in Fault (2026-10-12, the rapid-shutdown button) the
+deliverable energy reads 0 and minutes later the temperatures read exactly 25.0 °C; powering up (2026-10-13) it
+reports Shutdown with every temperature 0.0 °C, then Standby with the deliverable energy still 0, for ~6 minutes. In
+normal operation the state is always Running, nights included (6 days of readings). So detect_all() shows every
+detector except detect_fault only the readings from a minute after the last one that wasn't Running: none at all
+while the system is in Fault, shut down or starting.
 
 Measured on one system on cold nights: with no sun and the battery idle the inverter draws 26 W from the grid
 (σ 2 W) and the DC balance (PV − battery − AC) is the same 26 W; discharging at 1–3 kW it's 150–220 W (conversion
@@ -34,7 +42,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from sigen.registers import ESS_ALARMS
+from sigen import registers
 
 # Columns of the scaled views, and the outside air (Open-Meteo's temperature_2m, interpolated to the reading times).
 COOLEST = "inverter_ess_min_cluster_temperature_c"
@@ -49,15 +57,63 @@ DELIVERABLE = "plant_ess_available_max_discharging_capacity_kwh"    # kWh the ba
 MAX_CHARGE = "plant_ess_available_max_charging_power_kw"           # what the BMS allows now
 RATED_CHARGE = "plant_ess_rated_charging_power_kw"
 GRID_STATUS = "plant_on_off_grid_status"                        # 0 on-grid, 1 off-grid (auto), 2 off-grid (manual)
-PCS_ALARMS = "inverter_alarm_1"                                 # bit 9: grid power outage
-ESS_ALARM_BITS = "inverter_alarm_3"                             # bit 4: under-temperature
+PLANT_STATE = "plant_running_state"                             # 2 = Fault (registers.RUNNING_STATES)
+INVERTER_STATE = "inverter_running_state"
 AIR = "air_temperature_c"
+RUNNING, FAULT = 1, 2
+
+# The plant's merged alarm registers (merged across inverters): column -> (short key, the protocol's name, bits).
+ALARM_REGISTERS = {
+    "plant_merged_alarm_1": ("pcs1", "PCS alarms 1", registers.PCS_ALARMS_1),
+    "plant_merged_alarm_2": ("pcs2", "PCS alarms 2", registers.PCS_ALARMS_2),
+    "plant_merged_alarm_3": ("ess", "ESS alarms", registers.ESS_ALARMS),
+    "plant_merged_alarm_4": ("gateway", "Gateway alarms", registers.GATEWAY_ALARMS),
+    "plant_merged_alarm_5": ("dc_charger", "DC charger alarms", registers.DC_CHARGER_ALARMS),
+    "plant_merged_alarm_6": ("plant", "Plant alarms 1", registers.PLANT_ALARMS_1),
+}
+# Each alarm bit in plain words, for the notification's title. Written from the protocol's names (kept in the message
+# for looking things up); a bit missing here falls back to the protocol's name.
+ALARM_TEXT = {
+    ("pcs1", 0): "Inverter software versions don't match", ("pcs1", 1): "Low insulation resistance on the PV side",
+    ("pcs1", 2): "The inverter is overheating", ("pcs1", 3): "Inverter equipment fault",
+    ("pcs1", 4): "System grounding fault", ("pcs1", 5): "A PV string's voltage is too high",
+    ("pcs1", 6): "A PV string is wired backwards", ("pcs1", 7): "Current is flowing back into a PV string",
+    ("pcs1", 8): "Arc fault detected (AFCI)", ("pcs1", 9): "The grid is down",
+    ("pcs1", 10): "Grid voltage too high", ("pcs1", 11): "Grid voltage too low",
+    ("pcs1", 12): "Grid frequency too high", ("pcs1", 13): "Grid frequency too low",
+    ("pcs1", 14): "Grid voltage unbalanced between the legs", ("pcs1", 15): "Too much DC in the inverter's AC output",
+    ("pcs2", 0): "Leakage current too high", ("pcs2", 1): "Internal communication fault",
+    ("pcs2", 2): "Internal protection tripped", ("pcs2", 3): "The arc-fault detector failed its self-test",
+    ("pcs2", 4): "Off-grid protection tripped",
+    ("pcs2", 5): "Stopped by hand: the rapid-shutdown button, or a manual stop",
+    ("pcs2", 7): "Grid phases in the wrong order", ("pcs2", 8): "Short circuit to ground (PE)",
+    ("pcs2", 9): "The inverter failed to soft-start",
+    ("ess", 0): "Battery software versions don't match", ("ess", 1): "Battery: low insulation resistance to ground",
+    ("ess", 2): "The battery is too hot", ("ess", 3): "Battery equipment fault", ("ess", 4): "The battery is too cold",
+    ("ess", 5): "Battery internal protection tripped", ("ess", 6): "BATTERY THERMAL RUNAWAY",
+    ("gateway", 0): "Gateway software versions don't match", ("gateway", 1): "The gateway is overheating",
+    ("gateway", 2): "Gateway equipment fault", ("gateway", 3): "Too much leakage current on the backup output",
+    ("gateway", 4): "Neutral grounding fault", ("gateway", 5): "Grid wiring: phases in the wrong order",
+    ("gateway", 6): "Inverter wiring: phases in the wrong order", ("gateway", 7): "A grid phase is missing",
+    ("dc_charger", 0): "DC charger software versions don't match",
+    ("dc_charger", 1): "DC charger: low insulation resistance to ground", ("dc_charger", 2): "The DC charger is overheating",
+    ("dc_charger", 3): "DC charger equipment fault", ("dc_charger", 4): "DC charging fault",
+    ("dc_charger", 5): "DC charger protection tripped",
+    ("plant", 0): "Lost contact with the gateway", ("plant", 1): "Lost contact with the grid meter",
+    ("plant", 2): "Lost contact with the AC power sensor",
+    ("plant", 6): "Export limit exceeded: hard protection tripped", ("plant", 8): "The generator failed to start",
+    ("plant", 10): "CLS fault",
+}
+URGENT_ALARMS = {("pcs1", 9), ("ess", 6)}       # the grid down; thermal runaway
+GRID_DOWN_KEY = "alarm:pcs1.9"                   # the off-grid status shares it: one grid outage, one alert
+
 COLUMNS = (COOLEST, WARMEST, AVERAGE_CELL, PV, BATTERY, INVERTER_AC, SOC, RESERVE, DELIVERABLE, MAX_CHARGE,
-           RATED_CHARGE, GRID_STATUS, PCS_ALARMS, ESS_ALARM_BITS)      # every view column the detectors read
+           RATED_CHARGE, GRID_STATUS, PLANT_STATE, INVERTER_STATE, *ALARM_REGISTERS)   # every view column read
 
 STANDBY_KW = 0.026          # the inverter's DC-side draw with no sun and the battery idle (measured, above)
 MAX_GAP = datetime.timedelta(minutes=2)     # readings further apart than this break a run (poll is every 15 s)
 NOT_AVAILABLE = 0xFFFF      # an alarm register reading all ones means "not available", not 16 alarms
+AFTER_FAULT = datetime.timedelta(minutes=1)  # readings this soon after one not Running aren't trusted either
 
 
 @dataclass(frozen=True)
@@ -83,20 +139,24 @@ class Window:
 
 @dataclass(frozen=True)
 class Event:
-    kind: str                       # "plateau", "warming", "sawtooth", "unexplained_power", "cold", …
+    kind: str                       # "plateau", "warming", "sawtooth", "unexplained_power", "cold", "alarm", …
     start: datetime.datetime
     end: datetime.datetime
-    summary: str                    # one line, for a notification
+    summary: str                    # one line, for a notification (no clock times: the sender appends the start)
     details: Dict[str, float] = field(default_factory=dict)
+    key: Optional[str] = None       # what one event and its cooldown are keyed by, when finer than the kind
+    title: Optional[str] = None     # the notification's title, when the kind's fixed one won't do
+    priority: Optional[str] = None  # likewise, the ntfy priority
+
+    @property
+    def ident(self) -> str:
+        return self.key or self.kind
 
 
 # ---------- helpers ----------
 def _hours(a: datetime.datetime, b: datetime.datetime) -> float:
     return (b - a).total_seconds() / 3600
 
-
-def _fmt(t: datetime.datetime) -> str:
-    return t.strftime("%H:%M")
 
 
 def runs(times: Sequence[datetime.datetime], ok: Sequence[bool],
@@ -202,8 +262,8 @@ def detect_plateau(w: Window, column: str = COOLEST, tolerance: float = 0.1,
             if above < min_above_air and a0 - min(known) < min_air_drop:
                 continue
         events.append(Event("plateau", w.times[i], w.times[j],
-                            f"{column} held at {min(held):.1f}–{max(held):.1f} °C for {_hours(w.times[i], w.times[j]):.1f} h "
-                            f"({_fmt(w.times[i])}–{_fmt(w.times[j])}), {note}",
+                            f"{column} held at {min(held):.1f}–{max(held):.1f} °C for {_hours(w.times[i], w.times[j]):.1f} h, "
+                            f"{note}",
                             {"low_c": min(held), "high_c": max(held), "hours": _hours(w.times[i], w.times[j])}))
     return events
 
@@ -214,8 +274,8 @@ def detect_warming(w: Window, column: str = COOLEST, min_rise: float = 0.3,
     """The cells warmed by at least `min_rise` °C within `max_rise_duration` while quiet (no sun, inverter idle),
     with the outside air at least `air_margin` °C below them (so warmer surroundings can't explain it: a warm
     wind can warm an unheated space fast). A zigzag with a `min_rise` threshold finds each rise ("tooth"); the
-    0.1 °C steps of the sensor stay below it. One event per quiet stretch: "warming" for one tooth, "sawtooth" for several (how many,
-    how far apart). Without air data the rises are reported anyway, saying so."""
+    0.1 °C steps of the sensor stay below it. One event per quiet stretch: "warming" for one tooth, "sawtooth" for
+    several (how many, how far apart). Without air data the rises are reported anyway, saying so."""
     temps, air = w[column], w[AIR]
     ok = [q and v is not None for q, v in zip(quiet(w), temps)]
     events = []
@@ -254,14 +314,14 @@ def detect_warming(w: Window, column: str = COOLEST, min_rise: float = 0.3,
         if len(kept) == 1:
             (t0, t1), = kept
             text = (f"{column} rose {rises[0]:.1f} °C ({temps[t0]:.1f} → {temps[t1]:.1f}) in "
-                    f"{(w.times[t1] - w.times[t0]).total_seconds() / 60:.0f} min at {_fmt(w.times[t0])} with no sun "
-                    f"and the inverter idle, {note}")
+                    f"{(w.times[t1] - w.times[t0]).total_seconds() / 60:.0f} min with no sun and the inverter idle, "
+                    f"{note}")
             events.append(Event("warming", w.times[t0], w.times[t1], text, details))
         else:
             period = _hours(w.times[kept[0][0]], w.times[kept[-1][0]]) / (len(kept) - 1) * 60
             details["period_min"] = period
             text = (f"{column} sawtooth: {len(kept)} rises of ~{details['mean_rise_c']:.1f} °C every ~{period:.0f} "
-                    f"min ({_fmt(w.times[first])}–{_fmt(w.times[last])}, low {details['low_c']:.1f} °C), {note}")
+                    f"min over {_hours(w.times[first], w.times[last]):.1f} h, low {details['low_c']:.1f} °C, {note}")
             events.append(Event("sawtooth", w.times[first], w.times[last], text, details))
     return events
 
@@ -301,8 +361,8 @@ def detect_unexplained_power(w: Window, standby_kw: float = STANDBY_KW, min_exce
         source = "the grid" if -w[INVERTER_AC][i] > abs(w[BATTERY][i]) else "the battery"
         events.append(Event("unexplained_power", w.times[i], w.times[j],
                             f"the inverter's DC side drew {mean * 1000:.0f} W (standby {standby_kw * 1000:.0f} W) for "
-                            f"{(w.times[j] - w.times[i]).total_seconds() / 60:.1f} min from {_fmt(w.times[i])}, "
-                            f"from {source}: {kwh * 1000:.0f} Wh",
+                            f"{(w.times[j] - w.times[i]).total_seconds() / 60:.1f} min, from {source}: "
+                            f"{kwh * 1000:.0f} Wh",
                             {"mean_kw": mean, "peak_kw": max(used), "excess_kwh": kwh}))
     return events
 
@@ -360,8 +420,9 @@ def detect_cold(w: Window, column: str = COOLEST, threshold: float = 5.0,
     if eta > horizon:
         return []
     return [Event("cooling", now, now + eta,
-                  f"{column} is {latest:.1f} °C, falling {-slope:.2f} °C/h: {threshold:g} °C in ~{_hours(now, now + eta):.1f} h "
-                  f"(~{_fmt(now + eta)})", {"value_c": latest, "slope_c_per_h": slope, "hours_to_threshold": _hours(now, now + eta)})]
+                  f"{column} is {latest:.1f} °C, falling {-slope:.2f} °C/h: {threshold:g} °C in "
+                  f"~{_hours(now, now + eta):.1f} h",
+                  {"value_c": latest, "slope_c_per_h": slope, "hours_to_threshold": _hours(now, now + eta)})]
 
 
 def detect_cold_charging(w: Window, threshold: float = 2.0, min_kw: float = 0.1,
@@ -378,7 +439,7 @@ def detect_cold_charging(w: Window, threshold: float = 2.0, min_kw: float = 0.1,
         charging = power[i:j + 1]
         events.append(Event("cold_charging", w.times[i], w.times[j],
                             f"the battery charged at up to {max(charging):.2f} kW with the coolest cluster at "
-                            f"{min(temps[i:j + 1]):.1f} °C ({_fmt(w.times[i])}–{_fmt(w.times[j])})",
+                            f"{min(temps[i:j + 1]):.1f} °C for {(w.times[j] - w.times[i]).total_seconds() / 60:.0f} min",
                             {"max_kw": max(charging), "coolest_c": min(temps[i:j + 1])}))
     return events
 
@@ -402,8 +463,8 @@ def detect_charge_limited(w: Window, min_fraction: float = 0.5, rated_kw: Option
         cells = f", coolest cluster {min(known):.1f} °C" if known else ""
         r = rated_kw if rated_kw is not None else rated[i]
         events.append(Event("charge_limited", w.times[i], w.times[j],
-                            f"the battery may charge at only {lowest:.2f} kW of {r:g} kW ({_fmt(w.times[i])}–"
-                            f"{_fmt(w.times[j])}, SOC {socs[i]:.0f} %){cells}", {"min_kw": lowest}))
+                            f"the battery may charge at only {lowest:.2f} kW of {r:g} kW (SOC {socs[i]:.0f} %){cells}",
+                            {"min_kw": lowest}))
     return events
 
 
@@ -421,45 +482,100 @@ def detect_below_reserve(w: Window, margin: float = 2.0,
         off = any(s not in (None, 0) for s in status[i:j + 1])
         why = "the grid is down (off-grid status)" if off else "the grid status says on-grid"
         events.append(Event("below_reserve", w.times[i], w.times[j],
-                            f"SOC {socs[j]:.1f} % is below the {reserves[j]:g} % backup reserve since {_fmt(w.times[i])}: "
-                            f"{why}", {"soc_pct": socs[j], "reserve_pct": reserves[j], "off_grid": float(off)}))
+                            f"SOC {socs[j]:.1f} % is below the {reserves[j]:g} % backup reserve for "
+                            f"{(w.times[j] - w.times[i]).total_seconds() / 60:.0f} min: {why}",
+                            {"soc_pct": socs[j], "reserve_pct": reserves[j], "off_grid": float(off)}))
     return events
 
 
-def detect_off_grid(w: Window) -> List[Event]:
-    """The plant says it's off-grid (30009 ≠ 0), or the inverter raises "Grid power outage" (alarm 1, bit 9)."""
-    status, alarms = w[GRID_STATUS], w[PCS_ALARMS]
-    ok = [(s is not None and s != 0) or (a is not None and a != NOT_AVAILABLE and int(a) >> 9 & 1)
-          for s, a in zip(status, alarms)]
-    socs = w[SOC]
+# ---------- alarms and faults ----------
+def alarm_bits(value) -> List[int]:
+    """The bits set in an alarm register's value; none for "not available" (all ones) or no value."""
+    if value is None or value == NOT_AVAILABLE:
+        return []
+    return [bit for bit in range(16) if int(value) >> bit & 1]
+
+
+def alarm_text(short: str, name: str, flags: Mapping[int, str], bit: int) -> Tuple[str, str]:
+    """(plain title, the protocol's own words) for one alarm bit."""
+    protocol = f"{name} bit {bit}: {flags.get(bit, 'not defined by the protocol')}"
+    return ALARM_TEXT.get((short, bit), flags.get(bit, f"Undefined alarm ({name} bit {bit})")), protocol
+
+
+def active_alarms(w: Window, k: int) -> List[str]:
+    """Every alarm set in reading k, in plain words with the protocol's words after them."""
+    out = []
+    for column, (short, name, flags) in ALARM_REGISTERS.items():
+        for bit in alarm_bits(w[column][k]):
+            title, protocol = alarm_text(short, name, flags, bit)
+            out.append(f"{title} ({protocol})")
+    return out
+
+
+def detect_alarms(w: Window) -> List[Event]:
+    """Stretches where an alarm bit is set, one event per bit, titled in plain words; and stretches where the plant
+    says it's off-grid (30009 ≠ 0), keyed like the "grid down" alarm bit, so one outage is one alert."""
     events = []
-    for i, j in runs(w.times, ok):
-        soc = f", SOC {socs[j]:.1f} %" if socs[j] is not None else ""
-        events.append(Event("off_grid", w.times[i], w.times[j],
-                            f"off-grid since {_fmt(w.times[i])} ({_hours(w.times[i], w.times[j]) * 60:.0f} min){soc}",
-                            {"minutes": _hours(w.times[i], w.times[j]) * 60}))
+    for column, (short, name, flags) in ALARM_REGISTERS.items():
+        values = w[column]
+        for bit in sorted({b for v in values for b in alarm_bits(v)}):
+            ok = [bit in alarm_bits(v) for v in values]
+            title, protocol = alarm_text(short, name, flags, bit)
+            for i, j in runs(w.times, ok):
+                events.append(Event("alarm", w.times[i], w.times[j], f"{title}. {protocol}", {"bit": bit},
+                                    key=f"alarm:{short}.{bit}", title=title,
+                                    priority="urgent" if (short, bit) in URGENT_ALARMS else None))
+    status = w[GRID_STATUS]
+    for i, j in runs(w.times, [s is not None and s != 0 for s in status]):
+        label = registers.GRID_STATUS.get(int(status[j]), f"status {status[j]:g}")
+        events.append(Event("alarm", w.times[i], w.times[j],
+                            f"The grid is down. The plant's on/off-grid status: {label}", {"status": status[j]},
+                            key=GRID_DOWN_KEY, title="The grid is down", priority="urgent"))
     return events
 
 
-def detect_alarm_bits(w: Window, column: str = ESS_ALARM_BITS, flags: Mapping[int, str] = ESS_ALARMS,
-                      bits: Optional[Sequence[int]] = (2, 4)) -> List[Event]:
-    """Stretches where an alarm bit is set: by default the ESS's over- and under-temperature (bits 2 and 4);
-    `bits=None` for every bit. All ones is "not available" and ignored."""
-    values = w[column]
+def in_fault(w: Window) -> List[bool]:
+    return [FAULT in (p, i) for p, i in zip(w[PLANT_STATE], w[INVERTER_STATE])]
+
+
+def not_running(w: Window) -> List[bool]:
+    """Readings where the plant or the inverter reports a state other than Running (Fault, Shutdown, Standby, …). A
+    missing state (a plant-only setup, or before the register was logged) doesn't count."""
+    return [any(s is not None and s != RUNNING for s in (p, i)) for p, i in zip(w[PLANT_STATE], w[INVERTER_STATE])]
+
+
+def detect_fault(w: Window) -> List[Event]:
+    """Stretches where the plant or the inverter reports the running state Fault. The summary lists the alarms set
+    at the stretch's last reading (a fault's alarms say what it is: e.g. the rapid-shutdown button)."""
     events = []
-    for bit in (bits if bits is not None else range(16)):
-        ok = [v is not None and v != NOT_AVAILABLE and int(v) >> bit & 1 == 1 for v in values]
-        for i, j in runs(w.times, ok):
-            events.append(Event("alarm", w.times[i], w.times[j],
-                                f"{column}: {flags.get(bit, f'undefined bit {bit}')} ({_fmt(w.times[i])}–{_fmt(w.times[j])})",
-                                {"bit": bit}))
+    for i, j in runs(w.times, in_fault(w)):
+        alarms = active_alarms(w, j)
+        why = "; ".join(alarms) if alarms else "no alarm bit set"
+        events.append(Event("fault", w.times[i], w.times[j],
+                            f"The SigenStor reports a fault, for {_hours(w.times[i], w.times[j]) * 60:.0f} min so "
+                            f"far. Alarms: {why}", {"minutes": _hours(w.times[i], w.times[j]) * 60}))
     return events
+
+
+def after_faults(w: Window) -> Window:
+    """The readings the other detectors may trust: those from AFTER_FAULT past the last reading that wasn't Running
+    on (always Running: all of them; not Running now: none). Not Running, the battery's values aren't real (deliverable
+    energy 0; 25.0 °C in a fault, 0.0 °C while starting), and the first readings after may not be either."""
+    stopped = [t for t, f in zip(w.times, not_running(w)) if f]
+    if not stopped:
+        return w
+    cutoff = stopped[-1] + AFTER_FAULT
+    keep = [k for k, t in enumerate(w.times) if t > cutoff]
+    return Window([w.times[k] for k in keep], {c: [v[k] for k in keep] for c, v in w.columns.items()})
 
 
 DETECTORS = (detect_plateau, detect_warming, detect_unexplained_power, detect_idle_drain, detect_cold,
-             detect_cold_charging, detect_charge_limited, detect_below_reserve, detect_off_grid, detect_alarm_bits)
+             detect_cold_charging, detect_charge_limited, detect_below_reserve, detect_alarms)
 
 
 def detect_all(w: Window) -> List[Event]:
-    """Every detector with its defaults, in time order."""
-    return sorted((e for d in DETECTORS for e in d(w)), key=lambda e: (e.start, e.kind))
+    """detect_fault on every reading; every other detector, with its defaults, only on after_faults(w). In time
+    order."""
+    trusted = after_faults(w)
+    found = detect_fault(w) + [e for d in DETECTORS for e in d(trusted)]
+    return sorted(found, key=lambda e: (e.start, e.kind))

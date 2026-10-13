@@ -301,12 +301,13 @@ def sync_register_meta(conn, log=lambda msg: None) -> None:
     plan = _plan(conn)
     if plan.problems:
         raise SchemaNotReady("register_meta can't be synced:\n  " + "\n  ".join(plan.problems))
-    for reg in plan.inserts:
-        conn.execute("INSERT INTO register_meta (address, name, type, gain, unit, device) "
-                     "VALUES (%s, %s, %s, %s, %s, %s)", (reg.address, *_meta_row(reg)))
-    for reg in plan.updates:
-        conn.execute("UPDATE register_meta SET name = %s, type = %s, gain = %s, unit = %s, device = %s "
-                     "WHERE address = %s", (*_meta_row(reg), reg.address))
+    with conn.cursor() as cur:          # executemany: one pipelined batch, not a round trip per register
+        if plan.inserts:
+            cur.executemany("INSERT INTO register_meta (address, name, type, gain, unit, device) "
+                            "VALUES (%s, %s, %s, %s, %s, %s)", [(reg.address, *_meta_row(reg)) for reg in plan.inserts])
+        if plan.updates:
+            cur.executemany("UPDATE register_meta SET name = %s, type = %s, gain = %s, unit = %s, device = %s "
+                            "WHERE address = %s", [(*_meta_row(reg), reg.address) for reg in plan.updates])
     if plan.inserts or plan.updates:
         log(f"register_meta: {len(plan.inserts)} added, {len(plan.updates)} updated")
 
@@ -381,7 +382,6 @@ def status(conn, migrations: Optional[Sequence[Migration]] = None) -> dict:
                 "SELECT count(*) FILTER (WHERE NOT was_suppressed AND error IS NULL), count(error), "
                 "count(*) FILTER (WHERE was_suppressed), max(alerted_at) FROM alert_log").fetchone()
         out["tables"] = table_sizes(conn)
-        out["database_bytes"] = conn.execute("SELECT pg_database_size(current_database())").fetchone()[0]
     return out
 
 

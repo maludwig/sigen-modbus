@@ -47,13 +47,13 @@ def test_read_reports_unreadable_registers(run, server):
 
 
 def test_read_connection_failure(run):
-    code, _, err = run("read", "--ip", "127.0.0.1", "--port", free_port(), "--timeout", 1)
+    code, _, err = run("read", "--ip", "127.0.0.1", "--port", free_port(), "--timeout", 0.2)
     assert code == ExitCode.CONNECTION and "couldn't connect" in err
 
 
 def test_read_wrong_unit_times_out(run, server):
     # Like the real device, a unit ID with nothing behind it simply doesn't answer.
-    code, _, err = run("read", *net(server), "--unit-id", 9, "--timeout", 0.5)
+    code, _, err = run("read", *net(server), "--unit-id", 9, "--timeout", 0.2)
     assert code == ExitCode.CONNECTION and "timed out" in err
 
 
@@ -63,7 +63,7 @@ def test_read_uses_the_found_config_unless_no_config(run, server, tmp_path, monk
     f = tmp_path / "found.json"
     f.write_text(json.dumps({"devices": {"inverter": {"units": [1]}}}), encoding="utf-8")
     monkeypatch.setenv("SIGEN_CONFIG", str(f))
-    code, _, err = run("read", *net(server), "--timeout", 0.5)
+    code, _, err = run("read", *net(server), "--timeout", 0.2)
     assert code == ExitCode.CONNECTION and "timed out" in err
     code, out, _ = run("read", *net(server), "--timeout", 0.5, "--no-config")
     assert code == ExitCode.OK and "99.9%" in out
@@ -104,7 +104,7 @@ def test_capture_and_read_json_with_inverter_units(run, both_server, tmp_path):
 
 
 def test_scan_finds_fake(run, server):
-    code, out, _ = run("scan", "--ip-range", "127.0.0.1-3", "--port", server.port)
+    code, out, _ = run("scan", "--ip-range", "127.0.0.1-3", "--port", server.port, "--scan-timeout", 0.2)
     assert code == ExitCode.OK and out.strip() == "127.0.0.1"
 
 
@@ -174,7 +174,7 @@ def test_write_rejected_by_device(run, rejecting_server, journal):
 
 
 def test_set_connection_failure(run, journal):
-    code, _, _ = run("set", "--ip", "127.0.0.1", "--port", free_port(), "--timeout", 1,
+    code, _, _ = run("set", "--ip", "127.0.0.1", "--port", free_port(), "--timeout", 0.2,
                      "--backup-soc", 20, "--apply", "--journal", journal)
     assert code == ExitCode.CONNECTION
 
@@ -299,7 +299,7 @@ def test_capture_name_prefix_and_never_overwrites(run, server, tmp_path, monkeyp
 
 
 def test_capture_connection_failure_writes_nothing(run, tmp_path):
-    code, _, _ = run("capture", "--ip", "127.0.0.1", "--port", free_port(), "--timeout", 1,
+    code, _, _ = run("capture", "--ip", "127.0.0.1", "--port", free_port(), "--timeout", 0.2,
                      "--out-dir", tmp_path / "caps")
     assert code == ExitCode.CONNECTION and not (tmp_path / "caps").exists()
 

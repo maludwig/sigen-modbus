@@ -211,8 +211,8 @@ When something goes wrong, `poll` carries on where it can:
 - it **stops** on a Modbus exception (exit 4: most likely a register the device doesn't support)
   or a database that rejects the data (exit 10), since retrying wouldn't help.
 
-To run it as a service, restart it on failure but not after exit 4, and start it once the clock is
-synchronised.
+To run it for good (at boot, restarted after a crash, logging to the journal), see
+[docs/RUNNING_AS_A_SERVICE.md](docs/RUNNING_AS_A_SERVICE.md).
 
 ```
 sigen dashboard [--host 0.0.0.0] [--port 8050] [--reload]
@@ -237,17 +237,23 @@ phone app. It needs `--weather` too, for the outside air temperature.
 
 | Alert | When | Priority |
 |---|---|---|
-| `off_grid` | the grid is down | urgent |
+| `fault` | the SigenStor reports a fault (e.g. the rapid-shutdown button), with its alarms in plain words | urgent |
+| `alarm` | any alarm bit (inverter, battery, gateway, DC charger, plant), in plain words; the grid going down is one | high; urgent for the grid down or thermal runaway |
+| `unreachable` | no reading at all for 20 polls in a row (5 min at `--interval 15`) | high |
 | `below_reserve` | the battery is below its backup reserve | urgent |
 | `cold_charging` | charging while the coolest cells are at 2 °C or below | urgent |
 | `cold` | the coolest cells are at 5 °C or below | high |
-| `alarm` | the battery's over- or under-temperature alarm | high |
 | `plateau`, `warming`, `sawtooth` | the battery holding or gaining heat on its own while idle (a heater?) | high |
 | `unexplained_power`, `idle_drain` | power going somewhere it shouldn't while idle | high |
 | `cooling` | on track to reach 5 °C within 6 hours | default |
 
-Each event alerts once, and each kind at most once an hour; every alert, sent or held back, is
-recorded in the database.
+Each event alerts once, and each kind (each alarm bit, for `alarm`) at most once an hour. Every
+message ends with when the event began, e.g. `2026-10-12T19:49:30-06:00` (local time, the config's
+`site.timezone`). Unless the SigenStor is Running (in a fault, shut down, or starting up), its
+battery readings aren't real, so only `fault` can alert: the other alerts ignore every reading up to
+a minute after the last one that wasn't Running. One
+`unreachable` per outage; contact coming back is recorded in the database but not sent. Every
+alert, sent or held back, is recorded in the database.
 
 ```
 sigen ntfy-test [--msg "Hello world"] [--priority min|low|default|high|urgent] [--record-to-db]
@@ -412,6 +418,8 @@ or more; for anything shorter, use the power readings (`…_kw`).
 
 ## More
 
+- [docs/RUNNING_AS_A_SERVICE.md](docs/RUNNING_AS_A_SERVICE.md): `poll` (and the dashboard) as
+  systemd services on Linux, e.g. a Raspberry Pi.
 - [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md): the weather, radar and satellite data, their
   quirks and licences.
 - [docs/SIGENSTOR_NOTES.md](docs/SIGENSTOR_NOTES.md): what a real SigenStor does, beyond the

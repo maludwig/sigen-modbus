@@ -2,7 +2,7 @@
 
 ```
 pip install -e ".[dev]"      # the package (editable), plus pytest and other development tools
-pytest
+pytest                       # in parallel, a worker per CPU core (pytest-xdist); pytest -n 0 runs them one at a time
 ```
 
 Use an editable install (`-e`): a plain `pip install .` copies the code once, and later edits
@@ -45,20 +45,32 @@ tests/              pytest
 `pytest` runs everything that doesn't need a database. The database tests (migrations, polling
 end to end, the dashboard's numbers, `db query`, alerts) need a PostgreSQL database they can
 create schemas in: they use `SIGEN_TEST_DB_URL` if set, otherwise `database.test_url` from the
-repository's `config.json`, and are skipped without either. Each test works in a throwaway schema
-that's dropped afterwards, so a permanent test database works fine:
+repository's `config.json`, and are skipped without either. They work in throwaway schemas that
+are dropped afterwards, so a permanent test database works fine:
 
 ```sql
 CREATE ROLE sigen_test LOGIN PASSWORD 'PASSWORD';
 CREATE DATABASE sigen_test OWNER sigen_test;
 ```
 
-Two rules the tests follow:
+Most database tests share one schema (per pytest worker), migrated once at the start and emptied
+after each test, so they don't each pay for migrating. A test that changes the schema itself (a
+column, a table, `register_meta`) is noticed afterwards, and the schema is built again for the
+next one. Tests that need a schema of their own, not yet migrated (tests of migrating, of refusing
+an unmigrated database, or that alter the schema on purpose), are marked
+`@pytest.mark.fresh_schema`.
+
+The rules the tests follow:
 - **Every test starts with an empty config.** An autouse fixture points `SIGEN_CONFIG` at a `{}`
   file, so a test that forgets `--config` or `--ip` can't pick up your `config.json` and reach a
   real inverter. Tests of the config search itself remove the variable.
 - **Database tests take the `config` fixture and read the URL from its file**, never a URL as a
   test argument: pytest prints a failing test's arguments, and the URL holds a password.
+- **A server that's down is the `hangs_up` fixture**, a local port that closes every connection
+  at once, never a closed port: Windows retries a refused connection for about 2 s (and
+  PostgreSQL's client waits out its whole 10 s connect timeout there).
+- **No real waiting.** The `quick_polls` fixture runs `poll`'s polls back to back, and timeouts a
+  test means to hit are short (0.2 s).
 
 The device tests run against the fake server, never a real SigenStor.
 

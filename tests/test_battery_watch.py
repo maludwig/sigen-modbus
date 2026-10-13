@@ -210,27 +210,87 @@ def test_charge_limited():
     assert kinds(bw.detect_charge_limited(window(20, MAX_CHARGE=1.0, SOC=50.0), rated_kw=7.3)) == ["charge_limited"]
 
 
-def test_below_reserve_and_off_grid():
+PCS1, PCS2, ESS = "plant_merged_alarm_1", "plant_merged_alarm_2", "plant_merged_alarm_3"
+
+
+def test_below_reserve():
     assert bw.detect_below_reserve(window(PER_HOUR, SOC=82.5, RESERVE=83.0)) == []
     outage = window(PER_HOUR, SOC=lambda k: 83.0 - 10 * k / PER_HOUR, RESERVE=83.0, GRID_STATUS=1)
     events = bw.detect_below_reserve(outage)
     assert kinds(events) == ["below_reserve"] and "the grid is down" in events[0].summary
     drained = window(PER_HOUR, SOC=lambda k: 83.0 - 10 * k / PER_HOUR, RESERVE=83.0, GRID_STATUS=0)
     assert "says on-grid" in bw.detect_below_reserve(drained)[0].summary
-    assert kinds(bw.detect_off_grid(outage)) == ["off_grid"]
-    alarm = window(40, PCS_ALARMS=lambda k: 1 << 9 if k >= 20 else 0, GRID_STATUS=0)
-    events = bw.detect_off_grid(alarm)
-    assert kinds(events) == ["off_grid"] and events[0].start == T0 + 20 * STEP
-    assert bw.detect_off_grid(window(40, PCS_ALARMS=0xFFFF, GRID_STATUS=0)) == []
 
 
-def test_alarm_bits():
-    events = bw.detect_alarm_bits(window(40, ESS_ALARM_BITS=lambda k: 1 << 4 if 10 <= k < 30 else 0))
-    assert [e.summary.split(": ")[1].split(" (")[0] for e in events] == ["Under-temperature"]
-    assert (events[0].start, events[0].end) == (T0 + 10 * STEP, T0 + 29 * STEP)
-    assert bw.detect_alarm_bits(window(40, ESS_ALARM_BITS=0xFFFF)) == []
-    assert bw.detect_alarm_bits(window(40, ESS_ALARM_BITS=1)) == []                        # bit 0: not watched
-    assert kinds(bw.detect_alarm_bits(window(40, ESS_ALARM_BITS=1), bits=None)) == ["alarm"]
+def test_every_alarm_bit_in_plain_words():
+    w = window(40, **{PCS2: lambda k: 1 << 5 if 10 <= k < 30 else 0, ESS: lambda k: (1 << 4) | (1 << 6)})
+    events = sorted(bw.detect_alarms(w), key=lambda e: e.ident)
+    assert [e.ident for e in events] == ["alarm:ess.4", "alarm:ess.6", "alarm:pcs2.5"]
+    rsd = events[2]
+    assert rsd.title == "Stopped by hand: the rapid-shutdown button, or a manual stop" and rsd.priority is None
+    assert rsd.summary.endswith("PCS alarms 2 bit 5: Manual operation protection")      # the protocol's words too
+    assert (rsd.start, rsd.end) == (T0 + 10 * STEP, T0 + 29 * STEP)
+    assert events[0].title == "The battery is too cold" and events[1].priority == "urgent"   # thermal runaway
+    assert bw.detect_alarms(window(40, **{PCS1: 0xFFFF})) == []                         # "not available"
+    undefined, = bw.detect_alarms(window(5, **{PCS2: 1 << 6}))                          # a gap in the protocol
+    assert undefined.title == "Undefined alarm (PCS alarms 2 bit 6)"
+
+
+def test_the_grid_down_is_one_alarm_whichever_way_it_shows():
+    status = bw.detect_alarms(window(40, GRID_STATUS=1))
+    bit = bw.detect_alarms(window(40, **{PCS1: 1 << 9}))
+    assert [e.ident for e in status] == [e.ident for e in bit] == [bw.GRID_DOWN_KEY]
+    assert status[0].title == bit[0].title == "The grid is down" and status[0].priority == "urgent"
+    assert "Off-grid (auto)" in status[0].summary
+
+
+# ---------- faults: the rapid-shutdown button, as it happened on 2026-10-12 ----------
+def rsd_night(fault_from, fault_until=None, n=4 * PER_HOUR, air=-10.0):
+    """A quiet night; from reading fault_from the plant reports Fault (PCS alarms 2 bit 5): the deliverable energy
+    reads 0 at once, and 20 readings (5 min) later the three temperatures read exactly 25.0. Recovered (or not) at
+    fault_until."""
+    def faulty(k):
+        return fault_from <= k and (fault_until is None or k < fault_until)
+
+    def temp(real):
+        return lambda k: 25.0 if faulty(k) and k >= fault_from + 20 else real
+    return window(n, PLANT_STATE=lambda k: 2 if faulty(k) else 1, INVERTER_STATE=lambda k: 2 if faulty(k) else 1,
+                  **{PCS2: lambda k: 1 << 5 if faulty(k) else 0},
+                  DELIVERABLE=lambda k: 0.0 if faulty(k) else 11.44, SOC=73.0, RESERVE=73.0,
+                  COOLEST=temp(14.8), WARMEST=temp(21.3), AVERAGE_CELL=temp(18.0), AIR=air)
+
+
+def test_during_a_fault_only_the_fault_alerts():
+    w = rsd_night(fault_from=PER_HOUR)                  # the fault started 3 h ago and is still going on
+    assert kinds(bw.detect_idle_drain(w)) == ["idle_drain"]                   # what fired on 2026-10-12 …
+    assert kinds(bw.detect_plateau(w)) == ["plateau"]                         # … and what would have next
+    events = bw.detect_all(w)
+    assert kinds(events) == ["fault"]
+    assert "Stopped by hand: the rapid-shutdown button" in events[0].summary and events[0].start == T0 + PER_HOUR * STEP
+    assert len(bw.after_faults(w)) == 0
+
+
+def test_powering_up_is_hidden_too():
+    """As on 2026-10-13: Shutdown with every temperature 0.0 °C, then Standby with real temperatures but the deliverable
+    energy still 0, then Running. The 0.0 °C sent a "cold" alert; nothing should until a minute into Running."""
+    state = lambda k: 3 if k < 2 else 0 if k < 24 else 1                                    # noqa: E731
+    temps = lambda k: 0.0 if k < 3 else 5.8                                                 # noqa: E731
+    w = window(40, PLANT_STATE=state, INVERTER_STATE=state, COOLEST=temps, WARMEST=temps, AVERAGE_CELL=temps,
+               DELIVERABLE=lambda k: 0.0 if k < 24 else 11.55, SOC=73.0, RESERVE=73.0)
+    for n in range(1, 29):                                   # up to a minute into Running: nothing at all
+        part = bw.Window(w.times[:n], {c: v[:n] for c, v in w.columns.items()})
+        assert bw.detect_all(part) == [], n
+        assert bool(bw.detect_cold(part)) == (n <= 3)        # without the guard: "cold" on the 0.0 °C readings
+    assert kinds(bw.detect_all(w)) == []                     # 5.8 °C once trusted: above the 5 °C threshold
+    assert kinds(bw.detect_all(window(5, PLANT_STATE=1, INVERTER_STATE=1, COOLEST=4.9))) == ["cold"]
+
+
+def test_after_a_fault_its_readings_stay_hidden():
+    w = rsd_night(fault_from=PER_HOUR, fault_until=3 * PER_HOUR)      # 2 h of fault, then an hour of normal
+    trusted = bw.after_faults(w)
+    assert trusted.times[0] > w.times[3 * PER_HOUR - 1] + bw.AFTER_FAULT - STEP
+    assert kinds(bw.detect_all(w)) == ["fault"]         # the fault itself (history now); nothing from its readings
+    assert bw.detect_all(window(10)) == [] and bw.after_faults(window(10)).times == window(10).times
 
 
 # ---------- helpers ----------
@@ -251,8 +311,7 @@ def test_window_checks():
     assert bw.Window([T0], {})[bw.SOC] == [None]
 
 
-@pytest.mark.parametrize("column", [v for k, v in vars(bw).items() if k.isupper() and isinstance(v, str)
-                                    and v != bw.AIR])
+@pytest.mark.parametrize("column", bw.COLUMNS)
 def test_columns_are_view_columns(column):
     """Every column constant is a stored register's column in the scaled views (test_db checks the views)."""
     assert column in {db.view_column(r) for r in db.STORED_REGISTERS}

@@ -327,7 +327,7 @@ def cmd_db_status(args) -> int:
     tables = s["tables"]
     print("Table sizes:   data + indexes + TOAST; growth = average row size × rows from the last 24 h; "
           "a year = 365 × a day")
-    width = max([len(t.name) for t in tables] + [len("whole database")])
+    width = max([len(t.name) for t in tables] + [len("all tables")])
     for t in tables:
         if t.bytes_per_day is None:
             growth = f"no time column ({'' if t.rows_exact else '~'}{t.rows:,} rows)"
@@ -336,7 +336,9 @@ def cmd_db_status(args) -> int:
                       f"in the last 24 h, by {t.time_column})")
         print(f"  {t.name:<{width}}  {_size(t.total_bytes):>9}  {growth}")
     per_day = sum(t.bytes_per_day for t in tables if t.bytes_per_day is not None)
-    print(f"  {'whole database':<{width}}  {_size(s['database_bytes']):>9}  {_growth(per_day)}")
+    # The tables' sum, not pg_database_size: that checks every file in the database's directory, slow where file
+    # checks are (Docker on Windows: ~0.6 ms each), and slower still for a while after tables are dropped.
+    print(f"  {'all tables':<{width}}  {_size(sum(t.total_bytes for t in tables)):>9}  {_growth(per_day)}")
     return ExitCode.OK
 
 
@@ -441,8 +443,11 @@ def cmd_poll(args) -> int:
     if args.alerts:
         from sigen import alerts, weather
         alert_config = config.require_alerts()
+        from zoneinfo import ZoneInfo
         alert_store = weather.Store(url, err)                 # the sender's own connection
-        watcher = alerts.Watcher(alerts.Sender(alert_config, alert_store, out=print, err=err), out=print, err=err)
+        tz = ZoneInfo(config.site.timezone) if config.site else None       # else this computer's
+        watcher = alerts.Watcher(alerts.Sender(alert_config, alert_store, out=print, err=err), tz=tz,
+                                 out=print, err=err)
     background, store = _weather_background(args, config, url, watcher)
     units = {args.unit_id: "plant", **{u: "inverter" for u in _inverter_units(config)}}
     extras = [what for what, on in (("Open-Meteo hourly and every 15 min", args.weather),

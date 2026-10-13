@@ -132,11 +132,10 @@ def test_db_commands_need_a_database_url(run, tmp_path):
         assert code == ExitCode.USAGE and "no database URL" in err
 
 
-def test_unreachable_database_is_exit_10(run, tmp_path):
+def test_unreachable_database_is_exit_10(run, tmp_path, hangs_up):
     pytest.importorskip("psycopg")
     f = tmp_path / "config.json"
-    # Port 1 on localhost: nothing listens there, so this fails fast without any real server.
-    f.write_text(json.dumps({"database": {"url": "postgresql://u:s3cret@127.0.0.1:1/x"}}), encoding="utf-8")
+    f.write_text(json.dumps({"database": {"url": f"postgresql://u:s3cret@127.0.0.1:{hangs_up}/x"}}), encoding="utf-8")
     code, _, err = run("db", "status", "--config", f)
     assert code == ExitCode.DATABASE and "s3cret" not in err and "u:***@" in err
 

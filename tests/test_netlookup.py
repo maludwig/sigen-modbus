@@ -186,7 +186,7 @@ def test_mac_lookup_bad_mac(run):
     assert code == ExitCode.USAGE and "isn't a MAC" in err
 
 
-def test_poll_with_a_mac_it_cant_follow_warns_and_carries_on(run, tmp_path, monkeypatch):
+def test_poll_with_a_mac_it_cant_follow_warns_and_carries_on(run, tmp_path, monkeypatch, hangs_up):
     # Only MAC lookup is faked as unsupported: faking sys.platform would also send psycopg's library loading
     # down another platform's path.
     pytest.importorskip("psycopg")
@@ -194,19 +194,19 @@ def test_poll_with_a_mac_it_cant_follow_warns_and_carries_on(run, tmp_path, monk
     def no(*a):
         raise PlatformNotSupported("MAC lookup on Linux needs the `ip` command (iproute2)")
     monkeypatch.setattr(netlookup, "require_supported", no)
-    f = write_config(tmp_path, {"database": {"url": "postgresql://u:p@127.0.0.1:1/x"},
+    f = write_config(tmp_path, {"database": {"url": f"postgresql://u:p@127.0.0.1:{hangs_up}/x"},
                                 "devices": {"inverter": {"ip": "192.168.1.100", "mac": INVERTER_MAC}}})
     code, _, err = run("poll", "--config", f, "--count", 1)
     assert "warning: MAC lookup on Linux needs the `ip` command" in err and "polling without" in err
     assert code == ExitCode.DATABASE and "following MAC" not in err     # got as far as the database (none here)
 
 
-def test_poll_takes_the_ip_from_the_config(run, tmp_path):
+def test_poll_takes_the_ip_from_the_config(run, tmp_path, hangs_up):
     pytest.importorskip("psycopg")
-    f = write_config(tmp_path, {"database": {"url": "postgresql://u:p@127.0.0.1:1/x"},
+    f = write_config(tmp_path, {"database": {"url": f"postgresql://u:p@127.0.0.1:{hangs_up}/x"},
                                 "devices": {"inverter": {"ip": "192.168.1.100"}}})
     code, _, err = run("poll", "--config", f, "--count", 1)
     assert code == ExitCode.DATABASE and "Polling 192.168.1.100:502" in err   # got past the IP; no DB here
-    f = write_config(tmp_path, {"database": {"url": "postgresql://u:p@127.0.0.1:1/x"}})
+    f = write_config(tmp_path, {"database": {"url": f"postgresql://u:p@127.0.0.1:{hangs_up}/x"}})
     code, _, err = run("poll", "--config", f, "--count", 1)
     assert code == ExitCode.USAGE and "devices.inverter.ip" in err

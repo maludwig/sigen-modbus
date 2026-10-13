@@ -26,6 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7",
+    "pytest-xdist>=3",
     "jupyter",
     "pandas",
     "requests",
@@ -48,3 +49,4 @@ sigen = ["migrations/*.sql", "migrations/backfill/*.sql", "templates/*.html"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "-n auto"

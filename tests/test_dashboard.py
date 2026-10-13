@@ -246,8 +246,9 @@ def test_pages(seeded):
     assert "Bad window" in client.get("/?day=yesterday").get_data(as_text=True)
 
 
-def test_database_down_is_drawn_not_raised():
-    client = dashboard.create_app(Config(database_url="postgresql://u:s3cret@127.0.0.1:1/x", origin="t")).test_client()
+def test_database_down_is_drawn_not_raised(hangs_up):
+    client = dashboard.create_app(Config(database_url=f"postgresql://u:s3cret@127.0.0.1:{hangs_up}/x",
+                                         origin="t")).test_client()
     r = client.get("/chart/load_energy.png")
     assert r.status_code == 503 and r.data[:4] == b"\x89PNG"
 

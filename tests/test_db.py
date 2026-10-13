@@ -3,17 +3,17 @@
     SIGEN_TEST_DB_URL=postgresql://postgres:…@localhost:5432/postgres pytest
 
 or else database.test_url in the repo's config.json (docs/DEVELOPMENT.md says how to set one up).
-Each test gets its own throwaway schema (sigen_test_<random>), dropped afterwards, so
-nothing else in that database is touched.
+The tests work in throwaway schemas (sigen_test_<random>), dropped afterwards, so nothing else in
+that database is touched: one migrated schema shared by most tests and emptied after each, and a new,
+empty one for each test marked fresh_schema (see db_url).
 """
 import datetime
 import json
-import os
 import socket
-import uuid
 
 import pytest
 
+from conftest import base_database_url, drop_schema, new_schema, schema_url  # noqa: F401  (scratch tools use the first)
 from sigen import db
 from sigen.errors import ExitCode, SchemaNotReady
 from sigen.registers import PLANT_REGISTERS
@@ -22,34 +22,23 @@ from sigen.weather import Response
 psycopg = pytest.importorskip("psycopg")
 
 
-def base_database_url():
-    """SIGEN_TEST_DB_URL, or database.test_url from the repo's config.json, or None."""
-    from conftest import REPO
-    from sigen.config import load_config
-    from sigen.errors import SigenError
-    if os.environ.get("SIGEN_TEST_DB_URL"):
-        return os.environ["SIGEN_TEST_DB_URL"]
-    if (REPO / "config.json").exists():
-        try:
-            return load_config(REPO / "config.json").test_database_url
-        except SigenError:
-            return None
-    return None
-
-
 @pytest.fixture
-def db_url():
-    base = base_database_url()
-    if not base:
+def db_url(request, shared_schema):
+    """The test's schema. By default the shared one, already migrated, and emptied after the test (rebuilt if the test
+    changed its shape: see conftest.SharedSchema), so `db migrate` in a test finds nothing to do. Tests of migrating
+    itself, or that need the schema as it was before, are marked @pytest.mark.fresh_schema: they get a new, empty
+    schema of their own, dropped afterwards."""
+    if shared_schema is None:
         pytest.skip("set SIGEN_TEST_DB_URL, or database.test_url in config.json, to run the database tests")
-    schema = f"sigen_test_{uuid.uuid4().hex[:12]}"
-    with psycopg.connect(base, autocommit=True) as c:
-        c.execute(f'CREATE SCHEMA "{schema}"')
+    if request.node.get_closest_marker("fresh_schema") is None:
+        yield shared_schema.url
+        shared_schema.reset()
+        return
+    schema = new_schema(shared_schema.base)
     try:
-        yield psycopg.conninfo.make_conninfo(base, options=f"-c search_path={schema}")
+        yield schema_url(shared_schema.base, schema)
     finally:
-        with psycopg.connect(base, autocommit=True) as c:
-            c.execute(f'DROP SCHEMA "{schema}" CASCADE')
+        drop_schema(shared_schema.base, schema)
 
 
 @pytest.fixture
@@ -77,6 +66,7 @@ def free_port():
 
 
 # ---------- migrate ----------
+@pytest.mark.fresh_schema
 def test_migrate_creates_everything_and_is_idempotent(run, config, conn):
     code, out, _ = run("db", "migrate", "--config", config)
     assert code == ExitCode.OK and "0001_initial" in out and "0002_units" in out and "0003_weather" in out
@@ -99,6 +89,7 @@ def test_view_columns_match_the_views(conn):
         assert columns == expected | {"reading_id", "started_at"}, device
 
 
+@pytest.mark.fresh_schema
 def test_0002_upgrades_existing_readings(conn):
     # Build a database exactly as 0001 left it, with a reading in it.
     # (db.migrate can't stop at 0001: its register_meta sync is written for today's schema.)
@@ -127,6 +118,7 @@ def test_migrate_refuses_edited_migration(conn):
         db.migrate(conn, edited)
 
 
+@pytest.mark.fresh_schema
 def test_migrate_refuses_unknown_applied_migration(conn):
     db.migrate(conn)
     conn.execute("INSERT INTO schema_migrations (version, name, checksum) VALUES (99, 'future', 'x')")
@@ -166,6 +158,7 @@ def sample_values(device, k):
              * (r.type[0] == "s")) for r in db.STORED_REGISTERS if r.device == device]
 
 
+@pytest.mark.fresh_schema
 def test_0004_moves_every_value(conn):
     at_0003(conn)
     when = datetime.datetime(2026, 10, 9, 12, tzinfo=datetime.timezone.utc)
@@ -200,6 +193,7 @@ def test_0004_moves_every_value(conn):
     db.check_ready(conn)                                                   # poll could run
 
 
+@pytest.mark.fresh_schema
 def test_0004_refuses_a_value_it_cannot_place(conn):
     at_0003(conn)
     conn.execute("INSERT INTO register_meta (address, name, type, gain, unit, device) "
@@ -218,6 +212,7 @@ def backfill(conn):
     conn.execute((resources.files("sigen.migrations") / "backfill" / "0004_wide_values.sql").read_text(encoding="utf-8"))
 
 
+@pytest.mark.fresh_schema
 def test_backfill_runs_while_poll_writes_then_migrate_copies_the_rest(conn):
     at_0003(conn)
     t = datetime.datetime(2026, 10, 9, 12, tzinfo=datetime.timezone.utc)
@@ -246,6 +241,7 @@ def test_backfill_runs_while_poll_writes_then_migrate_copies_the_rest(conn):
     db.check_ready(conn)
 
 
+@pytest.mark.fresh_schema
 def test_backfill_refuses_a_value_it_cannot_place(conn):
     at_0003(conn)
     conn.execute("INSERT INTO register_meta (address, name, type, gain, unit, device) "
@@ -257,6 +253,7 @@ def test_backfill_refuses_a_value_it_cannot_place(conn):
     assert conn.execute("SELECT to_regclass('raw_plant_register_values')").fetchone()[0] is None
 
 
+@pytest.mark.fresh_schema
 def test_poll_refuses_a_register_without_a_column(conn):
     db.migrate(conn)
     conn.execute("ALTER TABLE raw_plant_register_values DROP COLUMN plant_ess_soc CASCADE")   # takes the views too
@@ -279,6 +276,7 @@ def test_insert_reading_writes_one_wide_row(conn):
 
 
 # ---------- status ----------
+@pytest.mark.fresh_schema
 def test_status_before_and_after_migrate(run, config):
     db_url = url_of(config)
     code, out, _ = run("db", "status", "--config", config)
@@ -292,7 +290,7 @@ def test_status_before_and_after_migrate(run, config):
     assert "no time column" in lines["register_meta"]
     assert "(0 of 0 rows in the last 24 h, by started_at)" in lines["readings"]
     assert "(0 of 0 rows in the last 24 h, by alerted_at)" in lines["alert_log"]
-    assert "/day" in lines["whole"]
+    assert "/day" in lines["all"]
     password = psycopg.conninfo.conninfo_to_dict(db_url).get("password")
     if password:
         assert password not in out
@@ -379,12 +377,13 @@ def test_query_error_is_exit_10(run, config):
 
 
 # ---------- poll ----------
+@pytest.mark.fresh_schema
 def test_poll_refuses_before_migrate(run, config, full_server):
     code, _, err = run("poll", *net(full_server), "--config", config, "--count", 1)
     assert code == ExitCode.PRECONDITION and "sigen db migrate" in err
 
 
-def test_poll_stores_every_register(run, config, conn, full_server):
+def test_poll_stores_every_register(run, config, conn, full_server, quick_polls):
     run("db", "migrate", "--config", config)
     code, out, _ = run("poll", *net(full_server), "--config", config, "--count", 2, "--interval", 1)
     assert code == ExitCode.OK and "2 stored, 0 failed" in out
@@ -404,7 +403,7 @@ def test_poll_stores_every_register(run, config, conn, full_server):
 
 def test_poll_records_connection_failures_and_continues(run, config, conn):
     run("db", "migrate", "--config", config)
-    code, _, err = run("poll", "--ip", "127.0.0.1", "--port", free_port(), "--timeout", 1,
+    code, _, err = run("poll", "--ip", "127.0.0.1", "--port", free_port(), "--timeout", 0.2,
                        "--config", config, "--count", 1)
     assert code == ExitCode.OK and "FAILED" in err
     (rid, error), = conn.execute("SELECT id, error FROM readings").fetchall()
@@ -445,7 +444,9 @@ def test_poll_follows_the_device_to_a_new_ip(run, config, conn, full_server):
         asked.append(ip)
         return "192.0.2.2"
     messages = []
-    code = poll.run(connector_for=lambda ip, unit: functools.partial(ModbusClient, "127.0.0.1", ports[ip], unit, 1.0),
+    timeouts = {"192.0.2.1": 0.2, "192.0.2.2": 1.0}
+    code = poll.run(connector_for=lambda ip, unit: functools.partial(ModbusClient, "127.0.0.1", ports[ip], unit,
+                                                                     timeouts[ip]),
                     ip="192.0.2.1", units={247: "plant"}, db_url=db_url, interval=0.05, count=4,
                     rediscover=rediscover, rediscover_after=2, out=messages.append, err=messages.append)
     assert code == ExitCode.OK and asked == ["192.0.2.1"]
@@ -454,7 +455,7 @@ def test_poll_follows_the_device_to_a_new_ip(run, config, conn, full_server):
     assert any("found it at 192.0.2.2" in m for m in messages)
 
 
-def test_poll_takes_a_reading_per_unit(run, config, conn, tmp_path, both_server):
+def test_poll_takes_a_reading_per_unit(run, config, conn, tmp_path, both_server, quick_polls):
     f = tmp_path / "both.json"
     f.write_text(json.dumps({"database": {"url": url_of(config)}, "devices": {"inverter": {"units": [1]}}}),
                  encoding="utf-8")
@@ -472,6 +473,7 @@ def test_poll_takes_a_reading_per_unit(run, config, conn, tmp_path, both_server)
     assert pv1 == 2941                                                    # PV1 294.1 V, before the gain
 
 
+@pytest.mark.fresh_schema
 def test_type_change_with_stored_values_needs_a_migration(run, config, conn, full_server):
     run("db", "migrate", "--config", config)
     run("poll", *net(full_server), "--config", config, "--count", 1)
@@ -490,6 +492,7 @@ def site_config(tmp_path, db_url):
     return f
 
 
+@pytest.mark.fresh_schema
 def test_weather_record_to_db(run, site_config, conn, monkeypatch):
     from sigen import weather
     from test_weather import FakeWeb
@@ -564,3 +567,32 @@ def test_type_change_without_values_is_just_synced(run, config, conn):
     assert run("db", "migrate", "--config", config)[0] == ExitCode.OK
     assert conn.execute("SELECT name, type FROM register_meta WHERE address = 30005").fetchone() \
         == ("plant_grid_sensor_active_power", "s32")
+
+
+# ---------- the tests' shared schema ----------
+def test_the_shared_schema_is_emptied_after_a_test_and_rebuilt_if_it_changed(shared_schema, conn):
+    # On the shared schema itself (conn is connected to it): whatever this leaves behind, the reset after it repairs.
+    from conftest import fingerprint
+    t = datetime.datetime(2026, 10, 9, 12, tzinfo=datetime.timezone.utc)
+    db.insert_reading(conn, ip="127.0.0.1", unit_id=247, poll_id=db.next_poll_id(conn), started_at=t, ended_at=t,
+                      values=[(30014, 880)])                            # a wide row, referring to its reading
+    add_reading(conn, error="timed out")
+    shared_schema.reset()
+    assert conn.execute("SELECT (SELECT count(*) FROM readings), (SELECT count(*) FROM raw_plant_register_values)"
+                        ).fetchone() == (0, 0)
+    assert db.next_poll_id(conn) == 1 and add_reading(conn) == 1               # the sequences start again
+    assert conn.execute("SELECT count(*) FROM register_meta").fetchone()[0] == len(db.STORED_REGISTERS)
+    for change, undo in (("CREATE TABLE stray (x int)", "DROP TABLE stray"),                     # the shape …
+                         ("UPDATE register_meta SET unit = 'x' WHERE address = 30005",           # … or a table it keeps
+                          "UPDATE register_meta SET unit = 'kW' WHERE address = 30005")):
+        conn.execute(change)
+        assert fingerprint(conn) != shared_schema.shape, change
+        conn.execute(undo)
+        assert fingerprint(conn) == shared_schema.shape, undo
+    rebuilds, schema = shared_schema.rebuilds, shared_schema.schema
+    conn.execute("CREATE TABLE stray (x int)")
+    shared_schema.reset()
+    assert shared_schema.rebuilds == rebuilds + 1 and shared_schema.schema != schema      # built again …
+    with db.connect(shared_schema.url) as c:
+        db.check_ready(c)                                                                 # … as migrate leaves it
+        assert c.execute("SELECT to_regclass('stray')").fetchone()[0] is None

@@ -6,13 +6,17 @@
   one for the air), then from each poll's values in memory: the database isn't read again.
 - After each stored poll it builds a Window, runs every detector and decides, per event:
   * only events still going on (or that ended within RECENT) count, so history never alerts after a restart;
-  * an event alerts once: the same kind carrying on (starting within MAX_GAP of where it was last seen) is the
-    same event, however long it lasts; there are no "cleared" messages;
-  * each kind waits COOLDOWN (1 h) between notifications, across restarts too (alert_log's last sent time); a new
-    event inside the cooldown is logged as suppressed, once;
+  * an event alerts once: the same kind (or key: each alarm bit has its own) carrying on (starting within MAX_GAP of
+    where it was last seen) is the same event, however long it lasts; there are no "cleared" messages;
+  * each kind or key waits COOLDOWN (1 h) between notifications, across restarts too (alert_log's last sent time);
+    a new event inside the cooldown is logged as suppressed, once;
   * kinds without a Notice (charge_limited: the BMS throttles every cold night by design) aren't sent.
-- Sender, its own thread: posts to ntfy and logs every alert, sent or suppressed, in alert_log through its own
-  database connection, so poll's thread never waits on the network.
+  Every message ends with when the event began: ISO 8601, local time with its offset, to the second.
+- Unreachable: after UNREACHABLE_POLLS polls in a row in which no unit gave a reading, one "unreachable" alert per
+  outage (a restart in the middle of one doesn't alert again: alert_log says it was sent after the last reading).
+  Getting readings again is logged in alert_log as "reachable", but not sent.
+- Sender, its own thread: posts to ntfy and logs every alert, sent or not, in alert_log through its own database
+  connection, so poll's thread never waits on the network.
 
 Nothing here can stop the polling: a failure is a warning line (the same warning at most once an hour).
 """
@@ -33,6 +37,7 @@ COOLDOWN = datetime.timedelta(hours=1)          # per kind, between notification
 RECENT = datetime.timedelta(minutes=2)          # an event that ended longer ago than this is history
 AIR_HOLD = datetime.timedelta(minutes=30)       # the newest air temperature holds this long after its period
 WARN_EVERY = datetime.timedelta(hours=1)        # the same warning, at most this often
+UNREACHABLE_POLLS = 20                          # polls in a row with no reading at all: 5 min at --interval 15
 COLUMN_SET = frozenset(bw.COLUMNS)
 
 
@@ -44,18 +49,25 @@ class Notice:
 
 
 NOTICES: Dict[str, Notice] = {
-    "off_grid": Notice("Grid is down", "urgent", ("zap",)),
+    "fault": Notice("The SigenStor reports a fault", "urgent", ("rotating_light",)),
+    "unreachable": Notice("Lost contact with the SigenStor", "high", ("satellite",)),
+    "alarm": Notice("SigenStor alarm", "high", ("warning",)),       # each alarm bit brings its own title
     "below_reserve": Notice("Battery below its backup reserve", "urgent", ("battery",)),
     "cold_charging": Notice("Battery charging while near freezing", "urgent", ("rotating_light",)),
     "cold": Notice("Battery is cold: blanket time", "high", ("snowflake",)),
     "cooling": Notice("Battery cooling toward 5 °C", "default", ("snowflake",)),
-    "alarm": Notice("Battery alarm", "high", ("warning",)),
     "plateau": Notice("Battery heater? Temperature held steady", "high", ("fire",)),
     "warming": Notice("Battery heater? Cells warmed up", "high", ("fire",)),
     "sawtooth": Notice("Battery heater? Sawtooth temperature", "high", ("fire",)),
     "unexplained_power": Notice("Battery heater? Unexplained power", "high", ("electric_plug",)),
     "idle_drain": Notice("Battery heater? Energy leaving while idle", "high", ("battery",)),
 }
+REACHABLE = Notice("In contact with the SigenStor again", "default", ("white_check_mark",))   # logged, never sent
+
+
+def stamp(t: datetime.datetime, tz) -> str:
+    """ISO 8601 in local time, to the second, with the offset: 2026-10-12T19:49:30-06:00."""
+    return t.astimezone(tz).isoformat(timespec="seconds")
 
 
 def now_utc() -> datetime.datetime:
@@ -136,8 +148,9 @@ class Sender:
     def send(self, kind: str, notice: Notice, message: str) -> None:
         self._queue.put(("send", kind, notice, message))
 
-    def suppress(self, kind: str, notice: Notice, message: str) -> None:
-        self._queue.put(("suppressed", kind, notice, message))
+    def suppress(self, kind: str, notice: Notice, message: str, why: str = "cooldown") -> None:
+        """Log it in alert_log without sending it: inside its cooldown, or a kind that's only logged."""
+        self._queue.put((why, kind, notice, message))
 
     def stop(self, wait: float = 6.0) -> None:
         """Let the queued alerts go out (up to `wait` seconds), then end the thread."""
@@ -151,15 +164,17 @@ class Sender:
             if item is None:
                 return
             what, kind, notice, message = item
+            one_line = message.replace("\n", " ")
             try:
                 fields = dict(title=notice.title, priority=notice.priority, tags=notice.tags, kind=kind)
-                if what == "suppressed":
+                if what != "send":
                     attempt = ntfy.suppressed(message, **fields)
-                    self._out(f"alert suppressed ({kind}, cooldown): {notice.title}: {message}")
+                    self._out(f"alert {'logged' if what == 'log only' else 'suppressed'} ({kind}, {what}): "
+                              f"{notice.title}: {one_line}")
                 else:
                     attempt = self._post(self.alerts, message, **fields)
                     if attempt.ok:
-                        self._out(f"alert sent ({kind}): {notice.title}: {message}")
+                        self._out(f"alert sent ({kind}): {notice.title}: {one_line}")
                     else:
                         self._err(f"warning: alert NOT sent ({kind}): {attempt.problem()}")
                 if self._store is not None:
@@ -173,26 +188,46 @@ class Watcher:
 
     def __init__(self, sender: Sender, *, cooldown: datetime.timedelta = COOLDOWN, recent: datetime.timedelta = RECENT,
                  span: datetime.timedelta = SPAN, detect: Optional[Callable[[bw.Window], List[bw.Event]]] = None,
+                 tz=None, unreachable_polls: int = UNREACHABLE_POLLS,
                  out=print, err=lambda msg: print(msg, file=sys.stderr)):
         self.buffer = Buffer(span)
         self._sender, self._cooldown, self._recent = sender, cooldown, recent
         self._detect = detect or bw.detect_all
+        self.tz = tz or datetime.datetime.now().astimezone().tzinfo      # for the timestamps in messages
+        self._unreachable_polls = unreachable_polls
         self._out, self._err = out, err
-        self.last_sent: Dict[Optional[str], datetime.datetime] = {}     # kind -> last notification
-        self._seen_until: Dict[str, datetime.datetime] = {}             # kind -> where its last event got to
+        self.last_sent: Dict[Optional[str], datetime.datetime] = {}     # kind or key -> last notification
+        self._seen_until: Dict[str, datetime.datetime] = {}             # kind or key -> where its last event got to
         self._warned: Dict[str, datetime.datetime] = {}
+        self.failed_polls = 0                                           # in a row, no unit giving a reading
+        self.outage_start: Optional[datetime.datetime] = None
+        self.outage_alerted = False                                     # this outage's "unreachable" was raised
 
     # ---------- start / stop ----------
     def start(self, conn, units: Dict[int, str], now: datetime.datetime) -> None:
-        """Fill the buffer from the database and learn when each kind was last sent; then start the sender."""
+        """Fill the buffer from the database and learn when each kind was last sent, and whether an outage is
+        going on; then start the sender."""
         try:
             self.preload(conn, units, now)
             self.last_sent.update(db.last_alerts_sent(conn))
+            self.preload_outage(conn)
             self._out(f"alerts: {len(self.buffer)} poll(s) of history loaded; notifying {self._sender.alerts.ntfy_server}/"
                       f"{ntfy.masked(self._sender.alerts.ntfy_topic)}")
         except Exception as e:
             self._warn(f"alerts start without history: {type(e).__name__}: {e}", now)
         self._sender.start()
+
+    def preload_outage(self, conn) -> None:
+        """The polls in a row at the end of the readings table that got no reading at all, so a restart in the middle
+        of an outage carries on counting, and doesn't alert twice: the outage was alerted if an "unreachable" was
+        sent after its first failed poll."""
+        with db.errors_as("loading the polls' recent outcome failed"):
+            failed, start = conn.execute(
+                "SELECT count(DISTINCT poll_id), min(started_at) FROM readings WHERE poll_id > "
+                "coalesce((SELECT max(poll_id) FROM readings WHERE error IS NULL), 0)").fetchone()
+        self.failed_polls, self.outage_start = failed, start      # every poll after the last one with a reading
+        sent = self.last_sent.get("unreachable")
+        self.outage_alerted = bool(failed) and sent is not None and sent >= start
 
     def stop(self) -> None:
         self._sender.stop()
@@ -228,14 +263,43 @@ class Watcher:
         self.buffer.add_air(t, value)
 
     def observe(self, results, units: Dict[int, str], now: datetime.datetime) -> None:
-        """After a poll is stored: add it to the buffer and check. Never raises."""
+        """After a poll is stored: add it to the buffer, count it towards an outage, and check. Never raises."""
         try:
             when, values = poll_values(results, units)
             if when is not None:
                 self.buffer.add_row(when, values)
+            self.reachability(results, now)
             self.check(now)
         except Exception as e:
             self._warn(f"alert check failed: {type(e).__name__}: {e}", now)
+
+    def reachability(self, results, now: datetime.datetime) -> Optional[str]:
+        """Count polls in which no unit gave a reading. At unreachable_polls in a row, raise "unreachable" (once per
+        outage); on the first reading after an alerted outage, log "reachable" without sending it. Returns
+        "unreachable", "reachable" or None (for tests)."""
+        if not results:
+            return None
+        if any(r.error is None for r in results.values()):
+            back = self.outage_alerted
+            if back:
+                minutes = (now - self.outage_start).total_seconds() / 60
+                self._sender.suppress("reachable", REACHABLE,
+                                      f"Readings again, after {minutes:.0f} min without.\n{stamp(now, self.tz)}",
+                                      why="log only")
+            self.failed_polls, self.outage_start, self.outage_alerted = 0, None, False
+            return "reachable" if back else None
+        self.failed_polls += 1
+        if self.outage_start is None:
+            self.outage_start = min(r.started_at for r in results.values())
+        if self.failed_polls < self._unreachable_polls or self.outage_alerted:
+            return None
+        self.outage_alerted = True
+        last_error = next(iter(results.values())).error
+        minutes = (now - self.outage_start).total_seconds() / 60
+        self._raise("unreachable", NOTICES["unreachable"],
+                    f"No reading from the SigenStor for {minutes:.0f} min ({self.failed_polls} polls in a row). "
+                    f"Last error: {last_error}", self.outage_start, now)
+        return "unreachable"
 
     def check(self, now: datetime.datetime) -> List[Tuple[str, bw.Event]]:
         """Run the detectors; returns [("sent" | "suppressed", event)] for the alerts raised (for tests)."""
@@ -243,22 +307,28 @@ class Watcher:
         for e in sorted(self._detect(self.buffer.window()), key=lambda e: (e.start, e.kind)):
             if e.end < now - self._recent:
                 continue                                 # history
-            last = self._seen_until.get(e.kind)
-            self._seen_until[e.kind] = max(min(e.end, now), last or e.start)
+            last = self._seen_until.get(e.ident)
+            self._seen_until[e.ident] = max(min(e.end, now), last or e.start)
             if last is not None and e.start <= last + bw.MAX_GAP:
                 continue                                 # the same event carrying on: already handled
             notice = NOTICES.get(e.kind)
             if notice is None:
                 continue
-            sent = self.last_sent.get(e.kind)
-            if sent is not None and now - sent < self._cooldown:
-                self._sender.suppress(e.kind, notice, e.summary)
-                raised.append(("suppressed", e))
-            else:
-                self.last_sent[e.kind] = now
-                self._sender.send(e.kind, notice, e.summary)
-                raised.append(("sent", e))
+            notice = Notice(e.title or notice.title, e.priority or notice.priority, notice.tags)
+            raised.append((self._raise(e.ident, notice, e.summary, e.start, now), e))
         return raised
+
+    def _raise(self, ident: str, notice: Notice, summary: str, start: datetime.datetime,
+               now: datetime.datetime) -> str:
+        """Send it, or log it as suppressed inside its cooldown; the message ends with the event's start."""
+        message = f"{summary}\n{stamp(start, self.tz)}"
+        sent = self.last_sent.get(ident)
+        if sent is not None and now - sent < self._cooldown:
+            self._sender.suppress(ident, notice, message)
+            return "suppressed"
+        self.last_sent[ident] = now
+        self._sender.send(ident, notice, message)
+        return "sent"
 
     def _warn(self, message: str, now: datetime.datetime) -> None:
         last = self._warned.get(message)

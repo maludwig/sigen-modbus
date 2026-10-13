@@ -202,5 +202,6 @@ def start_in_thread(data_dir: Path, host: str = "127.0.0.1", port: int = 0,
                     ignore_writes: bool = False, reject_writes: bool = False) -> FakeSigenServer:
     """Start a fake server on a background thread (port 0 = pick a free port). For tests."""
     server = FakeSigenServer(host, port, data_dir, ignore_writes, reject_writes)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    # A short poll interval: shutdown() waits up to one of them (the default 0.5 s, per test).
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
     return server
