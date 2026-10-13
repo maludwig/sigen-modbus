@@ -9,7 +9,7 @@ register of that unit is stored, or its readings row records the error and has n
     database unreachable                       -> warning, poll not stored, keep polling
     database rejects the data                  -> stop (exit 10): probably our bug
 
-With `rediscover` (the CLI builds it from devices.inverter.mac, Windows only), after
+With `rediscover` (the CLI builds it from devices.inverter.mac; Windows and Linux), after
 `rediscover_after` connection failures in a row it asks where the device is now, and
 carries on at the new IP. readings.ip_addr records the IP each poll actually used.
 """

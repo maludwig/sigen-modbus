@@ -15,7 +15,7 @@
 Smart-load names are display only: they appear in summaries and tables, never in dumps
 or writes. The database URL is used by `sigen db …` and `sigen poll`, and is never printed
 with its password. devices.inverter lets `sigen poll` run without --ip and, with a MAC,
-find the inverter again if its IP changes (Windows only). Its `units` are the inverters'
+find the inverter again if its IP changes (Windows, or Linux with `ip`). Its `units` are the inverters'
 own Modbus unit IDs: read, capture and poll read those as well as the plant (247).
 database.test_url (optional) is a separate database the database tests may use; nothing
 else reads it. site is where the panels are: `sigen weather` and `sigen radar` (and `poll --weather`,

@@ -9,8 +9,8 @@ from enum import IntEnum
 class ExitCode(IntEnum):
     OK = 0                   # success; for writes, verified by read-back, or already at the target
     ERROR = 1                # unexpected error (a bug, or something unclassified), e.g. capture won't overwrite
-    USAGE = 2                # bad command-line usage (argparse's own code), an invalid config, or a Windows-only
-                             # feature elsewhere
+    USAGE = 2                # bad command-line usage (argparse's own code), an invalid config, or MAC lookup
+                             # where it can't work
     CONNECTION = 3           # couldn't connect, or the connection dropped / timed out (incl. a wrong unit ID); a
                              # weather fetch failed; NOAA or ntfy unreachable
     MODBUS = 4               # the device answered with a Modbus exception (incl. a refused write)
@@ -65,7 +65,7 @@ class ConfigError(SigenError):
 
 
 class PlatformNotSupported(SigenError):
-    """A feature this operating system can't do (MAC lookup is Windows-only)."""
+    """A feature this system can't do (MAC lookup: only Windows, and Linux with the `ip` command)."""
     exit_code = ExitCode.USAGE
 
 

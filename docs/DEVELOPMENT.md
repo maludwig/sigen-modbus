@@ -30,7 +30,7 @@ src/sigen/
   charts.py         the dashboard's queries and figures
   pvmodel.py        the clear-sky model per roof face and string (pvlib)
   dashboard.py      the Flask app; templates/dashboard.html
-  netlookup.py      MAC ↔ IP on Windows
+  netlookup.py      MAC ↔ IP: Windows' SendARP, or the Linux kernel's ARP read with `ip neigh`
   discovery.py      --ip-range parsing, network scan
   data_io.py        the capture format
   fake_server.py    a fake SigenStor for tests and offline work

@@ -50,9 +50,9 @@ pip install -e .
 That gives you the `sigen` command. `pip install -e ".[dev]"` adds pytest and the tools for
 development (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
 
-On Linux, leave the `mac` fields out of your config: following the inverter by MAC address
-(`sigen mac-lookup`, and `poll` finding a device whose IP changed) is Windows only, and `poll`
-refuses to start with a MAC configured elsewhere.
+Following the inverter by MAC address (`sigen mac-lookup`, and `poll` finding a device whose IP
+changed) works on Windows, and on Linux with the `ip` command (iproute2, standard on Ubuntu and
+Raspberry Pi OS). Elsewhere `poll` warns and carries on without it.
 
 Try it straight away, no database needed:
 ```
@@ -204,7 +204,7 @@ When logging its output to a file, set `PYTHONUNBUFFERED=1`.
 
 When something goes wrong, `poll` carries on where it can:
 - the device doesn't answer, drops the connection or is busy: the reading is stored with its
-  error, and polling continues. With a MAC in the config (Windows), after 3 failed polls in a row
+  error, and polling continues. With a MAC in the config, after 3 failed polls in a row
   it looks the inverter up by MAC and carries on at its new IP;
 - the database is unreachable: a warning, that poll isn't stored, polling continues;
 - weather, radar and alert problems never stop it;
@@ -276,12 +276,14 @@ clouds with what your panels made, say). GOES-West covers western North
 America and the Pacific. A day takes about a minute and ~210 MB of downloads; re-running only
 fetches what's new.
 
-### Network (Windows)
+### Network
 
 ```
 sigen mac-lookup --ip 192.168.1.100                  # print its MAC
 sigen mac-lookup --mac 02:ab:cd:ef:00:01             # find its IP
 ```
+Windows, and Linux with the `ip` command; no admin rights needed. A /24 takes ~15 s on Windows and
+~3–8 s on Linux.
 
 ### Testing without a device
 
@@ -340,7 +342,7 @@ Every section is optional; a command that needs one says so. Start from `config.
   the data in Python"); `test_url`, a separate database for the tests. Passwords are masked in
   everything sigen prints.
 - `devices.inverter`: `ip` lets commands run without `--ip`; `units` adds the inverter's own unit
-  ID(s); `mac` (Windows only) lets `poll` find the inverter again if its IP changes.
+  ID(s); `mac` lets `poll` find the inverter again if its IP changes (Windows, or Linux with `ip`).
 - `site`: where the panels are, for the weather, the satellite and the clear-sky model. The
   timezone is an IANA name; `altitude_m` is optional.
 - `alerts`: your ntfy topic (and server, default https://ntfy.sh). Anyone who knows the topic can

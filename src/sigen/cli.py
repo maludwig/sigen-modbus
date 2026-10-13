@@ -17,7 +17,7 @@
                       [--daylight MINUTES | --all-day] [--workers 8] [--cube-dir DIR]
     sigen dashboard   [CONFIG] [--host 0.0.0.0] [--port 8050] [--reload]
     sigen ntfy-test   [CONFIG] [--msg TEXT] [--title TEXT] [--priority LEVEL] [--record-to-db] [--ntfy-server URL]
-    sigen mac-lookup  (--ip IP | --mac MAC [--ip-range RANGE])      (Windows only)
+    sigen mac-lookup  (--ip IP | --mac MAC [--ip-range RANGE])      (Windows and Linux)
     sigen registers   [--writable]
     sigen fake-server [--host H] [--port P] [--fake-data-dir DIR] [--ignore-writes | --reject-writes] [--verbose]
 
@@ -42,7 +42,7 @@ from sigen.config import CONFIG_ENV, CONFIG_NAME, Config, get_config
 from sigen.control import DEFAULT_JOURNAL, Journal, plan_undo, set_register
 from sigen.data_io import build_document, capture_filename, read_json_file, save_document
 from sigen.discovery import local_subnet, parse_ip_range, scan
-from sigen.errors import ExitCode, NotFound, SigenError
+from sigen.errors import ExitCode, NotFound, PlatformNotSupported, SigenError
 from sigen.modbus import DEFAULT_PORT, DEFAULT_TIMEOUT, ModbusClient
 from sigen.block_reader import BlockReader
 from sigen.reading import (derive, format_inverter, format_summary, format_table, other_unit_readings,
@@ -419,13 +419,18 @@ def cmd_poll(args) -> int:
         return ExitCode.USAGE
     rediscover = None
     if inverter and inverter.mac:
-        netlookup.require_windows()            # fail now, not hours later at the first outage
-        mac = inverter.mac
+        try:
+            netlookup.require_supported()      # say so now, not hours later at the first outage
+        except PlatformNotSupported as e:
+            err(f"warning: {e}; polling without following the inverter's MAC (devices.inverter.mac), so if "
+                f"its IP changes, polling keeps failing until it's restarted with the new IP")
+        else:
+            mac = inverter.mac
 
-        def rediscover(current_ip):
-            if netlookup.mac_for_ip(current_ip) == mac:
-                return current_ip
-            return netlookup.find_ip_for_mac(mac, [str(h) for h in local_subnet().hosts()])
+            def rediscover(current_ip):
+                if netlookup.mac_for_ip(current_ip) == mac:
+                    return current_ip
+                return netlookup.find_ip_for_mac(mac, [str(h) for h in local_subnet().hosts()])
     if args.capture_open_meteo_weather and not args.weather:
         err("error: --capture-open-meteo-weather needs --weather")
         return ExitCode.USAGE
@@ -846,7 +851,7 @@ def build_parser() -> argparse.ArgumentParser:
                                     "later ones line up with the clock. Connection problems are recorded "
                                     "and polling continues; a register the device rejects stops it (exit 4). "
                                     "Refuses to start (exit 7) until `sigen db migrate` is up to date. "
-                                    "With devices.inverter.mac in the config (Windows only), it finds the "
+                                    "With devices.inverter.mac in the config (Windows and Linux), it finds the "
                                     "inverter by MAC after 3 connection failures in a row and follows it "
                                     "to its new IP.")
     pl.add_argument("--ip", metavar="ADDRESS",
@@ -970,11 +975,12 @@ def build_parser() -> argparse.ArgumentParser:
     nt.set_defaults(func=cmd_ntfy_test)
 
     ml = sub.add_parser("mac-lookup", formatter_class=fmt, epilog=EXIT_CODE_HELP,
-                        help="IP -> MAC, or find a MAC's IP on the local network (Windows only)",
-                        description="Uses Windows' SendARP (no admin rights needed). --ip prints that "
-                                    "address's MAC; --mac asks every address in --ip-range (default: this "
-                                    "computer's /24) and prints the IP that has it, ~15 s for a /24. "
-                                    "On other systems: exit 2.")
+                        help="IP -> MAC, or find a MAC's IP on the local network (Windows and Linux)",
+                        description="No admin rights needed: Windows' SendARP, or on Linux the kernel's own "
+                                    "ARP read back with `ip neigh` (iproute2). --ip prints that address's MAC; "
+                                    "--mac asks every address in --ip-range (default: this computer's /24) and "
+                                    "prints the IP that has it (a /24: ~15 s on Windows, ~3-8 s on Linux). "
+                                    "On other systems, or Linux without `ip`: exit 2.")
     which_way = ml.add_mutually_exclusive_group(required=True)
     which_way.add_argument("--ip", metavar="ADDRESS", help="print the MAC of this address")
     which_way.add_argument("--mac", metavar="MAC", help="find the IP of this MAC, e.g. 02:ab:cd:ef:00:01")
