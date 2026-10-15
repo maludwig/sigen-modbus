@@ -102,6 +102,42 @@ test("the night sky: 30 five-pointed stars, a crescent moon, the same sky for th
   assert.equal(L.nightSvg(360, 140, 1, "x").match(/<polygon /g).length, 30);   // room for them on a phone too
 });
 
+test("battery temperatures: 10 °C ticks from 0 or below, and the inverter's axis on the same lines", () => {
+  assert.deepEqual(L.tempRange(8.2, 31.5), [0, 40]);                  // the usual: 0–40
+  assert.deepEqual(L.tempRange(-3, 12), [-10, 30]);                   // a cold night: still 40 tall
+  assert.deepEqual(L.tempRange(5, 47), [0, 50]);                      // a hot day: up to the next 10 above
+  assert.deepEqual(L.tempRange(-22, 41), [-30, 50]);
+  assert.deepEqual(L.tempRange(null, null), [0, 40]);                 // no data yet
+  assert.deepEqual(L.alignedRange(38.4, 58.1, 4), [30, 70]);          // 10 °C steps, as many as the battery's
+  assert.deepEqual(L.alignedRange(25, 75, 4), [20, 100]);             // too wide for 4 × 10: 4 × 20
+  assert.deepEqual(L.alignedRange(40, 50, 5), [40, 90]);
+  assert.deepEqual(L.evenSplits(-10, 30, 4), [-10, 0, 10, 20, 30]);
+  assert.deepEqual(L.evenSplits(30, 70, 4), [30, 40, 50, 60, 70]);    // the same heights as the battery's ticks
+});
+
+test("time axis labels: 24-hour, the date under the first tick and each new day", () => {
+  process.env.TZ = "UTC";                                             // (Node reads it for local time from here on)
+  const at = (iso) => Date.parse(iso) / 1000;
+  const hours = [at("2026-10-14T22:00:00Z"), at("2026-10-14T23:00:00Z"), at("2026-10-15T00:00:00Z")];
+  assert.deepEqual(L.timeTicks(null, hours, 0, 50, 3600), ["22:00\n2026-10-14", "23:00", "00:00\n2026-10-15"]);
+  assert.deepEqual(L.timeTicks(null, [at("2026-10-14T14:00:30Z")], 0, 50, 30), ["14:00:30\n2026-10-14"]);
+  assert.deepEqual(L.timeTicks(null, [at("2026-10-14T00:00:00Z")], 0, 50, 86400), ["2026-10-14"]);
+});
+
+test("power by load now: the axis starts at the biggest bar × 1.3 and only ever grows", () => {
+  const close2 = (got, want) => want.forEach((w, k) => close(got[k], w));
+  close2(L.growingSpan(null, [0.2, 1.0, 0.5]), [0, 1.3]);
+  close2(L.growingSpan([0, 1.3], [0.2, 0.4]), [0, 1.3]);              // smaller now: the axis stays
+  close2(L.growingSpan([0, 1.3], [2.0, 0.4]), [0, 2.6]);              // past the end: grows, with room again
+  close2(L.growingSpan([0, 2.6], [1.0, -0.1]), [-0.13, 2.6]);         // a negative Other: room on the left too
+  global.uPlot = {paths: {bars: () => null}};
+  const store = {raw: {at: "2026-10-15T00:00:00Z", house: 1, bars: {A: 1.0, Other: 0.0}}};
+  const range = () => L.CHARTS.load_power_now.build(store).scales.y.range();
+  close2(range(), [0, 1.3]);
+  store.raw = {at: "2026-10-15T00:00:15Z", house: 0.3, bars: {A: 0.3, Other: 0.0}};   // the next fetch
+  close2(range(), [0, 1.3]);                                          // the store keeps the span between builds
+});
+
 test("strips: each a label row then its bar, with gaps; bars clipped to the plot and ended by the next", () => {
   const {rows, height} = L.stripRows(2, {top: 6, label: 14, bar: 9, gap: 6, below: 4});
   assert.deepEqual(rows, [{labelY: 6, barY: 20, barH: 9}, {labelY: 35, barY: 49, barH: 9}]);

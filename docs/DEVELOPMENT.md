@@ -8,10 +8,12 @@ pytest                       # in parallel, a worker per CPU core (pytest-xdist)
 Use an editable install (`-e`): a plain `pip install .` copies the code once, and later edits
 won't show up. Without installing at all: `PYTHONPATH=src python -m sigen …`.
 
-The daily page's Sankey diagram is plain JavaScript (`src/sigen/static/my_sankey.js`, no
-dependencies). Its layout is tested with Node's built-in test runner
-(`node --test tests/js/my_sankey.test.js`); `pytest` runs that too when Node is installed, and
-skips it when it isn't. No npm packages are needed.
+The dashboard draws in the browser: `src/sigen/static/live_charts.js` (the charts, with uPlot from
+a CDN; each chart's numbers come from `/data/<name>.json` and are topped up with `?since=`) and
+`my_sankey.js` (the Sankey diagram, no dependencies). Their arithmetic is tested with Node's
+built-in test runner (`node --test tests/js/`); `pytest` runs each file there too when Node is
+installed (`tests/test_js.py`), and skips them when it isn't. No npm packages are needed. The
+package itself draws nothing: matplotlib is only in the `dev` extra, for the notebooks.
 
 ## Layout
 
@@ -32,9 +34,9 @@ src/sigen/
   alerts.py         `poll --alerts`: the in-memory window, the watcher and the ntfy sender
   battery_watch.py  the battery detectors: pure functions over a window of readings
   ntfy.py           posting to ntfy
-  charts.py         the dashboard's queries and figures
+  charts.py         the dashboard's data: queries, daily energy, the strips' colours
   pvmodel.py        the clear-sky model per roof face and string (pvlib)
-  dashboard.py      the Flask app; templates/dashboard.html
+  dashboard.py      the Flask app and its data endpoints; templates/, static/ (the page's JavaScript)
   netlookup.py      MAC ↔ IP: Windows' SendARP, or the Linux kernel's ARP read with `ip neigh`
   discovery.py      --ip-range parsing, network scan
   data_io.py        the capture format

@@ -119,6 +119,10 @@ def test_seconds_to_boundary():
     assert 1_000_020 % 60 == 0
     assert seconds_to_boundary(60, 1_000_040.5) == pytest.approx(39.5)     # 20.5 s past the minute
     assert seconds_to_boundary(60, 1_000_020.0) == pytest.approx(60.0)     # exactly on it: next one
+    assert 1_000_005 % 15 == 0
+    assert seconds_to_boundary(15, 1_000_005.0, offset=7) == pytest.approx(7.0)    # on :00: next at :07
+    assert seconds_to_boundary(15, 1_000_013.0, offset=7) == pytest.approx(14.0)   # at :08: next at :22
+    assert seconds_to_boundary(15, 1_000_012.0, offset=7) == pytest.approx(15.0)   # exactly on :07: the next one
 
 
 # ---------- CLI without a database ----------
@@ -167,7 +171,12 @@ def test_query_options_are_validated(run):
     assert e.value.code == 2
 
 
-def test_poll_interval_validation(run):
+def test_poll_interval_validation(run, tmp_path):
     with pytest.raises(SystemExit) as e:
         run("poll", "--ip", "127.0.0.1", "--config", "x.json", "--interval", "0.5")
     assert e.value.code == 2
+    f = tmp_path / "config.json"
+    f.write_text('{"database": {"url": "postgresql://u:x@127.0.0.1:1/x"}}', encoding="utf-8")
+    for offset in ("15", "-1"):                       # at least 0, under the interval: checked before connecting
+        code, _, err = run("poll", "--ip", "127.0.0.1", "--config", f, "--interval", "15", "--offset", offset)
+        assert code == ExitCode.USAGE and "--offset must be" in err, offset

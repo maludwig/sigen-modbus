@@ -19,7 +19,6 @@ dependencies = [
     "tzdata; sys_platform == 'win32'",
     "flask",
     "jinja2",
-    "matplotlib",
     "pvlib",
 ]
 
@@ -28,6 +27,8 @@ dev = [
     "pytest>=7",
     "pytest-xdist>=3",
     "jupyter",
+    "matplotlib",                # the notebooks' figures; the dashboard draws in the browser
+
     "pandas",
     "requests",
     "eccodes",

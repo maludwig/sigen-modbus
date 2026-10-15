@@ -12,6 +12,11 @@ register of that unit is stored, or its readings row records the error and has n
 With `rediscover` (the CLI builds it from devices.inverter.mac; Windows and Linux), after
 `rediscover_after` connection failures in a row it asks where the device is now, and
 carries on at the new IP. readings.ip_addr records the IP each poll actually used.
+
+A plant reading the device got wrong (sigen.glitches: total load 0 while Running) is stored like
+any other, and the next poll comes GLITCH_RETRY_DELAY later instead of on the schedule, up to
+GLITCH_RETRIES times in a row: an ordinary poll in every way (its own poll_id, every unit, counted
+by --count), then back to the schedule.
 """
 import datetime
 import sys
@@ -19,12 +24,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
-from sigen import db
+from sigen import db, glitches
 from sigen.block_reader import BlockReader
 from sigen.errors import ConnectionFailed, DatabaseError, ExitCode, ModbusError
 from sigen.registers import REGISTERS_BY_DEVICE
 
 TRANSIENT_MODBUS_CODES = {6}     # "device busy": worth another try next interval
+GLITCH_RETRIES = 2               # extra polls in a row after a glitched plant reading
+GLITCH_RETRY_DELAY = 1.0         # seconds: the glitch lasted under ~12 s (2026-10-15: the Pi's readings 6 s either side were right)
 
 
 def now_utc() -> datetime.datetime:
@@ -54,19 +61,33 @@ def poll_once(reader: BlockReader) -> PollResult:
         return PollResult(started, now_utc(), error=str(e), fatal=e.code not in TRANSIENT_MODBUS_CODES)
 
 
-def seconds_to_boundary(interval: float, wall_now: float) -> float:
-    """Seconds until the wall clock next reaches a multiple of `interval` (e.g. the next minute)."""
-    return interval - (wall_now % interval)
+def plant_glitch(results: Dict[int, "PollResult"], units: Dict[int, str]) -> Optional[str]:
+    """Why this poll's plant reading is a glitch (sigen.glitches), or None: no glitch, or no plant reading."""
+    for unit, result in results.items():
+        if units.get(unit) == "plant" and result.error is None:
+            why = glitches.plant_glitch(result.values)
+            if why is not None:
+                return why
+    return None
+
+
+def seconds_to_boundary(interval: float, wall_now: float, offset: float = 0.0) -> float:
+    """Seconds until the wall clock next reaches a multiple of `interval` (e.g. the next minute), plus `offset`
+    seconds (0 <= offset < interval): interval 15, offset 7 polls at :07, :22, :37, :52."""
+    return interval - ((wall_now - offset) % interval)
 
 
 def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[int, str], db_url: str,
-        interval: float, count: Optional[int] = None,
+        interval: float, count: Optional[int] = None, offset: float = 0.0,
         rediscover: Optional[Callable[[str], Optional[str]]] = None, rediscover_after: int = 3,
         background=None, watcher=None,
+        glitch_retries: int = GLITCH_RETRIES, glitch_retry_delay: float = GLITCH_RETRY_DELAY,
         out=print, err=lambda msg: print(msg, file=sys.stderr),
         monotonic=time.monotonic, sleep=time.sleep, wall=time.time) -> int:
     """Poll until Ctrl+C, or `count` polls. The first poll is immediate; later ones line up
-    with the wall clock (on the minute for --interval 60). Waiting uses the monotonic clock,
+    with the wall clock (on the minute for --interval 60), `offset` seconds after it: a second poller
+    of the same device, offset, doesn't read it at the same instant (two at once seem to catch its
+    summary registers mid-refresh more often: total load 0). Waiting uses the monotonic clock,
     so a system clock adjustment can't make it skip or double up.
 
     units maps each Modbus unit ID to its device type ("plant" or "inverter"); every poll
@@ -78,7 +99,12 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
     schema checks out and stopped as soon as polling ends; its fetches don't count as polls.
     watcher (a sigen.alerts.Watcher, for --alerts) loads its history then too, sees every poll
     after it's stored, and gets a few seconds at the end to send what's queued. Neither can
-    stop the polling."""
+    stop the polling.
+
+    After a poll whose plant reading is a glitch (plant_glitch), the next poll is
+    `glitch_retry_delay` seconds later rather than on the schedule, up to `glitch_retries` in a
+    row, and only if that's before the next scheduled poll anyway. Each is a whole poll, counted
+    towards `count`."""
     def readers_for(address):
         return {unit: BlockReader(connector_for(address, unit), REGISTERS_BY_DEVICE[device], strict=True)
                 for unit, device in units.items()}
@@ -93,21 +119,26 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
             watcher.start(conn, units, now_utc())
         if background is not None:
             background.start()
-        deadline = monotonic()
+        deadline = monotonic()             # the next scheduled poll
+        retry_at: Optional[float] = None   # a glitch retry, sooner than that
+        retries = 0                        # glitch retries in a row so far
         while count is None or polls < count:
-            delay = deadline - monotonic()
+            retrying = retry_at is not None
+            delay = (retry_at if retrying else deadline) - monotonic()
             if delay > 0:
                 sleep(delay)
             polls += 1
             results = {unit: poll_once(reader) for unit, reader in readers.items()}
             conn, reading_ids = _store(conn, db_url, ip, results, err)
             stored += len(reading_ids)
+            glitch = plant_glitch(results, units)
             for unit, result in results.items():
                 seconds = (result.ended_at - result.started_at).total_seconds()
                 stamp = f"{result.started_at:%Y-%m-%d %H:%M:%S.%f}Z"
                 where = f"unit {unit}: " + (f"reading {reading_ids[unit]}" if unit in reading_ids else "not stored")
                 if result.error is None:
-                    out(f"{stamp}  {where}: {len(result.values)} registers in {seconds:.2f}s")
+                    suspect = f" (glitch: {glitch})" if glitch and units.get(unit) == "plant" else ""
+                    out(f"{stamp}  {where}: {len(result.values)} registers in {seconds:.2f}s{suspect}")
                 else:
                     failed += 1
                     err(f"{stamp}  {where}: FAILED after {seconds:.2f}s: {result.error}")
@@ -126,8 +157,8 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
                     ip = new_ip
                     readers = readers_for(ip)
             if polls == 1:
-                deadline = monotonic() + seconds_to_boundary(interval, wall())
-            else:
+                deadline = monotonic() + seconds_to_boundary(interval, wall(), offset)
+            elif not retrying:
                 deadline += interval
                 skipped = 0
                 while deadline <= monotonic():
@@ -135,6 +166,17 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
                     skipped += 1
                 if skipped:
                     err(f"warning: a poll took longer than --interval; skipped {skipped}")
+            retry_at = None
+            if glitch is None:
+                retries = 0
+            elif retries < glitch_retries and monotonic() + glitch_retry_delay < deadline:
+                retries += 1
+                retry_at = monotonic() + glitch_retry_delay
+                err(f"warning: the plant's reading looks wrong ({glitch}); polling again in "
+                    f"{glitch_retry_delay:g} s (retry {retries} of {glitch_retries})")
+            else:
+                retries = 0
+                err(f"warning: the plant's reading looks wrong ({glitch}); back to the schedule")
     except KeyboardInterrupt:
         out("")
     except DatabaseError as e:

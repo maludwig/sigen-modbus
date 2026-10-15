@@ -44,6 +44,13 @@ change is the event, so they're worth logging anyway).
 - **Total load** (30284) equals general load (30282); smart loads are part of it. "Load excluding
   EV chargers" (30228) equals the house load (30094) when the EV charges from a plain outlet on a
   smart circuit: only a Sigen-integrated EV charger counts as one.
+- **Glitched readings**: now and then, for a single reading, the plant reports a total load of
+  exactly 0 while Running, usually with other powers wrong too (e.g. the battery discharging
+  0.6 kW and the grid exporting 1 kW, with no sun, between two ordinary readings). It lasts under
+  ~12 s: a reader a few seconds either side sees normal values. Seen a handful of times a day,
+  mostly in the evening but in daylight too; no pattern found so far. The inverter's own reading at the same
+  moment is fine. `sigen poll` reads again a second later, and everything that reads plant values
+  back (the dashboard, daily totals, alerts) leaves such readings out (`sigen.glitches`).
 - **Alarms** (plant 30027–30030, 30072, 30280; inverter 30605–30609) decode with the protocol's
   appendices; `0xFFFF` means "not available", not 16 alarms.
 - **Energy counters** move in 0.01 kWh steps: good for energy over 15 minutes or more, useless at

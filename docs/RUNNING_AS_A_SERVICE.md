@@ -167,8 +167,7 @@ Any version from 3.9 up works; 3.9.25 passed the full test suite on a Pi.
 
 ## The dashboard, too
 
-The same pattern, as `/etc/systemd/system/sigen-dashboard.service`. Matplotlib wants a writable
-cache directory, which systemd provides:
+The same pattern, as `/etc/systemd/system/sigen-dashboard.service`:
 
 ```ini
 [Unit]
@@ -182,8 +181,6 @@ User=sigen
 Group=sigen
 WorkingDirectory=/opt/sigen-modbus
 Environment=SIGEN_CONFIG=/etc/sigen-modbus/config.json
-CacheDirectory=sigen-modbus
-Environment=MPLCONFIGDIR=/var/cache/sigen-modbus
 ExecStart=/opt/sigen-modbus/.venv/bin/sigen dashboard --port 8050
 Restart=on-failure
 RestartSec=10

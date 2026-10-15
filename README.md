@@ -202,10 +202,12 @@ database is refused (exit 10). Several statements work, e.g. local times:
 `sigen db query "SET TIME ZONE 'America/Edmonton'; SELECT started_at, plant_ess_soc_pct FROM plant_register_values ORDER BY reading_id DESC LIMIT 5"`.
 
 ```
-sigen poll [--ip …] [--interval 60] [--count N] [--weather] [--radar] [--alerts]
+sigen poll [--ip …] [--interval 60] [--offset 0] [--count N] [--weather] [--radar] [--alerts]
 ```
-Reads every unit on a schedule (lined up with the clock) and stores each reading. Runs until
-Ctrl+C unless `--count`. `--weather` and `--radar` also record the weather at your site in the
+Reads every unit on a schedule (lined up with the clock: `--interval 15` polls at :00, :15, :30,
+:45) and stores each reading. If a second computer polls the same device, give it an `--offset`
+(e.g. `--offset 7`: :07, :22, …), so the two don't read it at the same instant. Runs until Ctrl+C unless
+`--count`. `--weather` and `--radar` also record the weather at your site in the
 background; `--alerts` watches the battery and pushes problems to your phone (see "Alerts").
 It also stores each finished day's energy (see `sigen db daily`). When logging its output to a
 file, set `PYTHONUNBUFFERED=1`.
@@ -215,6 +217,11 @@ When something goes wrong, `poll` carries on where it can:
   error, and polling continues. With a MAC in the config, after 3 failed polls in a row
   it looks the inverter up by MAC and carries on at its new IP;
 - the database is unreachable: a warning, that poll isn't stored, polling continues;
+- the plant's reading is a glitch (a total load of exactly 0 while Running: see
+  [docs/SIGENSTOR_NOTES.md](docs/SIGENSTOR_NOTES.md#quirks)): it's stored, and the next poll comes
+  a second later instead of on the schedule, up to twice in a row. Each is an ordinary poll
+  (counted by `--count`). The dashboard, the daily totals and the alerts leave glitched readings
+  out;
 - weather, radar and alert problems never stop it;
 - it **stops** on a Modbus exception (exit 4: most likely a register the device doesn't support)
   or a database that rejects the data (exit 10), since retrying wouldn't help.
@@ -225,14 +232,17 @@ To run it for good (at boot, restarted after a crash, logging to the journal), s
 ```
 sigen dashboard [--host 0.0.0.0] [--port 8050] [--reload]
 ```
-A web page of charts from the database: each PV string's power against its clear-sky model
-(from the config's `site` and `array`), with strips underneath for the radar's rain or snow at
-your site and NOAA's satellite cloud; energy by load, smart-load power, the battery's
-temperatures, and battery and solar power with the state of charge and reserve. Windows: today,
-the last 6 h / 24 h / 3 days, or any day; a window that reaches now refreshes every 5 minutes.
-Opening the page also fetches that window's satellite data in the background (`sigen satellite`,
-see below). **Daily totals** (`/daily`) shows a day's energy and a diagram of where it went (solar
-to the house, the battery and the grid, and so on), drawn in the browser with no libraries.
+A web page of live charts, drawn in your browser by [uPlot](https://github.com/leeoniya/uPlot)
+(loaded from a CDN) from the database's numbers: where the window's energy went (a Sankey
+diagram: solar to the house, the battery and the grid, and so on); each PV string's voltage, and
+its power against its clear-sky model (from the config's `site` and `array`) with strips
+underneath for the radar's rain or snow at your site and NOAA's satellite cloud; energy and power
+now by load; smart-load energy and power; the battery's temperatures; and battery and solar power
+with the state of charge and reserve. A menu picks the window: today, the last 10 min to 7 days,
+or any day. A window that reaches now is topped up every 15 s with only the newer readings
+(`/data/<chart>.json?since=…`, which your own code can use too). Times show in your browser's time
+zone. Opening the page also fetches that window's satellite data in the background (`sigen
+satellite`, see below). **Daily totals** (`/daily`) shows a day's totals and every flow.
 It listens on every interface, so a phone on the same network can open
 `http://<this computer's IP>:8050/` (printed at start; Windows Firewall asks the first time).
 Read-only. `--reload` restarts it when its code changes, and re-reads changed page templates.

@@ -1,4 +1,4 @@
-/* The uPlot dashboard's charts (templates/uplot_dashboard.html, /uplot_dashboard).
+/* The dashboard's charts (templates/dashboard.html, /).
 
    Each chart's numbers stay in the page. The first fetch of its /data/<name>.json brings the whole window; after that,
    every few seconds, ?since=<the newest "t", exactly as it came> brings only the readings after it. (The string, not
@@ -15,9 +15,9 @@
 
   // ---------- arithmetic ----------
 
-  // A trailing mean over each reading's last `window` seconds (readings in (t − window, t]), as charts.rolling_mean:
-  // null (a gap in the line) unless those readings span at least coverage × window with no gap over maxGap between
-  // them, i.e. at the start and after a stop in the polling, rather than a mean of a few readings.
+  // A trailing mean over each reading's last `window` seconds (readings in (t − window, t]): null (a gap in the line)
+  // unless those readings span at least coverage × window with no gap over maxGap between them, i.e. at the start and
+  // after a stop in the polling, rather than a mean of a few readings.
   function rollingMean(ts, vs, window, coverage = 0.9, maxGap = 120) {
     const out = [];
     let total = 0, lo = 0, lastGap = null;                // lastGap: the index after the latest gap over maxGap
@@ -93,10 +93,10 @@
   // ---------- drawing ----------
 
   const TAB10 = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22",
-                 "#17becf"];                              // matplotlib's C0–C9: the PNG charts' colours
+                 "#17becf"];                              // matplotlib's C0–C9, as the old PNG charts had
   const GREY = "#808080", BLUE = TAB10[0], ORANGE = TAB10[1], GREEN = TAB10[2], RED = TAB10[3], PURPLE = TAB10[4];
   const GOLDENROD = "#daa520";
-  const MEAN = 5 * 60;                                    // seconds: the 5-minute means, as on the PNG charts
+  const MEAN = 5 * 60;                                    // seconds: the 5-minute means
   const AXIS = 60;                                        // px: the battery charts' axes, so their time axes line up
   const BAR_ROW = 34;                                     // px per bar of the energy-by-load chart
   const labelWidth = (labels) => {                        // px: the widest label in uPlot's axis font
@@ -111,18 +111,35 @@
     return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
   };
   const pad2 = (n) => String(n).padStart(2, "0");
-  const when = (seconds) => {                             // 10-14 18:05:30, this device's time
+  // Times in this device's zone, 24-hour: ymd "2026-10-14", hm "18:05", when "2026-10-14 18:05:30".
+  const ymd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const hm = (d) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const when = (seconds) => {
     const d = new Date(seconds * 1000);
-    return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:` +
-           pad2(d.getSeconds());
+    return `${ymd(d)} ${hm(d)}:${pad2(d.getSeconds())}`;
   };
+
+  // The time axis's tick labels (uPlot's axis `values`): 24-hour times, with seconds once the ticks are under a minute
+  // apart, and the date under the first tick and wherever a new day starts; just the date for ticks a day or more
+  // apart.
+  function timeTicks(u, splits, axisIdx, space, incr) {
+    let day = null;
+    return splits.map((s) => {
+      const d = new Date(s * 1000), date = ymd(d);
+      if (incr >= 86400) return date;
+      const time = incr < 60 ? `${hm(d)}:${pad2(d.getSeconds())}` : hm(d);
+      const label = date !== day ? `${time}\n${date}` : time;
+      day = date;
+      return label;
+    });
+  }
   const shown = (digits, unit) => (u, v) => (v == null ? "-" : `${v.toFixed(digits)} ${unit}`);
   const padded = (lo, hi) => {                            // 5 % either side, as matplotlib's margins
     const m = (hi - lo) * 0.05 || 1;
     return [lo - m, hi + m];
   };
   const withZero = (u, min, max) => (min == null ? [0, 1] : padded(Math.min(min, 0), Math.max(max, 0)));
-  const loadColours = (labels) =>                         // as charts._colors: C0, C1, … in order, Other grey
+  const loadColours = (labels) =>                         // C0, C1, … in order, Other grey
     labels.map((label, i) => (label.startsWith("Other") ? GREY : TAB10[i % TAB10.length]));
 
   // A thin black line at 0 on `scale` (matplotlib's axhline(0)).
@@ -282,6 +299,110 @@
       `${label}</text></svg>`;
   }
 
+  // ---------- the battery temperatures' two axes, their ticks on the same lines ----------
+
+  // The battery axis: from N = min(0, floor(min / 10) × 10) up in 10 °C steps, at least 40 °C tall and up to the
+  // next 10 above max: usually 0–40, −10–30 on a cold night, 0–50 on a hot day.
+  function tempRange(min, max) {
+    if (min == null || max == null) return [0, 40];
+    const lo = Math.min(0, Math.floor(min / 10) * 10);
+    return [lo, Math.max(lo + 40, Math.ceil(max / 10) * 10)];
+  }
+  const intervals = (lo, hi) => Math.max(1, Math.round((hi - lo) / 10));   // the battery axis's 10 °C steps
+
+  // A second axis with the same number of intervals `k`: the first step of `steps` that fits [min, max] in k of them,
+  // starting from a multiple of it at or below min. So each of its ticks lies on one of the first axis's.
+  function alignedRange(min, max, k, steps = [10, 20, 25, 50, 100]) {
+    if (min == null || max == null) return [0, k * steps[0]];
+    for (const step of steps) {
+      const lo = Math.floor(min / step) * step;
+      if (lo + k * step >= max) return [lo, lo + k * step];
+    }
+    const step = Math.ceil((max - min) / k), lo = Math.floor(min / step) * step;
+    return [lo, lo + k * step];
+  }
+
+  // k + 1 ticks, evenly from lo to hi.
+  const evenSplits = (lo, hi, k) => Array.from({length: k + 1}, (_, i) => lo + (hi - lo) * i / k);
+
+  // The lowest and highest value of series `idxs` within the x range shown ([null, null] if none).
+  function visibleExtent(u, idxs) {
+    const x = u.data[0], from = u.scales.x.min, to = u.scales.x.max;
+    let lo = Infinity, hi = -Infinity;
+    for (let k = 0; k < x.length; k++) {
+      if (x[k] < from || x[k] > to) continue;
+      for (const i of idxs) {
+        const v = u.data[i][k];
+        if (v == null) continue;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+    }
+    return lo <= hi ? [lo, hi] : [null, null];
+  }
+
+  // ---------- a bar per load, turned on its side (energy by load, power by load now) ----------
+
+  const barsHeight = (bars) => Math.max(Object.keys(bars).length, 1) * BAR_ROW + 60;
+
+  // An axis span that only ever grows, so bars that change every few seconds don't all rescale whenever the biggest
+  // one moves: at first the values' span × ROOM; after that, an end moves out (to that value × ROOM again, for room
+  // to wiggle) only when a value passes it.
+  const ROOM = 1.3;
+  function growingSpan(span, values) {
+    const hi = Math.max(...values, 0.01), lo = Math.min(...values, 0);
+    const [bottom, top] = span || [0, 0];
+    return [lo < bottom ? lo * ROOM : bottom, hi > top ? hi * ROOM : top];
+  }
+
+  // {load: value}, `total` the house's (for each bar's share): horizontal bars in the loads' colours, the loads' names
+  // down the left, each bar's value and share written past its end (or inside it, in white, where there's no room). A
+  // bar can be negative (Other, when the loads were read a moment apart from the total): it runs left of 0.
+  function loadBars(bars, total, unit, axisLabel, note, span = null) {    // span: [bottom, top], else fitted
+    const labels = Object.keys(bars), values = labels.map((l) => bars[l]), n = labels.length;
+    const colours = loadColours(labels), xs = labels.map((_, i) => i);
+    const [bottom, top] = span || [Math.min(...values, 0) * 1.05, Math.max(...values, 0.01) * 1.05];
+    const text = (v) => `${v.toFixed(2)} ${unit}` + (total ? ` · ${(100 * v / total).toFixed(1)}%` : "");
+    const annotate = (u) => {
+      const r = root.devicePixelRatio || 1, gap = 5 * r, right = u.bbox.left + u.bbox.width;
+      u.ctx.save();
+      u.ctx.textBaseline = "middle";
+      u.ctx.font = `${12 * r}px system-ui, sans-serif`;
+      values.forEach((v, i) => {
+        const y = u.valToPos(i, "x", true), s = text(v);
+        const end = Math.max(u.valToPos(v, "y", true), u.valToPos(0, "y", true));   // a negative bar: from 0
+        if (end + gap + u.ctx.measureText(s).width <= right) {
+          u.ctx.fillStyle = "#222";
+          u.ctx.textAlign = "left";
+          u.ctx.fillText(s, end + gap, y);
+        } else {                                          // no room past it: inside the bar's end, in white
+          u.ctx.fillStyle = "#fff";
+          u.ctx.textAlign = "right";
+          u.ctx.fillText(s, end - gap, y);
+        }
+      });
+      u.ctx.restore();
+    };
+    return {
+      x: xs,
+      data: values.map((v, i) => xs.map((j) => (j === i ? v : null))),
+      series: labels.map((l, i) => ({label: l, fill: colours[i], stroke: colours[i], width: 0, fillTo: 0,
+                                     paths: root.uPlot.paths.bars({size: [0.7, 40]}), points: {show: false},
+                                     value: shown(2, unit)})),
+      // x is the loads, turned to run down the left (ori 1; dir −1: the first at the top); y, the values, along the
+      // bottom
+      scales: {x: {time: false, ori: 1, dir: -1, range: () => [-0.5, Math.max(n, 1) - 0.5]},
+               y: {ori: 0, range: () => [bottom, top]}},
+      xaxis: {side: 3, splits: () => xs, values: (u, splits) => splits.map((i) => labels[i] ?? ""),
+              grid: {show: false}, size: labelWidth(labels) + 18},
+      axes: [{side: 2, label: axisLabel}],
+      hooks: {draw: [annotate]},
+      legend: {show: false},
+      cursor: {drag: {x: false, y: false}},
+      note,
+    };
+  }
+
   // Series of every reading, faint, behind each one's 5-minute mean: [faint…, means…]; the faint ones are left out of
   // the legend, and hiding a mean hides its readings too.
   function meansOverReadings(t, labels, columns, colours, unit, digits, width = 1.3, names = labels) {
@@ -368,52 +489,26 @@
 
     load_energy: {                                        // horizontal bars: room for the loads' names on the left
       whole: true,
-      height: ({raw}) => Math.max(Object.keys(raw.bars).length, 1) * BAR_ROW + 60,
+      height: ({raw}) => barsHeight(raw.bars),
       build: ({raw}) => {
-        const labels = Object.keys(raw.bars), kwh = labels.map((l) => raw.bars[l]), n = labels.length;
-        const colours = loadColours(labels), xs = labels.map((_, i) => i);
-        const top = Math.max(...kwh, 0.01) * 1.05;
-        const text = (v) => `${v.toFixed(2)} kWh` + (raw.house ? ` · ${(100 * v / raw.house).toFixed(1)}%` : "");
-        const annotate = (u) => {                         // each bar's kWh and share of the house, past its end
-          const r = root.devicePixelRatio || 1, gap = 5 * r, right = u.bbox.left + u.bbox.width;
-          u.ctx.save();
-          u.ctx.textBaseline = "middle";
-          u.ctx.font = `${12 * r}px system-ui, sans-serif`;
-          kwh.forEach((v, i) => {
-            const y = u.valToPos(i, "x", true), end = u.valToPos(v, "y", true), s = text(v);
-            if (end + gap + u.ctx.measureText(s).width <= right) {
-              u.ctx.fillStyle = "#222";
-              u.ctx.textAlign = "left";
-              u.ctx.fillText(s, end + gap, y);
-            } else {                                      // no room past it: inside the bar's end, in white
-              u.ctx.fillStyle = "#fff";
-              u.ctx.textAlign = "right";
-              u.ctx.fillText(s, end - gap, y);
-            }
-          });
-          u.ctx.restore();
-        };
         const hours = raw.first ? (Date.parse(raw.last) - Date.parse(raw.first)) / 3600e3 : 0;
-        return {
-          x: xs,
-          data: kwh.map((v, i) => xs.map((j) => (j === i ? v : null))),
-          series: labels.map((l, i) => ({label: l, fill: colours[i], stroke: colours[i], width: 0,
-                                         paths: root.uPlot.paths.bars({size: [0.7, 40]}), points: {show: false},
-                                         value: shown(2, "kWh")})),
-          // x is the loads, turned to run down the left (ori 1; dir −1: the first at the top); y, the kWh, along
-          // the bottom
-          scales: {x: {time: false, ori: 1, dir: -1, range: () => [-0.5, Math.max(n, 1) - 0.5]},
-                   y: {ori: 0, range: () => [0, top]}},
-          xaxis: {side: 3, splits: () => xs, values: (u, splits) => splits.map((i) => labels[i] ?? ""),
-                  grid: {show: false}, size: labelWidth(labels) + 18},
-          axes: [{side: 2, label: "Energy (kWh)"}],
-          hooks: {draw: [annotate]},
-          legend: {show: false},
-          cursor: {drag: {x: false, y: false}},
-          note: raw.first ? `${when(Date.parse(raw.first) / 1000)} to ${when(Date.parse(raw.last) / 1000)} ` +
-                            `(${hours.toFixed(1)} h, ${raw.house.toFixed(2)} kWh in all).`
-                          : "Fewer than two plant readings in this window.",
-        };
+        return loadBars(raw.bars, raw.house, "kWh", "Energy (kWh)",
+                        raw.first ? `${when(Date.parse(raw.first) / 1000)} to ${when(Date.parse(raw.last) / 1000)} ` +
+                                    `(${hours.toFixed(1)} h, ${raw.house.toFixed(2)} kWh in all).`
+                                  : "Fewer than two plant readings in this window.");
+      },
+    },
+
+    load_power_now: {                                     // the same bars, of the newest reading's power
+      whole: true,
+      height: ({raw}) => barsHeight(raw.bars),
+      build: (s) => {
+        const raw = s.raw;
+        s.span = growingSpan(s.span, Object.values(raw.bars));   // kept in the store: from fetch to fetch
+        return loadBars(raw.bars, raw.house, "kW", "Power (kW), the newest reading",
+                        raw.at ? `At ${when(Date.parse(raw.at) / 1000)}: the house drew ` +
+                                 `${raw.house.toFixed(2)} kW in all.`
+                               : "No plant readings in this window.", s.span);
       },
     },
 
@@ -458,10 +553,17 @@
                    {label: "outside air (Open-Meteo)", stroke: GREY, width: 1.2, dash: [6, 4], value: shown(1, "°C")},
                    {label: "inverter internal (5-min mean)", stroke: RED, width: 1.2, scale: "inverter",
                     value: shown(1, "°C")}],
-          axes: [{label: "Battery (°C)", size: AXIS},
+          // Ticks every 10 °C from 0 or below (tempRange); the inverter's axis has as many intervals (alignedRange),
+          // so its ticks sit on the battery's grid lines. Series 1–4 (the battery and the air) are on the left.
+          axes: [{label: "Battery (°C)", size: AXIS, splits: (u, i, min, max) => evenSplits(min, max, intervals(min, max))},
                  {label: "Inverter internal (°C)", scale: "inverter", side: 1, size: AXIS, stroke: RED,
-                  grid: {show: false}}],
-          scales: {y: {range: withZero}},
+                  grid: {show: false},
+                  splits: (u, i, min, max) => evenSplits(min, max, intervals(u.scales.y.min, u.scales.y.max))}],
+          scales: {y: {range: (u, min, max) => tempRange(min, max)},
+                   inverter: {range: (u, min, max) => {
+                     const [lo, hi] = tempRange(...visibleExtent(u, [1, 2, 3, 4]));
+                     return alignedRange(min, max, intervals(lo, hi));
+                   }}},
           hooks: {draw: [zeroLine("y")]},
           note: n ? `Coolest cluster: low ${Math.min(...coolest).toFixed(1)} °C, now ${coolest[n - 1].toFixed(1)} °C.` : "",
         };
@@ -475,7 +577,7 @@
         const t = s.main.t, bat = s.main.cols.battery || [], pv = s.main.cols.pv || [], soc = s.aux.soc;
         const power = meansOverReadings(t, ["pv", "battery"], [pv, bat], [GOLDENROD, GREEN], "kW", 3, 1.2,
                                         ["PV (5-min mean)", "battery, >0 charging, <0 discharging (5-min mean)"]);
-        let charged = 0, discharged = 0;                  // as the PNG's title: each reading held until the next
+        let charged = 0, discharged = 0;                  // each reading's power held until the next
         for (let k = 0; k + 1 < t.length; k++) {
           const kwh = bat[k] * (t[k + 1] - t[k]) / 3600;
           if (kwh > 0) charged += kwh; else discharged -= kwh;
@@ -519,6 +621,21 @@
   };
 
   // ---------- one chart, kept in the page and topped up ----------
+
+  // A chart's note is tucked away behind the ⓘ button by its title (the page toggles data-open); an error shows anyway,
+  // so a broken chart isn't silently empty.
+  function setNote(note, text) {
+    note.textContent = text;
+    note.hidden = note.dataset.open !== "1";
+  }
+  function setError(note, text) {
+    note.innerHTML = "";
+    const span = root.document.createElement("span");
+    span.className = "error";
+    span.textContent = text;
+    note.appendChild(span);
+    note.hidden = false;
+  }
 
   async function getJSON(url) {
     const d = await (await root.fetch(url)).json();
@@ -567,9 +684,10 @@
       data = [b.x || store.main.t, ...b.data];
       strips = b.strips || [];
       const shape = JSON.stringify([b.series.map((s) => s.label), strips.length]);
-      if (plot !== null && shape === key) {
+      // A whole-window chart (the bars) is built afresh every time: its build's hooks and ranges hold that fetch's
+      // numbers (each bar's label, the axis's length), which setData wouldn't change. It's a handful of bars.
+      if (plot !== null && shape === key && !spec.whole) {
         plot.setData(data, !zoomed);                      // zoomed in: stay there (redraws the strips too)
-        if (spec.height) plot.setSize(size());
         return b;
       }
       if (plot !== null) plot.destroy();                  // a load came or went, or the strips came: a new chart
@@ -580,7 +698,7 @@
         const j = b.pairs[i];
         if (j != null && o && o.show != null && u.series[j].show !== o.show) u.setSeries(j, {show: o.show});
       }];
-      let xaxis = b.xaxis || {};
+      let xaxis = b.x ? b.xaxis || {} : {values: timeTicks, ...(b.xaxis || {})};   // (b.x: not a time axis)
       line = null;
       if (strips.length) {                                // a row per strip between the plot and its time labels
         const band = stripRows(strips.length);
@@ -594,7 +712,7 @@
       plot = new root.uPlot({
         ...size(),
         scales: {x: {time: true, range: xrange}, ...(b.scales || {})},
-        series: [{}, ...b.series],
+        series: [b.x ? {} : {value: (u, v) => (v == null ? "--" : when(v))}, ...b.series],   // the legend's Time
         axes: [xaxis, ...(b.axes || [])],
         hooks, legend: b.legend || {}, cursor: b.cursor || {},
       }, data, el);
@@ -635,7 +753,7 @@
     function render() {                                   // the chart, and the line under it
       if (night()) {
         showNight();
-        note.textContent = `Before sunrise (${hhmm(env.sunrise)}).` + status + sideStatus;
+        setNote(note, `Before sunrise (${hhmm(env.sunrise)}).` + status + sideStatus);
         return;
       }
       hideNight();
@@ -646,7 +764,7 @@
         text = n ? `${n} readings, ${when(t[0])} to ${when(t[n - 1])}.` : "No readings in this window.";
         if (n && b.note) text += ` ${b.note}`;
       }
-      note.textContent = text + status + sideStatus;
+      setNote(note, text + status + sideStatus);
     }
 
     async function updateSide() {                         // the whole window's strips, now and then
@@ -683,12 +801,8 @@
         loaded = true;
         render();
       } catch (e) {
-        note.innerHTML = "";
-        const span = root.document.createElement("span");
-        span.className = "error";
-        span.textContent = `Checked at ${when(checked)}: failed (${e.message})` +
-                           (env.live ? `; trying again in ${env.every} s.` : ".");
-        note.appendChild(span);
+        setError(note, `Checked at ${when(checked)}: failed (${e.message})` +
+                       (env.live ? `; trying again in ${env.every} s.` : "."));
       } finally {
         busy = false;
       }
@@ -702,19 +816,47 @@
     }
   }
 
-  // The page: a live chart for each chart with data, a placeholder sin(x) for the rest.
+  // The Sankey diagram at the top (static/my_sankey.js draws it): the whole window's, fetched again every
+  // env.sankey_every seconds while the window reaches now.
+  function sankeyChart(env, resizers) {
+    const canvas = root.document.getElementById("sankey"), note = root.document.getElementById("note-sankey");
+    let data = null;
+    const draw = () => {
+      const s = data && data.sankey;
+      canvas.style.display = s && s.sources.length ? "block" : "none";
+      if (s && s.sources.length) root.MySankey.draw(canvas, s);
+    };
+    resizers.push(draw);
+    async function update() {
+      const checked = Date.now() / 1000;
+      try {
+        data = await getJSON(env.data.sankey);
+        draw();
+        const s = data.sankey;
+        let text = s ? `${when(Date.parse(data.first) / 1000)} to ${when(Date.parse(data.last) / 1000)}.`
+                     : "No readings in this window.";
+        if (s && s.dropped.length) {
+          text += ` Not drawn: ${s.dropped.length} flow${s.dropped.length > 1 ? "s" : ""} under 0.5 % of the energy ` +
+                  `in (${s.dropped.map((f) => `${f.from} → ${f.to} ${f.kwh.toFixed(3)} kWh`).join(", ")}).`;
+        }
+        setNote(note, text + (env.live ? ` Checked at ${when(checked)}.` : ""));
+      } catch (e) {
+        setError(note, `Checked at ${when(checked)}: failed (${e.message})` +
+                       (env.live ? `; trying again in ${env.sankey_every} s.` : "."));
+      }
+    }
+    update();
+    if (env.live) root.setInterval(update, env.sankey_every * 1000);
+  }
+
+  // The page: the Sankey diagram, and a live chart in each .plot element, by its id (plot-<name>).
   function start(env) {
     const resizers = [];
     root.addEventListener("resize", () => resizers.forEach((resize) => resize()));
-    const N = 501, xs = Array.from({length: N}, (_, i) => -2 * Math.PI + 4 * Math.PI * i / (N - 1));
-    const sin = xs.map(Math.sin);
+    if (env.data.sankey && root.document.getElementById("sankey") && root.MySankey) sankeyChart(env, resizers);
     root.document.querySelectorAll(".plot").forEach((el) => {
       const name = el.id.slice("plot-".length);
-      if (name in env.data && name in CHARTS) return liveChart(name, CHARTS[name], env, resizers);
-      const plot = new root.uPlot({width: el.clientWidth, height: 220, scales: {x: {time: false}},
-                                   series: [{label: "x"}, {label: "placeholder: sin(x)", stroke: "#555", width: 1.5}]},
-                                  [xs, sin], el);
-      resizers.push(() => plot.setSize({width: el.clientWidth, height: 220}));
+      if (name in env.data && name in CHARTS) liveChart(name, CHARTS[name], env, resizers);
     });
     if (env.today) {                                      // "today" after midnight is a new day: load it
       const day = new Date().toDateString();
@@ -722,7 +864,8 @@
     }
   }
 
-  const api = {rollingMean, resample, emptyTable, append, dropBefore, hold, zero, stripRows, stripSpans, nightSvg, CHARTS, start};
+  const api = {rollingMean, resample, emptyTable, append, dropBefore, hold, zero, stripRows, stripSpans, nightSvg, tempRange, alignedRange, evenSplits, timeTicks, growingSpan,
+               CHARTS, start};
   if (typeof module === "object" && module.exports) {
     module.exports = api;
   } else {

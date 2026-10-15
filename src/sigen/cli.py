@@ -9,7 +9,7 @@
     sigen db migrate  [CONFIG]
     sigen db status   [CONFIG]
     sigen db query    SQL [CONFIG] [--json] [--max-rows N] [--max-width CHARS]
-    sigen poll        [--ip IP] [CONFIG] [--interval SECONDS] [--count N]
+    sigen poll        [--ip IP] [CONFIG] [--interval SECONDS] [--offset SECONDS] [--count N]
                       [--weather [--capture-open-meteo-weather DIR]] [--radar [--capture-radar DIR]] [--alerts]
     sigen weather     [CONFIG] [--resolution 60 15] [--record-to-db] [--capture DIR]
     sigen radar       [CONFIG] [--record-to-db] [--capture DIR]
@@ -461,6 +461,9 @@ def cmd_poll(args) -> int:
                 if netlookup.mac_for_ip(current_ip) == mac:
                     return current_ip
                 return netlookup.find_ip_for_mac(mac, [str(h) for h in local_subnet().hosts()])
+    if not 0 <= args.offset < args.interval:
+        err(f"error: --offset must be at least 0 and less than --interval ({args.interval:g})")
+        return ExitCode.USAGE
     if args.capture_open_meteo_weather and not args.weather:
         err("error: --capture-open-meteo-weather needs --weather")
         return ExitCode.USAGE
@@ -483,12 +486,14 @@ def cmd_poll(args) -> int:
                                     ("alerts" + ("" if args.weather else " (no --weather: outside air unknown)"),
                                      args.alerts)) if on]
     print(f"Polling {ip}:{args.port} units {', '.join(f'{u} ({d})' for u, d in units.items())} every "
-          f"{args.interval:g}s into {db.redact(url)} (Ctrl+C to stop)"
+          f"{args.interval:g}s" + (f", {args.offset:g}s past the boundary" if args.offset else "")
+          + f" into {db.redact(url)} (Ctrl+C to stop)"
           + (f"; following MAC {inverter.mac}" if rediscover else "")
           + (f"; also {' and '.join(extras)}" if extras else ""), file=sys.stderr)
     connector_for = lambda address, unit: functools.partial(ModbusClient, address, args.port, unit, args.timeout)
     try:
         return poll.run(connector_for=connector_for, ip=ip, units=units, db_url=url, interval=args.interval,
+                        offset=args.offset,
                         count=args.count, rediscover=rediscover, background=background, watcher=watcher)
     finally:
         for s in (store, alert_store):
@@ -927,6 +932,10 @@ def build_parser() -> argparse.ArgumentParser:
     _config_option(pl, "database.url, devices.inverter (ip, mac, units), and site for --weather / --radar")
     pl.add_argument("--interval", metavar="SECONDS", type=_positive(float, 1.0), default=60.0,
                     help="seconds between polls (default: 60; minimum 1)")
+    pl.add_argument("--offset", metavar="SECONDS", type=float, default=0.0,
+                    help="poll this long after each --interval boundary of the clock (default: 0, on it; e.g. "
+                         "--interval 15 --offset 7 polls at :07, :22, :37, :52). For a second poller of the same "
+                         "device: two reading it at the same instant seem to catch its totals mid-refresh")
     pl.add_argument("--count", metavar="N", type=_positive(int, 1),
                     help="stop after N polls (default: run until Ctrl+C; weather fetches don't count)")
     pl.add_argument("--weather", action="store_true",
@@ -1009,15 +1018,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     da = sub.add_parser("dashboard", formatter_class=fmt, epilog=EXIT_CODE_HELP,
                         help="a web page of charts from the database (strings, smart loads, battery)",
-                        description="Serve a page of charts drawn from the database on each request: string "
-                                    "voltage and power (every reading), energy by load, each smart load's energy since "
-                                    "the window started (its counter, every reading), smart-load power (5-minute "
-                                    "means), the battery's "
-                                    "temperatures with the inverter's on a right axis, and battery and PV power; smart loads "
-                                    "include Other = house minus all smart loads. Today by default; links for the last 6 h / 24 h / 3 days and other days. "
-                                    "A window that reaches now reloads every 5 minutes. Read-only. Listens on all "
-                                    "interfaces by default so a phone on the same network can open it (Windows "
-                                    "Firewall asks the first time).")
+                        description="Serve a page of charts of the database, drawn in the browser (uPlot): string "
+                                    "voltage and power (every reading; with the clear-sky model, and the radar and "
+                                    "satellite strips underneath), energy by load, each smart load's energy since the "
+                                    "window started, smart-load power (5-minute means), the battery's temperatures "
+                                    "with the inverter's on a right axis, and battery and PV power with the SOC; "
+                                    "smart loads include Other = house minus all smart loads. Today by default; links "
+                                    "for the last 6 h / 24 h / 3 days and other days, and a daily-totals page. A "
+                                    "window that reaches now is topped up every 15 s with only the newer readings. "
+                                    "Read-only. Listens on all interfaces by default so a phone on the same network "
+                                    "can open it (Windows Firewall asks the first time).")
     _config_option(da, "database.url, smart-load names, and site.timezone for local times")
     da.add_argument("--host", default="0.0.0.0",
                     help="address to listen on (default: 0.0.0.0, every interface; 127.0.0.1 = this computer only)")

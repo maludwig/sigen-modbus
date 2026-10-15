@@ -1,26 +1,27 @@
-"""`sigen dashboard`: a small web page of charts drawn from the database on each request (sigen.charts).
+"""`sigen dashboard`: a small web page of charts of the database (sigen.charts), drawn in the browser.
 
-    /                       the page (templates/dashboard.html): links to windows, one image per chart
-    /chart/<name>.png       one chart for the window in the query string
+    /                       the page (templates/dashboard.html): links to windows, a chart per CHARTS, drawn by uPlot
+                            (static/live_charts.js) from its data endpoint
+    /data/<name>.json       a chart's numbers (DATA), for the window; ?since= for only the readings after one it sent
     /daily?day=2026-10-11   a day's totals and a Sankey diagram of where its energy went (templates/daily.html,
                             drawn on a canvas by static/my_sankey.js: no libraries, no internet needed)
-    /uplot_dashboard        the charts being rebuilt in the browser with uPlot (templates/uplot_dashboard.html), each
-                            from /data/<name>.json: the numbers, topped up live with ?since= (placeholders so far for
-                            the charts without one)
-    /night                  /uplot_dashboard for today as it looks before sunrise (the string charts' night sky)
+    /night                  / for today as it looks before sunrise (the string charts' night sky)
 
 Windows (query string, local time in the config's site timezone, else this computer's):
     (none)                  today, midnight to now
     ?day=2026-10-11         that local day
-    ?hours=6                the last N hours (1 to 744)
-A window that reaches now reloads every 5 minutes. Read-only: each request uses its own connection in a read-only
-session. Failures are drawn into the chart image (database unreachable, bad window), never a traceback.
+    ?hours=6                the last N hours (up to 744)
+    ?minutes=10             the last N minutes
+The page keeps each chart's numbers and, for a window that reaches now, asks every LIVE_EVERY seconds for only the
+readings after its newest. Times go out in UTC; the browser shows them in its own zone. Read-only: each request uses
+its own connection in a read-only session. Failures come back as JSON errors, which the page shows under the chart.
 
 Satellite: with a site and a config file, opening the page starts `sigen satellite` for the window (up to
-MAX_FETCH long) as a separate process and doesn't wait for it: its output goes to <cube dir>/satellite.log, and it
-refuses to run (exit 7) while another run for that cube directory is going. At most one start per window every
-FETCH_EVERY, and none while the last one this dashboard started is still running. The charts draw whatever cubes
-exist when they're drawn (sigen satellite swaps each one in whole).
+MAX_FETCH long) as a separate process and doesn't wait for it, and so does each fetch of the string-power strips
+(every STRIPS_EVERY): its output goes to <cube dir>/satellite.log, and it refuses to run (exit 7) while another run
+for that cube directory is going. At most one start per window every FETCH_EVERY, and none while the last one this
+dashboard started is still running. The strips show whatever cubes exist when they're fetched (sigen satellite swaps
+each one in whole).
 """
 import datetime
 import json
@@ -34,26 +35,30 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from flask import Flask, Response, abort, render_template, request, url_for
+from flask import Flask, Response, abort, redirect, render_template, request, url_for
 
 from sigen import charts, db
 from sigen.config import Config
 from sigen.errors import DatabaseError
 
-REFRESH_SECONDS = 300
+REFRESH_SECONDS = 300           # the daily page reloads this often while its day is today
 MAX_HOURS = 24 * 31
-CHARTS = {                     # name -> (title on the page, what it needs)
+CHARTS = {                     # name -> its title on the page; each has a data endpoint (DATA) and a spec in live_charts.js
     "string_voltage": "String voltage, every reading",
     "string_power": "String power, every reading, with each string's clear-sky model dashed (config array); "
                     "underneath, the radar's rain or snow at the site and NOAA's satellite cloud",
     "load_energy": "Energy by load (smart loads and Other)",
+    "load_power_now": "Power by load now (the newest reading, every 15 s; smart loads and Other)",
     "load_counters": "Smart-load energy since the window started (the counters: exact energy; slope = power)",
     "load_snapshots": "Smart-load power (5-minute mean; every reading faint behind)",
     "battery_temps": "Battery temperatures (left axis) and the inverter's (red, right axis, 5-minute mean)",
     "battery_power": "Battery charge / discharge and PV power (5-minute means; every reading faint behind), and the "
                      "SOC with its reserve and charge cut-off settings (blue, right axis)",
 }
-QUICK = [("Today", {}), ("6 h", {"hours": "6"}), ("24 h", {"hours": "24"}), ("3 days", {"hours": "72"})]
+QUICK = [("Today", {}), ("Last 10 min", {"minutes": "10"}), ("Last 30 min", {"minutes": "30"})] + [
+    (label, {"hours": h}) for label, h in (                            # the window menu; then "Custom day…"
+    ("Last hour", "1"), ("Last 2 h", "2"), ("Last 6 h", "6"), ("Last 12 h", "12"), ("Last 24 h", "24"),
+    ("Last 3 days", "72"), ("Last 7 days", "168"))]
 FETCH_EVERY = datetime.timedelta(minutes=10)     # NOAA's scan interval
 MAX_FETCH = datetime.timedelta(days=3)           # longer windows don't start a fetch (a day is ~1 minute, ~210 MB)
 SATELLITE_LOG = "satellite.log"
@@ -64,6 +69,7 @@ SOC_MARGIN = datetime.timedelta(minutes=1)       # a top-up's plant readings: th
 SKY_MARGIN = datetime.timedelta(hours=1)         # a top-up's clear-sky model: Open-Meteo's weather comes in late
 MODEL_AFTER_SUNSET = datetime.timedelta(minutes=30)   # the clear-sky model stops this long after sunset (model_end)
 STRIPS_EVERY = 300              # seconds between the page's fetches of the string-power strips (radar 6 min, NOAA 10)
+SANKEY_EVERY = 60               # seconds between the page's fetches of the Sankey diagram (the whole window's flows)
 
 
 class BadWindow(ValueError):
@@ -118,17 +124,22 @@ def parse_window(args, tz, now: Optional[datetime.datetime] = None) -> Tuple[dat
                                                                             bool, str]:
     """(start, end, reaches now, description) from the query string."""
     now = now or datetime.datetime.now(tz)
-    day, hours = args.get("day"), args.get("hours")
-    if day and hours:
-        raise BadWindow("give day or hours, not both")
-    if hours:
+    day, hours, minutes = args.get("day"), args.get("hours"), args.get("minutes")
+    if sum(map(bool, (day, hours, minutes))) > 1:
+        raise BadWindow("give one of day, hours or minutes")
+    if hours or minutes:
+        name, value, per_hour, unit = ("hours", hours, 1, "h") if hours else ("minutes", minutes, 60, "min")
         try:
-            n = float(hours)
+            n = float(value)
         except ValueError:
-            raise BadWindow(f"hours={hours!r} isn't a number")
-        if not 0 < n <= MAX_HOURS:
-            raise BadWindow(f"hours must be between 0 and {MAX_HOURS}")
-        return now - datetime.timedelta(hours=n), now, True, f"last {n:g} h"
+            raise BadWindow(f"{name}={value!r} isn't a number")
+        if not 0 < n <= MAX_HOURS * per_hour:
+            raise BadWindow(f"{name} must be between 0 and {MAX_HOURS * per_hour}")
+        # exactly that long, across a daylight-saving change too: subtracted in UTC (on a local time, Python subtracts
+        # on the wall clock, and 72 h back across the autumn change would be 73 real hours)
+        span = datetime.timedelta(hours=n / per_hour)
+        start = (now.astimezone(datetime.timezone.utc) - span).astimezone(tz)
+        return start, now, True, f"last {n:g} {unit}"
     if day:
         try:
             date = datetime.date.fromisoformat(day)
@@ -148,12 +159,6 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
     tz = ZoneInfo(config.site.timezone) if config.site else datetime.datetime.now().astimezone().tzinfo
     names = config.smart_load_names
     app = Flask(__name__)
-    # Each chart's size in inches: what it's drawn at (errors too), and the box the page reserves for it.
-    sizes = {"string_voltage": charts.strings_size(),
-             "string_power": charts.strings_size(precip=True, satellite=config.site is not None),
-             "load_energy": charts.ENERGY_SIZE, "load_counters": charts.ENERGY_SINCE_START_SIZE,
-             "load_snapshots": charts.SNAPSHOTS_SIZE, "battery_temps": charts.BATTERY_TEMPS_SIZE,
-             "battery_power": charts.BATTERY_POWER_SIZE}
     fetch_lock = threading.Lock()
     fetches: Dict[str, object] = {"process": None}       # the last process started
     last_start: Dict[Tuple[datetime.date, datetime.date], float] = {}   # window's local days -> time.monotonic()
@@ -188,55 +193,6 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         except (OSError, KeyError, ValueError) as e:      # a damaged cube: draw the strips empty, say why
             print(f"warning: reading the satellite cubes: {e}", file=sys.stderr)
             return goes_shade.ShadeSeries()
-
-    def draw(name, start, end):
-        conn = db.connect(url)
-        try:
-            with db.errors_as(f"drawing {name}"):
-                conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
-                if name == "string_voltage":
-                    strings = charts.string_readings(conn, start, end)
-                    return charts.strings_figure(strings, tz, "voltage", xlim=charts.live_limits(strings))
-                if name == "string_power":
-                    strings = charts.string_readings(conn, start, end)
-                    sky = faces = None
-                    if config.array is not None and config.site is not None:
-                        sky = charts.clear_sky_strings(conn, config.site, config.array, start, end)
-                        faces = {n: s.face for n, s in config.array.strings.items()}
-                    return charts.strings_figure(strings, tz, "power", sky, faces, xlim=charts.live_limits(strings),
-                                                 precip=charts.precipitation(conn, start, end),
-                                                 satellite=satellite_series(start, end))
-                if name == "load_energy":
-                    return charts.energy_figure(charts.energy_by_load(conn, names, start, end), tz)
-                if name == "load_counters":
-                    return charts.energy_since_start_figure(charts.smart_load_energy(conn, names, start, end), tz)
-                if name == "battery_temps":
-                    series = charts.inverter_series(conn, [*charts.BATTERY_TEMPS, charts.INVERTER_TEMP], start, end)
-                    return charts.battery_temps_figure(series, charts.air_temperatures(conn, start, end), tz)
-                if name == "battery_power":
-                    series = charts.inverter_series(conn, [charts.BATTERY_POWER, charts.PV_POWER], start, end)
-                    soc = charts.unit_series(conn, charts.PLANT, [charts.SOC, *charts.SOC_LIMITS], start, end)
-                    return charts.battery_power_figure(series, tz, soc)
-                return charts.snapshots_figure(charts.load_power_snapshots(conn, names, start, end), tz)
-        finally:
-            conn.close()
-
-    @app.get("/")
-    def page():
-        query = {k: v for k, v in request.args.items() if k in ("day", "hours")}
-        try:
-            start, end, live, description = parse_window(request.args, tz)
-            error = None
-            fetch_satellite(start, end)                  # in the background: this page doesn't wait for it
-        except BadWindow as e:
-            start = end = None
-            live, description, error = False, "", str(e)
-        nav = day_nav(start, live) if start is not None and "hours" not in query else []
-        daily_query = {"day": f"{start.date()}"} if start is not None and "hours" not in query and not live else {}
-        return render_template("dashboard.html", charts=CHARTS, query=query, quick=QUICK, nav=nav, live=live,
-                               pixels={name: charts.pixels(size) for name, size in sizes.items()},
-                               refresh=REFRESH_SECONDS, description=description, error=error, tz=str(tz),
-                               drawn=datetime.datetime.now(tz), daily_query=daily_query)
 
     def day_nav(start, live):
         """The previous / next day links (none after today)."""
@@ -273,12 +229,6 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
                                span=(f"{energy.first.astimezone(tz):%H:%M} to {energy.last.astimezone(tz):%H:%M}"
                                      if energy is not None else ""),
                                drawn=datetime.datetime.now(tz))
-
-    @app.get("/uplot")
-    def uplot_trial():
-        """A trial of uPlot (charts drawn in the browser from numbers): Other's power over the last hour, from
-        /data/other.json, kept in the page and topped up with the newer readings every few seconds."""
-        return render_template("uplot.html", uplot=UPLOT, every=5)
 
     # ---------- the data endpoints: numbers for charts drawn in the browser ----------
     # Each answers JSON {"t": [ISO 8601 UTC, to the microsecond: "2026-10-14T03:01:30.997599Z"], …the values…} for
@@ -364,12 +314,11 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
 
     def string_power_strips_data(conn, start, end, since):
         """{"strips": [{"label", "starts": [ISO…], "length" (seconds), "colours": ["#rrggbb", or null: no data,
-        hatched]}], "notes": [how to read them]}: the strips under the string-power chart, as on the PNG one: the
-        radar (charts.precipitation_strip) and with a site the satellite (satellite_strips), for the whole window
-        every time. They change every few minutes, so the page fetches them again rather than topping them up. Each
-        fetch also starts `sigen satellite` for the window (fetch_satellite's limits apply), so a page left open keeps
-        getting new scans: the PNG page does that by reloading, the uPlot page never reloads."""
-        from matplotlib.colors import to_hex
+        hatched]}], "notes": [how to read them]}: the strips under the string-power chart: the radar
+        (charts.precipitation_strip) and with a site the satellite (satellite_strips), for the whole window every
+        time. They change every few minutes, so the page fetches them again rather than topping them up. Each fetch
+        also starts `sigen satellite` for the window (fetch_satellite's limits apply), so a page left open (it never
+        reloads) keeps getting new scans."""
         fetch_satellite(start, end)                      # in the background: these are the cubes there are now
         strip, note = charts.precipitation_strip(charts.precipitation(conn, start, end))
         strips, notes = [strip], [note]
@@ -379,7 +328,7 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             strips, notes = strips + more, notes + [note]
         return {"strips": [{"label": s.label, "starts": [iso_utc(x) for x in s.starts],
                             "length": s.length.total_seconds(),
-                            "colours": [None if c is None else to_hex(c) for c in s.colours]} for s in strips],
+                            "colours": s.colours} for s in strips],
                 "notes": notes}
 
     def load_energy_data(conn, start, end, since):
@@ -389,6 +338,22 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         if e is None:
             return {"first": None, "last": None, "house": None, "bars": {}}
         return {"first": iso_utc(e.first[1]), "last": iso_utc(e.last[1]), "house": e.house, "bars": e.bars}
+
+    def sankey_data(conn, start, end, since):
+        """{"first", "last" (the readings the totals run between), "sankey": charts.sankey's diagram} for the window,
+        as /daily's (for any window, not only a day); the whole window every time. Empty with no readings."""
+        e = charts.day_energy(conn, start, end)
+        if e is None:
+            return {"first": None, "last": None, "sankey": None}
+        return {"first": iso_utc(e.first), "last": iso_utc(e.last), "sankey": charts.sankey(e)}
+
+    def load_power_now_data(conn, start, end, since):
+        """{"at" (the newest plant reading in the window), "house" (kW, the total), "bars": {load: kW}}: that one
+        reading, every time (the page fetches it whole every few seconds). Empty with no reading."""
+        p = charts.latest_load_power(conn, names, start, end)
+        if p is None:
+            return {"at": None, "house": None, "bars": {}}
+        return {"at": iso_utc(p.at), "house": round(p.house, 3), "bars": {k: round(v, 3) for k, v in p.bars.items()}}
 
     def load_counters_data(conn, start, end, since):
         """{"t", "kwh": {load: [lifetime kWh, …]}}: the counters at every plant reading (thinned past
@@ -433,38 +398,47 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         return {"t": t, "kw": kw, "soc": {"t": soc_t, "pct": pct}}
 
     DATA = {                                                    # chart name -> (what it's doing, read)
+        "sankey": ("reading where the energy went", sankey_data),
         "string_voltage": ("reading the string voltages", string_voltage_data),
         "string_power": ("reading the string power", string_power_data),
         "string_power_strips": ("reading the radar and satellite strips", string_power_strips_data),
         "load_energy": ("reading the energy by load", load_energy_data),
+        "load_power_now": ("reading the newest power by load", load_power_now_data),
         "load_counters": ("reading the smart-load counters", load_counters_data),
         "load_snapshots": ("reading the smart-load power", load_snapshots_data),
         "battery_temps": ("reading the battery temperatures", battery_temps_data),
         "battery_power": ("reading the battery and PV power", battery_power_data),
     }
 
+    @app.get("/")
+    def page():
+        """The dashboard: each chart's title over its chart, drawn in the browser by uPlot (static/live_charts.js)
+        from its /data/<name>.json; a window that reaches now is topped up every LIVE_EVERY seconds."""
+        return render_page(request.args)
+
     @app.get("/uplot_dashboard")
     def uplot_dashboard():
-        """Where the dashboard is being rebuilt in uPlot: each chart's title, over its chart where it has a data
-        endpoint (DATA), else a placeholder sin(x). Same windows as the dashboard; a window that reaches now is topped
-        up every LIVE_EVERY seconds."""
-        return uplot_page(request.args)
+        """Where the dashboard was while it was being rebuilt in uPlot: now it's /."""
+        return redirect(url_for("page", **request.args))
 
     @app.get("/night")
     def night():
-        """The uPlot dashboard for today as it looks before sunrise, whatever the time: its sunrise is tomorrow's, so
-        the string charts show their night sky (to see it by day)."""
-        return uplot_page({}, sunrise_in_days=1)
+        """The dashboard for today as it looks before sunrise, whatever the time: its sunrise is tomorrow's, so the
+        string charts show their night sky (to see it by day)."""
+        return render_page({}, sunrise_in_days=1)
 
-    def uplot_page(args, sunrise_in_days: int = 0):
-        query = {k: v for k, v in args.items() if k in ("day", "hours")}
+    def render_page(args, sunrise_in_days: int = 0):
+        query = {k: v for k, v in args.items() if k in ("day", "hours", "minutes")}
+        span = "hours" in query or "minutes" in query   # a sliding window
         try:
             start, end, live, description = parse_window(args, tz)
             error = None
-            fetch_satellite(start, end)                  # for the strips, as the dashboard's page does
+            fetch_satellite(start, end)                  # in the background: the page doesn't wait for it
         except BadWindow as e:
-            live, description, error = False, "", str(e)
+            start, live, description, error = None, False, "", str(e)
         live = live and error is None
+        nav = day_nav(start, live) if start is not None and "day" in query else []   # ◀ ▶ beside a custom day
+        daily_query = {"day": f"{start.date()}"} if start is not None and not span and not live else {}
         sunrise = None                                  # "today" before sunrise: the string charts show the night
         if live and not query and config.site is not None:
             from sigen.goes import sun_rise_set
@@ -478,13 +452,18 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             "live": live,                               # top the charts up every `every` seconds
             "every": LIVE_EVERY,
             "strips_every": STRIPS_EVERY,
-            "keep": float(query["hours"]) * 3600 if "hours" in query and live else None,   # a sliding window (s)
+            "sankey_every": SANKEY_EVERY,
+            "keep": ((float(query["hours"]) * 3600 if "hours" in query else float(query["minutes"]) * 60)
+                     if span and live else None),                   # a sliding window's length (s)
             "today": live and not query,                # load again after midnight, for the new day
             "sunrise": sunrise,                         # today's, unix seconds (null: not "today", or no site)
             "live_volts": charts.LIVE_VOLTS,
         }
-        return render_template("uplot_dashboard.html", uplot=UPLOT, charts=CHARTS, query=query, quick=QUICK,
-                               description=description, error=error, live=live, every=LIVE_EVERY, env=env)
+        return render_template("dashboard.html", uplot=UPLOT, charts=CHARTS, query=query, quick=QUICK, nav=nav,
+                               today=f"{datetime.datetime.now(tz).date()}",
+                               listed="day" in query or query in [params for _, params in QUICK],
+                               daily_query=daily_query, description=description, error=error, live=live,
+                               every=LIVE_EVERY, env=env)
 
     @app.get("/data/<name>.json")
     def chart_data(name):
@@ -493,31 +472,5 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             abort(404)
         what, read = DATA[name]
         return data_response(what, read, {})
-
-    @app.get("/data/other.json")
-    def other_json():
-        """Other (the house's power minus all 24 smart loads, as on the smart-load chart) at every plant reading, for
-        the last hour by default: {"t", "kw": […]}."""
-        def read(conn, start, end, since):
-            s = charts.load_power_snapshots(conn, names, start, end)
-            kw = s.series.get(charts.OTHER, [])
-            keep = after(s.times[:len(kw)], since)
-            return {"t": [iso_utc(s.times[k]) for k in keep], "kw": [round(kw[k], 3) for k in keep]}
-        return data_response("reading Other", read, {"hours": "1"})
-
-    @app.get("/chart/<name>.png")
-    def chart(name):
-        if name not in CHARTS:
-            abort(404)
-        try:
-            start, end, _, _ = parse_window(request.args, tz)
-            fig = draw(name, start, end)
-            status = 200
-        except BadWindow as e:
-            fig, status = charts.message_figure(f"bad window: {e}", *sizes[name]), 400
-        except DatabaseError as e:
-            fig, status = charts.message_figure(f"database: {e}", *sizes[name]), 503
-        return Response(charts.png(fig), status=status, mimetype="image/png",
-                        headers={"Cache-Control": "no-store"})
 
     return app

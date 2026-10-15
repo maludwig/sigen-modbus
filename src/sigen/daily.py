@@ -10,7 +10,7 @@ catches up on any that ended while it wasn't running. Recomputing a day replaces
 import datetime
 from typing import Callable, List, Optional
 
-from sigen import db
+from sigen import charts, db
 
 METHOD = 2                     # how a day is computed (sigen.charts.day_energy): bump it when that changes.
                                # 1: the device's daily counters for solar, house, battery; 2: lifetime counters only
@@ -39,8 +39,7 @@ def finished_days(conn, tz) -> List[datetime.date]:
 def store_day(conn, day: datetime.date, tz) -> Optional[dict]:
     """Compute `day` and store it (replacing its row, if any). Returns the row stored, or None if the day has no
     plant readings."""
-    from sigen import charts                   # matplotlib: only when there's a day to compute
-    start = datetime.datetime.combine(day, datetime.time(), tz)
+    start =datetime.datetime.combine(day, datetime.time(), tz)
     end = start + datetime.timedelta(days=1)   # wall-clock arithmetic: the next local midnight, DST or not
     with db.errors_as(f"computing the energy of {day}"):
         e = charts.day_energy(conn, start, end)

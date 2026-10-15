@@ -3,7 +3,8 @@
 - Watcher, in poll's thread: a Buffer of the last SPAN of polls (plant and inverter values side by side, named like
   the scaled views' columns, after the gain) and the outside air (Open-Meteo's 15-minute temperatures, which the
   weather thread adds as they arrive). Filled once from the database when poll starts (one query for the readings,
-  one for the air), then from each poll's values in memory: the database isn't read again.
+  one for the air), then from each poll's values in memory: the database isn't read again. A poll whose plant
+  reading is a glitch (sigen.glitches) is left out, from the database and in memory.
 - After each stored poll it builds a Window, runs every detector and decides, per event:
   * only events still going on (or that ended within RECENT) count, so history never alerts after a restart;
   * an event alerts once: the same kind (or key: each alarm bit has its own) carrying on (starting within MAX_GAP of
@@ -29,7 +30,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from sigen import battery_watch as bw
-from sigen import db, ntfy
+from sigen import db, glitches, ntfy
 from sigen.config import Alerts
 
 SPAN = datetime.timedelta(hours=6)              # history the detectors see (a plateau needs 2 h)
@@ -118,9 +119,12 @@ class Buffer:
 
 def poll_values(results, units: Dict[int, str]) -> Tuple[Optional[datetime.datetime], Dict[str, float]]:
     """One poll's results (poll.PollResult per unit) -> (the plant reading's start time, {view column: value after
-    the gain}) for the columns the detectors read. (None, {}) if no unit gave values."""
+    the gain}) for the columns the detectors read. (None, {}) if no unit gave values, or the plant's reading is a
+    glitch (sigen.glitches: the poll a second later takes its place)."""
     values: Dict[str, float] = {}
     plant = [r for u, r in results.items() if units.get(u) == "plant"]
+    if any(r.error is None and glitches.plant_glitch(r.values) for r in plant):
+        return None, {}
     when = plant[0].started_at if plant else min((r.started_at for r in results.values()), default=None)
     for result in results.values():
         for address, raw in result.values:
@@ -242,7 +246,8 @@ class Watcher:
             "SELECT rp.started_at, {} FROM readings rp JOIN plant_register_values p ON p.reading_id = rp.id "
             "LEFT JOIN readings ri ON ri.poll_id = rp.poll_id AND ri.unit_id = %s "
             "LEFT JOIN inverter_register_values i ON i.reading_id = ri.id "
-            "WHERE rp.unit_id = %s AND rp.started_at >= %s ORDER BY rp.started_at").format(
+            "WHERE rp.unit_id = %s AND rp.started_at >= %s AND " + glitches.good_reading_sql("rp.id")
+            + " ORDER BY rp.started_at").format(
             sql.SQL(", ").join([sql.Identifier("p", c) for c in plant_cols]
                                + [sql.Identifier("i", c) for c in inverter_cols]))
         since = now - self.buffer.span
