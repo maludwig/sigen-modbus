@@ -298,7 +298,10 @@ def cmd_db_status(args) -> int:
     if not s["ready"]:
         print(f"Not ready:     {s['problem']}")
         return ExitCode.PRECONDITION
-    print(f"Readings:      {s['readings']:,} ({s['failed_readings']:,} failed)")
+    glitched = s.get("glitched_readings") or {}
+    print(f"Readings:      {s['readings']:,} ({s['failed_readings']:,} failed"
+          + (f", {sum(glitched.values()):,} glitched: " + ", ".join(f"{n:,} {rule}" for rule, n in glitched.items())
+             if glitched else "") + ")")
     if "value_rows" in s:
         print("Value rows:    " + ", ".join(f"{n:,} {device}" for device, n in s["value_rows"].items())
               + " (one per successful reading)")

@@ -2,7 +2,8 @@
 
 Tables (created by the numbered SQL files in sigen/migrations/):
     readings           one row per unit per poll: IP, unit ID, poll ID, start/end time, tool
-                       version, error if it failed
+                       version, error if it failed, glitch if the poll's values aren't to be trusted
+                       (since 0007; sigen.glitches)
     raw_plant_register_values, raw_inverter_register_values (since 0004)
                        one row per successful reading: reading_id, started_at, then one column per
                        register, named like it, decoded by type but before the gain. Views
@@ -254,6 +255,12 @@ def wide_layout(conn) -> bool:
 _wide = wide_layout
 
 
+def has_glitch_column(conn) -> bool:
+    """Whether readings has the glitch column (migration 0007)."""
+    return conn.execute("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+                        "AND table_name = 'readings' AND column_name = 'glitch')").fetchone()[0]
+
+
 def _columns(conn) -> Dict[str, Dict[str, str]]:
     """device -> {column: data type} of the wide value tables."""
     found = {d: {} for d in DEVICES}
@@ -366,9 +373,11 @@ def status(conn, migrations: Optional[Sequence[Migration]] = None) -> dict:
                 out["register_values"], out["register_values_exact"] = estimate, False
         out["last_reading"] = conn.execute(
             "SELECT id, started_at, ended_at, error FROM readings ORDER BY id DESC LIMIT 1").fetchone()
-        if out["ready"]:                       # unit_id only exists once 0002 is applied
+        if out["ready"]:                       # unit_id only exists once 0002 is applied, glitch once 0007 is
             out["readings_by_unit"] = conn.execute(
                 "SELECT unit_id, count(*), count(error) FROM readings GROUP BY unit_id ORDER BY unit_id").fetchall()
+            out["glitched_readings"] = dict(conn.execute(
+                "SELECT glitch, count(*) FROM readings WHERE glitch IS NOT NULL GROUP BY glitch ORDER BY glitch"))
         if conn.execute("SELECT to_regclass('open_meteo_weather')").fetchone()[0] is not None:   # 0003
             out["open_meteo"] = conn.execute(
                 "SELECT count(*), count(error), count(*) FILTER (WHERE resolution_minutes = 60 AND error IS NULL), "
@@ -479,9 +488,10 @@ def next_poll_id(conn) -> int:
 
 def insert_reading(conn, *, ip: str, unit_id: int, poll_id: int, started_at: datetime.datetime,
                    ended_at: datetime.datetime, values: Sequence[Tuple[int, int]] = (),
-                   error: Optional[str] = None) -> int:
+                   error: Optional[str] = None, glitch: Optional[str] = None) -> int:
     """One unit's snapshot, in one transaction: a readings row plus, if it has values, one row in its device's
-    wide table (raw_plant_register_values or raw_inverter_register_values), one column per register."""
+    wide table (raw_plant_register_values or raw_inverter_register_values), one column per register. `glitch`
+    (readings.glitch, since 0007) is left out of the INSERT when None, so a database before 0007 still takes readings."""
     from psycopg import sql
     columns = []
     if values:
@@ -495,10 +505,16 @@ def insert_reading(conn, *, ip: str, unit_id: int, poll_id: int, started_at: dat
         columns = [reg.name for reg in regs]
     with errors_as("storing the reading failed"):
         with conn.transaction():
-            reading_id = conn.execute(
-                "INSERT INTO readings (ip_addr, unit_id, poll_id, started_at, ended_at, version, error) "
-                "VALUES (%s::inet, %s, %s, %s, %s, %s, %s) RETURNING id",
-                (ip, unit_id, poll_id, started_at, ended_at, __version__, error)).fetchone()[0]
+            if glitch is None:
+                reading_id = conn.execute(
+                    "INSERT INTO readings (ip_addr, unit_id, poll_id, started_at, ended_at, version, error) "
+                    "VALUES (%s::inet, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (ip, unit_id, poll_id, started_at, ended_at, __version__, error)).fetchone()[0]
+            else:
+                reading_id = conn.execute(
+                    "INSERT INTO readings (ip_addr, unit_id, poll_id, started_at, ended_at, version, error, glitch) "
+                    "VALUES (%s::inet, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (ip, unit_id, poll_id, started_at, ended_at, __version__, error, glitch)).fetchone()[0]
             if values:
                 query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
                     sql.Identifier(values_table(devices.pop())),

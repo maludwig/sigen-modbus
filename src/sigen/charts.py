@@ -13,8 +13,8 @@ Smart loads:
   (30284) − all 24 slots.
 Slots are shown if they're named in the config or moved; unnamed ones are "slot N".
 
-Plant readings that are glitches (sigen.glitches: total load 0 while Running) are left out everywhere here, as if
-never taken (on databases from migration 0004 on; older layouts aren't filtered).
+Polls flagged as glitches (readings.glitch, migration 0007; sigen.glitches) are left out everywhere here, both units'
+readings, as if never taken: an interval then has its one good poll, or none.
 """
 import datetime
 import math
@@ -22,8 +22,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from sigen import glitches
-from sigen.db import values_table, wide_layout
+from sigen.db import has_glitch_column, values_table, wide_layout
 from sigen.registers import BY_NAME
 
 PLANT, INVERTER = 247, 1
@@ -57,16 +56,16 @@ def _between(start, end, column="started_at"):
     return "".join(f" AND {p}" for p in parts), params
 
 
-def _good(conn) -> str:
-    """SQL condition for a query over readings: not a glitched plant reading (sigen.glitches). Nothing on a database
-    from before migration 0004 (no wide plant table to look in)."""
-    return f" AND {glitches.good_reading_sql('readings.id')}" if wide_layout(conn) else ""
+def _good(conn, alias: str = "readings") -> str:
+    """SQL condition for a query over readings: not in a glitched poll. Nothing on a database from before migration
+    0007 (no glitch column)."""
+    return f" AND {alias}.glitch IS NULL" if has_glitch_column(conn) else ""
 
 
 def reading_values(conn, unit: int, names: List[str], start=None, end=None, ids=None):
     """{reading id: (started_at, {register name: value after the gain})} for the successful readings of `unit` in
     the window (or with these ids), for the registers `names`; a register without a value is left out. The one
-    place to fetch registers over a time window from. Glitched plant readings are left out (wide layout only).
+    place to fetch registers over a time window from. Readings of glitched polls are left out.
 
     Reads the wide table once migration 0004 has switched over, else the long register_values table (until then,
     even if a backfill has already filled the wide tables). For the long table, two steps on purpose: the readings first, then their values by
@@ -79,8 +78,7 @@ def reading_values(conn, unit: int, names: List[str], start=None, end=None, ids=
         where, params = _between(start, end, "t.started_at")
         if ids is not None:
             where, params = where + " AND t.reading_id = ANY(%s)", [*params, list(ids)]
-        if regs[0].device == "plant":
-            where += " AND " + glitches.not_glitch_sql("t")
+        where += _good(conn, "r")
         query = sql.SQL("SELECT t.reading_id, t.started_at, {} FROM {} t JOIN readings r ON r.id = t.reading_id "
                         "WHERE r.unit_id = %s" + where + " ORDER BY t.reading_id").format(
             sql.SQL(", ").join(sql.Identifier("t", n) for n in names), sql.Identifier(values_table(regs[0].device)))
@@ -91,8 +89,8 @@ def reading_values(conn, unit: int, names: List[str], start=None, end=None, ids=
                                 (list(ids),)).fetchall()
     else:
         where, params = _between(start, end)
-        readings = conn.execute(f"SELECT id, started_at FROM readings WHERE unit_id = %s AND error IS NULL{where} "
-                                "ORDER BY id", [unit, *params]).fetchall()
+        readings = conn.execute(f"SELECT id, started_at FROM readings WHERE unit_id = %s AND error IS NULL{where}"
+                                f"{_good(conn)} ORDER BY id", [unit, *params]).fetchall()
     by_address = {r.address: r.name for r in regs}
     out = {rid: (t, {}) for rid, t in readings}
     if out:

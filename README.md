@@ -217,11 +217,13 @@ When something goes wrong, `poll` carries on where it can:
   error, and polling continues. With a MAC in the config, after 3 failed polls in a row
   it looks the inverter up by MAC and carries on at its new IP;
 - the database is unreachable: a warning, that poll isn't stored, polling continues;
-- the plant's reading is a glitch (a total load of exactly 0 while Running: see
-  [docs/SIGENSTOR_NOTES.md](docs/SIGENSTOR_NOTES.md#quirks)): it's stored, and the next poll comes
-  a second later instead of on the schedule, up to twice in a row. Each is an ordinary poll
-  (counted by `--count`). The dashboard, the daily totals and the alerts leave glitched readings
-  out;
+- the device's reading is a glitch (a total load of exactly 0 while Running, or a PV power of exactly
+  0 while the strings carry power: see [docs/SIGENSTOR_NOTES.md](docs/SIGENSTOR_NOTES.md#quirks)):
+  it's stored with the reason in `readings.glitch`, and the next poll comes a second later instead
+  of on the schedule, up to twice in a row. Each is an ordinary poll (counted by `--count`). The
+  dashboard, the daily totals and the alerts leave flagged polls out, both devices' readings. A PV
+  zero with the strings under 0.5 kW may be real (dusk): it's only flagged when a retry replaces
+  it, so the last attempt is always kept;
 - weather, radar and alert problems never stop it;
 - it **stops** on a Modbus exception (exit 4: most likely a register the device doesn't support)
   or a database that rejects the data (exit 10), since retrying wouldn't help.
@@ -268,6 +270,7 @@ phone app. It needs `--weather` too, for the outside air temperature.
 | `plateau`, `warming`, `sawtooth` | the battery holding or gaining heat on its own while idle (a heater?) | high |
 | `unexplained_power`, `idle_drain` | power going somewhere it shouldn't while idle | high |
 | `cooling` | on track to reach 5 °C within 6 hours | default |
+| `glitch` | a total load of 0 while Running (see "Polling"), with its battery, grid and PV power. PV-zero glitches are recorded in the database but not sent: low sun brings them most days | default |
 
 Each event alerts once, and each kind (each alarm bit, for `alarm`) at most once an hour. Every
 message ends with when the event began, e.g. `2026-10-12T19:49:30-06:00` (local time, the config's
@@ -391,7 +394,8 @@ Every section is optional; a command that needs one says so. Start from `config.
 
 Tables:
 - `readings`: one row per device per poll, including failed ones (with the error), so gaps are
-  explained.
+  explained. `glitch` says why a poll's values aren't to be trusted (`total_load_zero`, `pv_zero`,
+  or `pv_zero_suspect` for one a retry replaced); add `AND glitch IS NULL` to leave them out.
 - `raw_plant_register_values`, `raw_inverter_register_values`: every register of each successful
   reading, one column per register, as the device sent it.
 - `plant_register_values`, `inverter_register_values` (views): the same, scaled to real units,

@@ -44,13 +44,20 @@ change is the event, so they're worth logging anyway).
 - **Total load** (30284) equals general load (30282); smart loads are part of it. "Load excluding
   EV chargers" (30228) equals the house load (30094) when the EV charges from a plain outlet on a
   smart circuit: only a Sigen-integrated EV charger counts as one.
-- **Glitched readings**: now and then, for a single reading, the plant reports a total load of
-  exactly 0 while Running, usually with other powers wrong too (e.g. the battery discharging
-  0.6 kW and the grid exporting 1 kW, with no sun, between two ordinary readings). It lasts under
-  ~12 s: a reader a few seconds either side sees normal values. Seen a handful of times a day,
-  mostly in the evening but in daylight too; no pattern found so far. The inverter's own reading at the same
-  moment is fine. `sigen poll` reads again a second later, and everything that reads plant values
-  back (the dashboard, daily totals, alerts) leaves such readings out (`sigen.glitches`).
+- **Glitched readings**: now and then, for a single reading, the device hands over summary values
+  that don't belong together. Two kinds so far, a few a day in all:
+  - the plant's total load exactly 0 while Running, usually with other powers wrong too (e.g. the
+    battery discharging 0.6 kW and the grid exporting 1 kW, with no sun, between two ordinary
+    readings). It lasts under ~12 s: a reader a few seconds either side sees normal values.
+  - the PV power (the inverter's, usually the plant's too) exactly 0 while all four strings' voltage
+    and current stay steady (e.g. 1.61 → 0 → 1.51 kW while the strings made 1.9 kW, and the inverter's
+    AC output plus the battery still matched them). The load, the battery power or the phase currents
+    are often wrong in the same reading. Only with the sun low (under ~20°), never with the strings
+    above 2 kW, always a single reading above 0.5 kW. Below that, at dusk, the PV can really be 0
+    while the strings' V × I still reads a few hundred watts.
+
+  `sigen poll` flags such a poll (`readings.glitch`, `sigen.glitches`) and reads again a second
+  later; the dashboard, daily totals and alerts leave flagged polls out.
 - **Alarms** (plant 30027–30030, 30072, 30280; inverter 30605–30609) decode with the protocol's
   appendices; `0xFFFF` means "not available", not 16 alarms.
 - **Energy counters** move in 0.01 kWh steps: good for energy over 15 minutes or more, useless at

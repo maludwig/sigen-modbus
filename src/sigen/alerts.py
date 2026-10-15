@@ -3,8 +3,10 @@
 - Watcher, in poll's thread: a Buffer of the last SPAN of polls (plant and inverter values side by side, named like
   the scaled views' columns, after the gain) and the outside air (Open-Meteo's 15-minute temperatures, which the
   weather thread adds as they arrive). Filled once from the database when poll starts (one query for the readings,
-  one for the air), then from each poll's values in memory: the database isn't read again. A poll whose plant
-  reading is a glitch (sigen.glitches) is left out, from the database and in memory.
+  one for the air), then from each poll's values in memory: the database isn't read again. A poll poll flags as a
+  glitch (readings.glitch, sigen.glitches) is left out, from the database and in memory. A sure glitch raises a
+  "glitch:<rule>" alert, each its own event: total-load zeros are sent (one notification an hour, the rest logged
+  as suppressed); PV zeros only logged (LOGGED_GLITCHES: dusk and low sun bring them most days).
 - After each stored poll it builds a Window, runs every detector and decides, per event:
   * only events still going on (or that ended within RECENT) count, so history never alerts after a restart;
   * an event alerts once: the same kind (or key: each alarm bit has its own) carrying on (starting within MAX_GAP of
@@ -62,7 +64,9 @@ NOTICES: Dict[str, Notice] = {
     "sawtooth": Notice("Battery heater? Sawtooth temperature", "high", ("fire",)),
     "unexplained_power": Notice("Battery heater? Unexplained power", "high", ("electric_plug",)),
     "idle_drain": Notice("Battery heater? Energy leaving while idle", "high", ("battery",)),
+    "glitch": Notice("SigenStor reading glitch", "default", ("zap",)),
 }
+LOGGED_GLITCHES = {glitches.PV_ZERO}            # sure glitches logged in alert_log, never sent
 REACHABLE = Notice("In contact with the SigenStor again", "default", ("white_check_mark",))   # logged, never sent
 
 
@@ -119,13 +123,10 @@ class Buffer:
 
 def poll_values(results, units: Dict[int, str]) -> Tuple[Optional[datetime.datetime], Dict[str, float]]:
     """One poll's results (poll.PollResult per unit) -> (the plant reading's start time, {view column: value after
-    the gain}) for the columns the detectors read. (None, {}) if no unit gave values, or the plant's reading is a
-    glitch (sigen.glitches: the poll a second later takes its place)."""
+    the gain}) for the columns the detectors read. (None, {}) if no unit gave values."""
     values: Dict[str, float] = {}
     plant = [r for u, r in results.items() if units.get(u) == "plant"]
-    if any(r.error is None and glitches.plant_glitch(r.values) for r in plant):
-        return None, {}
-    when = plant[0].started_at if plant else min((r.started_at for r in results.values()), default=None)
+    when =plant[0].started_at if plant else min((r.started_at for r in results.values()), default=None)
     for result in results.values():
         for address, raw in result.values:
             reg = db.BY_ADDRESS.get(address)
@@ -246,8 +247,7 @@ class Watcher:
             "SELECT rp.started_at, {} FROM readings rp JOIN plant_register_values p ON p.reading_id = rp.id "
             "LEFT JOIN readings ri ON ri.poll_id = rp.poll_id AND ri.unit_id = %s "
             "LEFT JOIN inverter_register_values i ON i.reading_id = ri.id "
-            "WHERE rp.unit_id = %s AND rp.started_at >= %s AND " + glitches.good_reading_sql("rp.id")
-            + " ORDER BY rp.started_at").format(
+            "WHERE rp.unit_id = %s AND rp.started_at >= %s AND rp.glitch IS NULL ORDER BY rp.started_at").format(
             sql.SQL(", ").join([sql.Identifier("p", c) for c in plant_cols]
                                + [sql.Identifier("i", c) for c in inverter_cols]))
         since = now - self.buffer.span
@@ -267,16 +267,31 @@ class Watcher:
     def add_air(self, t: datetime.datetime, value: Optional[float]) -> None:
         self.buffer.add_air(t, value)
 
-    def observe(self, results, units: Dict[int, str], now: datetime.datetime) -> None:
-        """After a poll is stored: add it to the buffer, count it towards an outage, and check. Never raises."""
+    def observe(self, results, units: Dict[int, str], now: datetime.datetime,
+                glitch: Optional[glitches.Verdict] = None) -> None:
+        """After a poll is stored: add it to the buffer (or, if poll flagged it as a glitch, leave it out and, for a
+        sure glitch, alert), count it towards an outage, and check. Never raises."""
         try:
             when, values = poll_values(results, units)
-            if when is not None:
-                self.buffer.add_row(when, values)
+            if glitch is None:
+                if when is not None:
+                    self.buffer.add_row(when, values)
+            elif glitch.sure:
+                self.glitch(glitch, when or now, now)
             self.reachability(results, now)
             self.check(now)
         except Exception as e:
             self._warn(f"alert check failed: {type(e).__name__}: {e}", now)
+
+    def glitch(self, verdict: glitches.Verdict, start: datetime.datetime, now: datetime.datetime) -> str:
+        """A sure glitch: "glitch:<rule>", its own event each time. Sent (with the cooldown), or for LOGGED_GLITCHES
+        only logged. Returns what happened (for tests)."""
+        ident = f"glitch:{verdict.rule}"
+        summary = f"The SigenStor's reading looks wrong: {verdict.why}. Stored, and left out of the charts and alerts."
+        if verdict.rule in LOGGED_GLITCHES:
+            self._sender.suppress(ident, NOTICES["glitch"], f"{summary}\n{stamp(start, self.tz)}", why="log only")
+            return "logged"
+        return self._raise(ident, NOTICES["glitch"], summary, start, now)
 
     def reachability(self, results, now: datetime.datetime) -> Optional[str]:
         """Count polls in which no unit gave a reading. At unreachable_polls in a row, raise "unreachable" (once per
