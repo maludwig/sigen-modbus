@@ -16,8 +16,8 @@ class ExitCode(IntEnum):
     MODBUS = 4               # the device answered with a Modbus exception (incl. a refused write)
     VERIFY_FAILED = 5        # read-back after a write doesn't match, or the state is unknown after a dropped write
     REFUSED = 6              # write not allowed: register not writable, or value out of range
-    PRECONDITION = 7         # --expect-current didn't match, undo after an outside change, or the database
-                             # schema isn't ready (migrations pending)
+    PRECONDITION = 7         # --expect-current didn't match, undo after an outside change, the database
+                             # schema isn't ready (migrations pending), or `sigen satellite` is already running
     DRY_RUN = 8              # a change is needed, but --apply wasn't given
     NOT_FOUND = 9            # no SigenStor found, nothing to undo, or a missing file
     DATABASE = 10            # the database is unreachable, or rejected a query

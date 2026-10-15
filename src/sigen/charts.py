@@ -16,11 +16,15 @@ Figures use matplotlib's object-oriented API (no pyplot), so they're safe to dra
 """
 import datetime
 import io
+import math
+import textwrap
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from matplotlib.dates import AutoDateLocator, DateFormatter, HourLocator, MinuteLocator
+import numpy as np
+from matplotlib.colors import to_rgb, to_rgba
+from matplotlib.dates import AutoDateLocator, DateFormatter, HourLocator, MinuteLocator, date2num
 from matplotlib.figure import Figure
 
 from sigen.db import values_table, wide_layout
@@ -148,9 +152,11 @@ def live_limits(data: StringData, volts: float = LIVE_VOLTS) -> Optional[Tuple[d
 def clear_sky_strings(conn, site, array, start: datetime.datetime, end: datetime.datetime):
     """Each string's clear-sky power (kW; a pandas DataFrame, columns = PV input numbers) from `start` to `end`, every
     minute (every 5 minutes for windows over 3 days), with the air temperature and wind from Open-Meteo's
-    15-minute rows where the database has them (the model's 12 °C / 2 m/s elsewhere). Needs pvlib."""
+    15-minute rows where the database has them (the model's 12 °C / 2 m/s elsewhere). Needs pvlib. The times are UTC,
+    whatever zones `start` and `end` are in (pandas won't make a range between two zones)."""
     import pandas as pd
     from sigen import pvmodel
+    start, end = start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc)
     step = "1min" if end - start <= datetime.timedelta(days=3) else "5min"
     times = pd.date_range(pd.Timestamp(start).ceil(step), end, freq=step, inclusive="left")
     weather = conn.execute(
@@ -219,9 +225,10 @@ MAX_ENERGY_POINTS = 6000        # a day of 15-second readings; longer windows ar
 
 
 def smart_load_energy(conn, names: Dict[int, str], start=None, end=None,
-                      max_points: int = MAX_ENERGY_POINTS) -> Optional[LoadCounters]:
+                      max_points: int = MAX_ENERGY_POINTS, fewest: int = 2) -> Optional[LoadCounters]:
     """The counters at every successful plant reading in the window (for the dashboard's energy chart), or at every
-    k-th one when there are more than `max_points` (always keeping the last). None if fewer than two readings."""
+    k-th one when there are more than `max_points` (always keeping the last). None if fewer than `fewest` readings
+    (a page topping up its chart wants even one)."""
     where, params = _between(start, end)
     readings = conn.execute(f"SELECT id, started_at FROM readings WHERE error IS NULL AND unit_id = %s{where} "
                             "ORDER BY id", [PLANT, *params]).fetchall()
@@ -229,11 +236,12 @@ def smart_load_energy(conn, names: Dict[int, str], start=None, end=None,
     picked = readings[::step]
     if readings and picked[-1] != readings[-1]:
         picked.append(readings[-1])
-    return _counters_at(conn, names, picked)
+    return _counters_at(conn, names, picked, fewest)
 
 
-def _counters_at(conn, names: Dict[int, str], picked: List[Tuple[int, datetime.datetime]]) -> Optional[LoadCounters]:
-    if len(picked) < 2:
+def _counters_at(conn, names: Dict[int, str], picked: List[Tuple[int, datetime.datetime]],
+                 fewest: int = 2) -> Optional[LoadCounters]:
+    if len(picked) < max(fewest, 1):
         return None
     ids = [i for i, _ in picked]
     counters, house = defaultdict(dict), {}
@@ -351,6 +359,234 @@ def air_temperatures(conn, start=None, end=None) -> List[Tuple[datetime.datetime
         "ORDER BY valid_at, fetched_at DESC", params)]
 
 
+# ---------- precipitation ----------
+RADAR_FRAME = datetime.timedelta(minutes=6)      # GeoMet's radar: a frame every 6 minutes
+SNOW_CODES = {71, 73, 75, 77, 85, 86}            # WMO weather codes: snow, snow grains, snow showers
+RAIN_CODES = {51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99}   # drizzle, rain, freezing, showers, thunder
+SNOW_WET_BULB = 1.0          # °C: where Open-Meteo's code says nothing falls, snow at or below this wet-bulb, else rain
+PRECIP_LOOKBACK = datetime.timedelta(days=7)     # the darkest colour: the radar's most in the 7 days to the window's end
+PRECIP_DEFAULT_TOP = 1.0     # … or this (mm/h or cm/h) after a dry week
+PRECIP_EASING_K = 20         # ln(1 + k·f) / ln(1 + k): light echoes show, and the heaviest still stands out
+PRECIP_COLOURS = {"rain": "#08306b", "snow": "black"}
+PRECIP_UNITS = {"rain": "mm/h", "snow": "cm/h"}
+OM_GAP_MARGIN = datetime.timedelta(hours=6)      # how far past the window to look for the rows either side of a gap
+
+
+def wet_bulb(temp_c: float, rh_pct: float) -> float:
+    """Wet-bulb temperature (°C) from air temperature and relative humidity: Stull 2011, within 0.3 °C for RH 5–99 %
+    and −20 to 50 °C. Falling snow survives warmer air the drier it is; the wet-bulb captures that in one number."""
+    return (temp_c * math.atan(0.151977 * math.sqrt(rh_pct + 8.313659)) + math.atan(temp_c + rh_pct)
+            - math.atan(rh_pct - 1.676331) + 0.00391838 * rh_pct ** 1.5 * math.atan(0.023101 * rh_pct) - 4.686035)
+
+
+def _period_end(t: datetime.datetime) -> datetime.datetime:
+    """The end of the 15-minute period (end − 15 min, end] that `t` falls in, in UTC: Open-Meteo stamps a period
+    with its end."""
+    t = t.astimezone(datetime.timezone.utc)
+    start = t.replace(minute=t.minute - t.minute % 15, second=0, microsecond=0)
+    return start if start == t else start + WINDOW
+
+
+def _lerp(a, b, w):
+    return None if a is None or b is None else a + (b - a) * w
+
+
+def precipitation_kinds(conn, start: datetime.datetime, end: datetime.datetime) -> Dict[datetime.datetime, str]:
+    """{period end (UTC): "rain" or "snow"} from Open-Meteo's 15-minute rows (the newest fetch of each): its weather
+    code where that says rain or snow, otherwise the wet-bulb temperature from its air temperature and humidity.
+    A missing period between two stored ones is filled in: temperature and humidity interpolated linearly in time,
+    the code kept if both neighbours agree. A period with neither a code saying rain or snow nor a temperature and
+    humidity has no kind."""
+    rows = [(t.astimezone(datetime.timezone.utc), code, temp, rh) for t, code, temp, rh in conn.execute(
+        "SELECT DISTINCT ON (valid_at) valid_at, weather_code, temperature_2m, relative_humidity_2m "
+        "FROM open_meteo_weather WHERE resolution_minutes = 15 AND error IS NULL AND valid_at >= %s AND valid_at <= %s "
+        "ORDER BY valid_at, fetched_at DESC", (start - OM_GAP_MARGIN, end + OM_GAP_MARGIN + WINDOW))]
+    filled = []
+    for (t, code, temp, rh), after in zip(rows, rows[1:] + [None]):
+        filled.append((t, code, temp, rh))
+        if after is not None:
+            t1, code1, temp1, rh1 = after
+            steps = round((t1 - t) / WINDOW)
+            for s in range(1, steps):
+                filled.append((t + s * WINDOW, code if code == code1 else None,
+                               _lerp(temp, temp1, s / steps), _lerp(rh, rh1, s / steps)))
+    kinds = {}
+    for t, code, temp, rh in filled:
+        if code in SNOW_CODES or code in RAIN_CODES:
+            kinds[t] = "snow" if code in SNOW_CODES else "rain"
+        elif temp is not None and rh is not None:
+            kinds[t] = "snow" if wet_bulb(temp, rh) <= SNOW_WET_BULB else "rain"
+    return kinds
+
+
+@dataclass
+class Precipitation:
+    """The radar at the site over a window (GeoMet's two conversions of the same echo), each frame's kind from
+    Open-Meteo (precipitation_kinds), and each kind's darkest-colour rate. Drawn as one kind: the one most frames
+    have."""
+    times: List[datetime.datetime] = field(default_factory=list)
+    rain_mm_h: List[float] = field(default_factory=list)
+    snow_cm_h: List[float] = field(default_factory=list)
+    kinds: List[Optional[str]] = field(default_factory=list)
+    top: Dict[str, float] = field(default_factory=lambda: {k: PRECIP_DEFAULT_TOP for k in PRECIP_COLOURS})
+
+    @property
+    def kind(self) -> str:
+        """"snow" if more frames are snow than rain, else "rain" (also with no frames: a clear summer day)."""
+        return "snow" if self.kinds.count("snow") > self.kinds.count("rain") else "rain"
+
+    def shares(self) -> List[float]:
+        """Per frame, 0 (white) to 1 (the darkest colour): its rate in the strip's kind ÷ that kind's top, eased
+        with ln(1 + k·f) / ln(1 + k), k = PRECIP_EASING_K."""
+        values, top = (self.snow_cm_h if self.kind == "snow" else self.rain_mm_h), self.top[self.kind]
+        return [math.log1p(PRECIP_EASING_K * min(max(v / top, 0.0), 1.0)) / math.log1p(PRECIP_EASING_K)
+                for v in values]
+
+
+def precipitation(conn, start: datetime.datetime, end: datetime.datetime) -> Precipitation:
+    """Every good radar frame in [start, end), each with its Open-Meteo kind; the tops are the radar's most in the 7
+    days to `end` (or the whole window, if longer), PRECIP_DEFAULT_TOP if that's 0 or there are no frames."""
+    data = Precipitation()
+    kinds = precipitation_kinds(conn, start, end)
+    for t, rain, snow in conn.execute(
+            "SELECT frame_at, rain_mm_h, snow_cm_h FROM radar_frames WHERE error IS NULL AND rain_mm_h IS NOT NULL "
+            "AND snow_cm_h IS NOT NULL AND frame_at >= %s AND frame_at < %s ORDER BY frame_at", (start, end)):
+        data.times.append(t)
+        data.rain_mm_h.append(float(rain))
+        data.snow_cm_h.append(float(snow))
+        data.kinds.append(kinds.get(_period_end(t)))
+    rain_top, snow_top = conn.execute(
+        "SELECT max(rain_mm_h), max(snow_cm_h) FROM radar_frames WHERE error IS NULL AND frame_at >= %s "
+        "AND frame_at < %s", (min(start, end - PRECIP_LOOKBACK), end)).fetchone()
+    data.top = {"rain": float(rain_top or 0) or PRECIP_DEFAULT_TOP, "snow": float(snow_top or 0) or PRECIP_DEFAULT_TOP}
+    return data
+
+
+# ---------- a day's energy ----------
+DAY_TOTALS = [("solar", "Solar produced"), ("load", "Used by the house"), ("battery_charged", "Battery charged"),
+              ("battery_discharged", "Battery discharged"), ("grid_imported", "Imported from the grid"),
+              ("grid_exported", "Exported to the grid")]
+LIFETIME_COUNTERS = {"solar": "plant_accumulated_pv_energy",                        # 30088
+                     "load": "plant_accumulated_load_consumption",                  # 30094
+                     "battery_charged": "plant_accumulated_battery_charge_energy",  # 30200
+                     "battery_discharged": "plant_accumulated_battery_discharge_energy",   # 30204
+                     "grid_imported": "plant_accumulated_grid_import_energy",       # 30216
+                     "grid_exported": "plant_accumulated_grid_export_energy"}       # 30220
+FLOW_POWERS = ["plant_photovoltaic_power", "plant_ess_power", "plant_grid_sensor_active_power", TOTAL_POWER]
+MAX_FLOW_GAP = datetime.timedelta(minutes=5)     # a longer gap between readings (polling stopped) isn't counted
+FLOWS = [("Solar", "Load"), ("Solar", "Battery"), ("Solar", "Grid"), ("Battery", "Load"), ("Battery", "Grid"),
+         ("Grid", "Load"), ("Grid", "Battery")]
+
+
+@dataclass
+class DayEnergy:
+    """One local day's energy, kWh. `totals` (keys of DAY_TOTALS; one is missing if its registers weren't read that
+    day) are the counters; `flows` ((source, sink) -> kWh, FLOWS) split them up, from the power readings."""
+    totals: Dict[str, float]
+    flows: Dict[Tuple[str, str], float]
+    first: datetime.datetime                     # the day's first and last plant readings
+    last: datetime.datetime
+    covered_hours: float = 0.0                   # the time the flows cover (gaps over MAX_FLOW_GAP left out)
+
+
+def _split(flows: Dict[Tuple[str, str], float], v: Dict[str, float], hours: float) -> None:
+    """Add one interval's energy to `flows`, from the powers at its start: solar serves the load first, then the
+    battery, then the grid; the battery serves the load, then the grid; the grid serves the load, then the battery.
+    What's left over (the inverter's losses, the sensors' disagreements) goes nowhere."""
+    pv = max(v["plant_photovoltaic_power"], 0.0)
+    charge, discharge = max(v["plant_ess_power"], 0.0), max(-v["plant_ess_power"], 0.0)
+    imported, exported = max(v["plant_grid_sensor_active_power"], 0.0), max(-v["plant_grid_sensor_active_power"], 0.0)
+    load = max(v[TOTAL_POWER], 0.0)
+    for source, sink in FLOWS:
+        supply = {"Solar": pv, "Battery": discharge, "Grid": imported}[source]
+        demand = {"Load": load, "Battery": charge, "Grid": exported}[sink]
+        kw = min(supply, demand)
+        if source == "Solar":
+            pv -= kw
+        elif source == "Battery":
+            discharge -= kw
+        else:
+            imported -= kw
+        if sink == "Load":
+            load -= kw
+        elif sink == "Battery":
+            charge -= kw
+        else:
+            exported -= kw
+        flows[source, sink] += kw * hours
+
+
+def day_energy(conn, start: datetime.datetime, end: datetime.datetime) -> Optional[DayEnergy]:
+    """The energy of the local day [start, end) (end = now, for today so far); None without plant readings.
+
+    Every total is a lifetime counter's difference between this server's readings, by this server's clock: its value
+    at the first plant reading at or after the next midnight (today: at the day's last reading), minus its value at
+    the day's first. Not the device's daily counters: it resets those by its own clock, which keeps no daylight
+    saving, and a few seconds late. Consecutive days share their boundary reading, so days add up exactly; a gap in
+    polling moves energy to the day before the gap, never loses it.
+    Known and accepted: the lifetime counters roll back after a power-off (2026-10-13: back to their values ~30
+    minutes before it, as if saved every half hour), so a day containing a power-off loses that stretch. One
+    difference per day keeps this cheap; summing only the increases would avoid it, and isn't worth it here."""
+    plant = list(reading_values(conn, PLANT, [*LIFETIME_COUNTERS.values(), *FLOW_POWERS], start, end).values())
+    if not plant:
+        return None
+    following = conn.execute("SELECT id FROM readings WHERE unit_id = %s AND error IS NULL AND started_at >= %s "
+                             "ORDER BY started_at LIMIT 1", (PLANT, end)).fetchone()
+    closing = (next(iter(reading_values(conn, PLANT, list(LIFETIME_COUNTERS.values()), ids=[following[0]]).values()))
+               if following else plant[-1])[1]
+    opening, totals = plant[0][1], {}
+    for key, name in LIFETIME_COUNTERS.items():
+        if name in opening and name in closing:
+            totals[key] = closing[name] - opening[name]
+    flows, covered = {f: 0.0 for f in FLOWS}, 0.0
+    for (t0, v), (t1, _) in zip(plant, plant[1:]):
+        if t1 - t0 <= MAX_FLOW_GAP and all(n in v for n in FLOW_POWERS):
+            hours = (t1 - t0) / datetime.timedelta(hours=1)
+            _split(flows, v, hours)
+            covered += hours
+    return DayEnergy(totals, flows, plant[0][0], plant[-1][0], covered)
+
+
+SANKEY_COLOURS = {"Solar": "#e8c547", "Battery": "#45b8ac", "Grid": "#6f7bd9", "Load": "#9b5de5"}
+
+
+SANKEY_SOURCES = [("Solar", "solar"), ("Battery", "battery_discharged"), ("Grid", "grid_imported")]
+SANKEY_SINKS = [("Battery", "battery_charged"), ("Load", "load"), ("Grid", "grid_exported")]
+SANKEY_MIN_SHARE = 0.005        # a flow under this share of the day's energy in isn't drawn: at true scale it's a hairline
+
+
+def sankey(e: DayEnergy) -> dict:
+    """What the daily page's Sankey diagram (static/my_sankey.js) draws: sources (solar, the battery discharging, the
+    grid importing) and sinks (the battery charging, the house, the grid exporting), each with its counter's kWh (0
+    without one: the drawing then sizes it by its bands) and colour, and the flows between them (kWh, `from` / `to`
+    indexing the sources and sinks listed).
+
+    A flow under SANKEY_MIN_SHARE of the day's energy in (the sources' counters added up) isn't drawn: it's listed in
+    `dropped` instead (for the note under the diagram) and taken off the totals of both its ends, and a source or sink
+    left with no flow to draw is left out. `cutoff` is that threshold in kWh."""
+    source_kwh = {name: e.totals.get(key, 0.0) for name, key in SANKEY_SOURCES}
+    sink_kwh = {name: e.totals.get(key, 0.0) for name, key in SANKEY_SINKS}
+    cutoff = SANKEY_MIN_SHARE * sum(source_kwh.values())
+    kept, dropped = [], []
+    for (s, d), kwh in e.flows.items():
+        if kwh <= 0:
+            continue
+        if kwh < cutoff:
+            dropped.append({"from": s, "to": d, "kwh": round(kwh, 4)})
+            source_kwh[s] -= kwh
+            sink_kwh[d] -= kwh
+        else:
+            kept.append((s, d, kwh))
+    sources = [name for name, _ in SANKEY_SOURCES if any(s == name for s, _, _ in kept)]
+    sinks = [name for name, _ in SANKEY_SINKS if any(d == name for _, d, _ in kept)]
+
+    def nodes(names, kwh):
+        return [{"name": n, "kwh": round(max(kwh[n], 0.0), 4), "colour": SANKEY_COLOURS[n]} for n in names]
+    return {"sources": nodes(sources, source_kwh), "sinks": nodes(sinks, sink_kwh),
+            "flows": [{"from": sources.index(s), "to": sinks.index(d), "kwh": round(kwh, 4)} for s, d, kwh in kept],
+            "dropped": dropped, "cutoff": round(cutoff, 4)}
+
+
 # ---------- figures ----------
 def _colors(labels) -> Dict[str, str]:
     return {name: ("grey" if name in (OTHER, "Other") else f"C{n}") for n, name in enumerate(labels)}
@@ -386,27 +622,169 @@ def _legend(ax):
         line.set_linewidth(2.5)
 
 
+# Each chart's size in inches; at PNG_DPI, its size in pixels. The dashboard page gives each <img> the same width and
+# height, so the browser reserves the box before the image arrives and nothing moves while the charts load; a chart's
+# "no data" message is drawn at the chart's own size for the same reason.
+PNG_DPI = 100
+ENERGY_SIZE = (10, 5)
+ENERGY_SINCE_START_SIZE = (11, 4.8)
+SNAPSHOTS_SIZE = (11, 4.5)
+BATTERY_TEMPS_SIZE = (11, 4.5)
+BATTERY_POWER_SIZE = (11, 3.5)
+STRINGS_HEIGHT = 4.2
+
+
+def strings_size(precip: bool = False, satellite: bool = False) -> Tuple[float, float]:
+    """strings_figure's size: taller by each strip underneath (the radar's, and the satellite's nine)."""
+    strips = STRIP_HEIGHT * (precip + len(SATELLITE_STRIPS) * satellite)
+    return 11, round(STRINGS_HEIGHT + 0.25 * strips + 0.35 * (strips > 0), 2)
+
+
+def pixels(size: Tuple[float, float]) -> Tuple[int, int]:
+    """A size in inches as the PNG's width and height in pixels."""
+    return round(size[0] * PNG_DPI), round(size[1] * PNG_DPI)
+
+
 def message_figure(text: str, width=11, height=2.5) -> Figure:
     fig = Figure(figsize=(width, height))
     fig.text(0.5, 0.5, text, ha="center", va="center", fontsize=12, wrap=True)
     return fig
 
 
+@dataclass
+class Strip:
+    """One strip under a chart: a bar from each start (in time order), `length` long or up to the next start, in its
+    colour (anything matplotlib takes as a colour; None = no bar, so the hatched background shows: no data)."""
+    label: str
+    starts: List[datetime.datetime]
+    length: datetime.timedelta
+    colours: list
+
+
+STRIP_HEIGHT = 0.8                      # each strip's share of the chart, against the main plot's 12
+STRIP_LABEL_SIZE = 8
+STRIP_COLUMNS = 1100                    # the strips' image: about one column per pixel of the chart's width
+STRIP_ROWS = 4                          # image rows per strip
+
+
+def draw_strips(ax, strips: List[Strip], x0: float, x1: float, columns: int = STRIP_COLUMNS) -> None:
+    """All `strips` on `ax` from x0 to x1 (matplotlib date numbers) as ONE image: a band of rows per strip, a white
+    line between bands, each label as a y tick. Transparent where a strip has no bar, so the hatched background shows.
+    One artist however many bars: a Rectangle per bar and an axes per strip made a day's chart ~4× slower."""
+    centres = x0 + (np.arange(columns) + 0.5) * (x1 - x0) / columns
+    bands, edges = [], [0]
+    for strip in strips:
+        row = np.zeros((columns, 4))                      # RGBA, transparent
+        if strip.starts:
+            starts = date2num(strip.starts)
+            stops = np.minimum(starts + strip.length / datetime.timedelta(days=1), np.r_[starts[1:], np.inf])
+            rgba = np.array([to_rgba(c) if c is not None else (0.0, 0.0, 0.0, 0.0) for c in strip.colours])
+            bar = np.searchsorted(starts, centres, side="right") - 1          # the last bar starting at or before
+            inside = (bar >= 0) & (centres < stops[np.maximum(bar, 0)])
+            row[inside] = rgba[bar[inside]]
+        bands.append(np.broadcast_to(row, (STRIP_ROWS, columns, 4)))
+        edges.append(edges[-1] + STRIP_ROWS)
+    ax.patch.set_hatch("////")
+    ax.patch.set_edgecolor("#c8c8c8")
+    ax.imshow(np.concatenate(bands), aspect="auto", interpolation="nearest", extent=(x0, x1, edges[-1], 0))
+    ax.hlines(edges[1:-1], x0, x1, color="white", lw=2)
+    ax.set_yticks([(a + b) / 2 for a, b in zip(edges, edges[1:])], [s.label for s in strips], fontsize=STRIP_LABEL_SIZE)
+    ax.tick_params(axis="y", length=0)
+    ax.set_ylim(edges[-1], 0)
+    ax.set_xlim(x0, x1)
+
+
+def envelope(times: List[datetime.datetime], values, columns: int):
+    """A line thinned to what `columns` pixel columns can show: in each of `columns` equal slices of its time span,
+    its lowest and highest point, in time order; that's exactly what a line through every point covers, single-reading
+    spikes included (a mean would flatten them). Unchanged with no more than 2 × columns points."""
+    if len(times) <= 2 * columns:
+        return times, values
+    t, v = date2num(times), np.asarray(values, dtype=float)
+    slot = np.minimum(((t - t[0]) / (t[-1] - t[0]) * columns).astype(int), columns - 1)
+    starts = np.flatnonzero(np.r_[True, slot[1:] != slot[:-1]])
+    keep = []
+    for a, b in zip(starts, np.r_[starts[1:], len(t)]):
+        low, high = a + int(v[a:b].argmin()), a + int(v[a:b].argmax())
+        keep += [low] if low == high else sorted((low, high))
+    return [times[i] for i in keep], [float(v[i]) for i in keep]
+
+
+def precipitation_strip(p: Precipitation) -> Tuple[Strip, str]:
+    """`p` as a strip: a bar per radar frame, from white (nothing falling) to the kind's colour at its top rate
+    (Precipitation.shares); labelled "Rain" or "Snow". With the note saying how to read it."""
+    white, dark = (1.0, 1.0, 1.0), to_rgb(PRECIP_COLOURS[p.kind])
+    strip = Strip(p.kind.capitalize(), p.times, RADAR_FRAME,
+                  [tuple(w + s * (d - w) for w, d in zip(white, dark)) for s in p.shares()])
+    return strip, (f"{p.kind.capitalize()}: the radar at the site, as {p.kind} (Open-Meteo's kind for most frames): "
+                   f"white = nothing, darkest = {p.top[p.kind]:.2f} {PRECIP_UNITS[p.kind]} (the most in 7 days), log "
+                   f"scale (k = {PRECIP_EASING_K}); hatched = no frame")
+
+
+# The satellite strips (sigen.goes_shade): (column, label, low-sun mask?, value -> share of sun: 1 white, 0 black)
+SATELLITE_STRIPS = (
+    [(f"trans_{tag}", f"NOAA sun through, {where}", True, lambda v: v) for tag, where in (
+        ("top", "cloud top"), ("0km", "overhead"), ("2km", "2 km"), ("5km", "5 km"), ("10km", "10 km"))]
+    + [(f"prob_{tag}", f"NOAA cloud, {where}", False, lambda v: 1 - v) for tag, where in (
+        ("0km", "overhead"), ("2km", "2 km"), ("5km", "5 km"), ("10km", "10 km"))])
+SATELLITE_LOW_SUN = 10           # degrees: below this the sun-through-cloud estimate is unreliable
+LOW_SUN_COLOUR = "#cfe2f3"
+
+
+def satellite_strips(s) -> Tuple[List[Strip], str]:
+    """One strip per SATELLITE_STRIPS from a goes_shade.ShadeSeries: a bar per scan, white = clear, black = no sun
+    (grey in between), pale blue = sun too low for the estimate, none (hatched) = no scan or no value. With the note
+    saying how to read them."""
+    from sigen.goes_shade import SCAN
+    low = [e < SATELLITE_LOW_SUN for e in s.sun_elevation]
+    strips = []
+    for column, label, masked, clear in SATELLITE_STRIPS:
+        colours = []
+        for value, is_low in zip(s.column(column), low):
+            if masked and is_low:
+                colours.append(LOW_SUN_COLOUR)
+            elif math.isnan(value):
+                colours.append(None)
+            else:
+                v = min(max(clear(value), 0.0), 1.0)
+                colours.append((v, v, v))
+        strips.append(Strip(label, s.times, SCAN, colours))
+    return strips, ("NOAA: the GOES-West satellite, per 10-minute scan (10-20 min behind): the share of sun through the "
+                    "cloud (from its optical depth) and 1 − cloud probability, over the site and where a cloud at the "
+                    "measured cloud top or at 2 / 5 / 10 km would shade it; white = clear, black = no sun, pale blue = "
+                    f"sun below {SATELLITE_LOW_SUN}°, hatched = no scan")
+
+
 def strings_figure(data: StringData, tz, quantity: str, clear_sky=None, faces: Optional[Dict[int, str]] = None,
-                   xlim: Optional[Tuple[datetime.datetime, datetime.datetime]] = None) -> Figure:
+                   xlim: Optional[Tuple[datetime.datetime, datetime.datetime]] = None,
+                   precip: Optional[Precipitation] = None, satellite=None) -> Figure:
     """quantity "voltage" (each string's voltage) or "power" (V × I, kW), every reading. With `clear_sky` (power
     only: clear_sky_strings' DataFrame), each string's clear-sky model dashed and faint behind it in its colour;
-    `faces` names each string's roof face in the legend; `xlim` (live_limits) trims the time axis."""
+    `faces` names each string's roof face in the legend; `xlim` (live_limits) trims the time axis. Strips underneath,
+    in one panel (draw_strips): `precip`, the radar (precipitation_strip); `satellite`, a goes_shade.ShadeSeries
+    (satellite_strips). Each string's line is thinned to the chart's pixel columns (envelope)."""
+    size = strings_size(precip is not None, satellite is not None)
     if len(data.times) < 2:
-        return message_figure("no string readings in this window")
-    fig = Figure(figsize=(11, 4.2))
-    ax = fig.subplots()
+        return message_figure("no string readings in this window", *size)
+    strips, notes = [], []
+    if precip is not None:
+        strip, note = precipitation_strip(precip)
+        strips, notes = strips + [strip], notes + [note]
+    if satellite is not None:
+        more, note = satellite_strips(satellite)
+        strips, notes = strips + more, notes + [note]
+    fig = Figure(figsize=size)
+    if strips:
+        ax, strip_ax = fig.subplots(2, 1, sharex=True,
+                                    gridspec_kw={"height_ratios": [12, STRIP_HEIGHT * len(strips)]})
+    else:
+        ax = fig.subplots()
     for i, n in enumerate(STRINGS):
         if clear_sky is not None and n in clear_sky:
             ax.plot(clear_sky.index, clear_sky[n], lw=1.3, ls="--", color=f"C{i}", alpha=0.55)
         values = data.volts[n] if quantity == "voltage" else data.kw(n)
         face = f" ({faces[n]})" if faces and n in faces else ""
-        ax.plot(data.times, values, lw=0.9, label=f"String {n}{face}", color=f"C{i}")
+        ax.plot(*envelope(data.times, values, pixels(size)[0]), lw=0.9, label=f"String {n}{face}", color=f"C{i}")
     if clear_sky is not None:
         ax.plot([], [], lw=1.3, ls="--", color="grey", label="clear-sky model (dashed)")
     ax.set_ylabel("String voltage (V)" if quantity == "voltage" else "Power (kW) = string voltage × current")
@@ -420,7 +798,12 @@ def strings_figure(data: StringData, tz, quantity: str, clear_sky=None, faces: O
         ax.set_xlim(*xlim)
     ax.grid(True, alpha=0.3)
     _legend(ax)
-    fig.tight_layout()
+    if strips:
+        x0, x1 = ax.get_xlim()                   # the strings' span: strip data outside it doesn't widen the axis
+        draw_strips(strip_ax, strips, x0, x1)
+        ax.set_xlim(x0, x1)
+        strip_ax.set_xlabel("\n".join(textwrap.fill(n, 140) for n in notes), fontsize=8)
+    fig.tight_layout(h_pad=0.2)
     return fig
 
 
@@ -455,9 +838,9 @@ def energy_since_start_figure(c: Optional[LoadCounters], tz) -> Figure:
     """Each smart load's and Other's energy since the window's first reading, from the lifetime counters (exact
     energy, in 0.01 kWh steps), at every reading. The slope is the average power over any stretch you look at."""
     if c is None:
-        return message_figure("fewer than two plant readings in this window")
+        return message_figure("fewer than two plant readings in this window", *ENERGY_SINCE_START_SIZE)
     colors = _colors(c.series)
-    fig = Figure(figsize=(11, 4.8))
+    fig = Figure(figsize=ENERGY_SINCE_START_SIZE)
     ax = fig.subplots()
     for name, kwh in c.since_start().items():
         ax.plot(c.times, kwh, linewidth=1.5, label=name, color=colors[name])
@@ -478,8 +861,8 @@ def energy_since_start_figure(c: Optional[LoadCounters], tz) -> Figure:
 def energy_figure(e: Optional[LoadEnergy], tz) -> Figure:
     """A bar chart: energy per load over the period, with each bar's share of the house total."""
     if e is None:
-        return message_figure("fewer than two plant readings in this window")
-    fig = Figure(figsize=(10, 5))
+        return message_figure("fewer than two plant readings in this window", *ENERGY_SIZE)
+    fig = Figure(figsize=ENERGY_SIZE)
     ax = fig.subplots()
     colors = [f"C{i}" for i in range(len(e.bars) - 1)] + ["grey"]
     rects = ax.bar(list(e.bars), list(e.bars.values()), color=colors)
@@ -504,9 +887,9 @@ def snapshots_figure(s: LoadSnapshots, tz, smoothing: Optional[datetime.timedelt
     faint behind it in the same colour; smoothing=None draws just the readings. (Samples every 15 s: a short burst
     between two can be missed, which the energy chart's counters never do.)"""
     if len(s.times) < 2:
-        return message_figure("no plant readings in this window")
+        return message_figure("no plant readings in this window", *SNAPSHOTS_SIZE)
     colors = _colors(s.series)
-    fig = Figure(figsize=(11, 4.5))
+    fig = Figure(figsize=SNAPSHOTS_SIZE)
     ax = fig.subplots()
     for name, kw in s.series.items():
         if smoothing is None:
@@ -552,8 +935,8 @@ def battery_temps_figure(s: Series, air: List[Tuple[datetime.datetime, float]], 
     temperature (red, a trailing 5-minute mean: its readings jump around by ±0.5 °C) on its own right axis, so both
     ranges fill the plot. The legend belongs to the right axis, which matplotlib draws on top."""
     if len(s.times) < 2:
-        return message_figure("no battery temperatures in this window")
-    fig = Figure(figsize=(11, 4.5))
+        return message_figure("no battery temperatures in this window", *BATTERY_TEMPS_SIZE)
+    fig = Figure(figsize=BATTERY_TEMPS_SIZE)
     ax = fig.subplots()
     for (name, label), color in zip(BATTERY_TEMPS.items(), ("tab:blue", "tab:orange", "tab:purple")):
         ax.plot(s.times, s.values[name], lw=1.8 if "min" in name else 1.0, color=color, label=label)
@@ -616,8 +999,8 @@ def battery_power_figure(s: Series, tz, soc: Optional[Series] = None) -> Figure:
     and SOC_LIMITS), the SOC and those settings on a right-hand axis; the legend then belongs to that axis, which
     matplotlib draws on top."""
     if len(s.times) < 2:
-        return message_figure("no battery or PV readings in this window")
-    fig = Figure(figsize=(11, 3.5))
+        return message_figure("no battery or PV readings in this window", *BATTERY_POWER_SIZE)
+    fig = Figure(figsize=BATTERY_POWER_SIZE)
     ax = fig.subplots()
     smooth = f"{POWER_SMOOTHING.total_seconds() / 60:g}-min mean"
     for name, color, label in ((PV_POWER, "goldenrod", f"PV ({smooth})"),
@@ -655,7 +1038,7 @@ def battery_power_figure(s: Series, tz, soc: Optional[Series] = None) -> Figure:
     return fig
 
 
-def png(fig: Figure, dpi: int = 100) -> bytes:
+def png(fig: Figure, dpi: int = PNG_DPI) -> bytes:
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=dpi)
     return buffer.getvalue()

@@ -26,6 +26,7 @@
     {% for label, params in nav %}
       <a href="{{ url_for('page', **params) }}">{{ label }}</a>
     {% endfor %}
+    <a href="{{ url_for('daily', **daily_query) }}">Daily totals</a>
   </nav>
   {% if error %}
     <p class="error">Bad window: {{ error }}</p>
@@ -35,7 +36,8 @@
       {% if live %}Reloads every {{ refresh // 60 }} minutes.{% endif %}</p>
     {% for name, title in charts.items() %}
       <h2>{{ title }}</h2>
-      <img src="{{ url_for('chart', name=name, **query) }}" alt="{{ title }}" loading="lazy">
+      <img src="{{ url_for('chart', name=name, **query) }}" alt="{{ title }}" loading="lazy"
+           width="{{ pixels[name][0] }}" height="{{ pixels[name][1] }}">{# the box is reserved before the image arrives #}
     {% endfor %}
   {% endif %}
 </body>

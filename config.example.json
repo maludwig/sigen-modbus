@@ -33,5 +33,6 @@
       "1": {"panels": 10, "face": "south"},
       "2": {"panels": 8, "face": "west"}
     }
-  }
+  },
+  "satellite": {"cube_dir": "captures/satellite/cubes"}
 }

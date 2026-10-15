@@ -9,7 +9,8 @@
       "devices": {"inverter": {"ip": "192.168.1.100", "mac": "02:ab:cd:ef:00:01", "units": [1]},
                   "loadhub": {"ip": "192.168.1.101", "mac": "02:ab:cd:ef:00:02"}},
       "site": {"latitude": 51.0443, "longitude": -114.0631, "timezone": "America/Edmonton"},
-      "alerts": {"ntfy_topic": "someone-solar-1a2b3c4d", "ntfy_server": "https://ntfy.sh"}
+      "alerts": {"ntfy_topic": "someone-solar-1a2b3c4d", "ntfy_server": "https://ntfy.sh"},
+      "satellite": {"cube_dir": "captures/satellite/cubes"}
     }
 
 Smart-load names are display only: they appear in summaries and tables, never in dumps
@@ -22,7 +23,9 @@ else reads it. site is where the panels are: `sigen weather` and `sigen radar` (
 `--radar`) ask about that point. The timezone (an IANA name) is for anything that reports
 in local time; the weather tables themselves are in UTC. alerts is where notifications go: an ntfy
 topic (ntfy_server defaults to https://ntfy.sh). On a public server the topic name is the only
-secret, so it lives here rather than in the code, and is masked in what sigen prints.
+secret, so it lives here rather than in the code, and is masked in what sigen prints. satellite.cube_dir is where
+`sigen satellite` keeps its cubes and the dashboard reads them; a relative directory is relative to the config
+file's own folder (default: captures/satellite/cubes there).
 
 Which file: get_config() takes --config if given, else the file named by $SIGEN_CONFIG, else the
 nearest config.json in the current directory or above it (the repo's, from anywhere inside it).
@@ -88,6 +91,7 @@ class Array:
 
 
 DEFAULT_NTFY_SERVER = "https://ntfy.sh"
+DEFAULT_CUBE_DIR = Path("captures/satellite/cubes")
 
 
 @dataclass(frozen=True)
@@ -105,11 +109,18 @@ class Config:
     test_database_url: Optional[str] = field(default=None, repr=False)   # only tests/test_db.py uses it
     alerts: Optional[Alerts] = None
     array: Optional[Array] = None
+    satellite_cube_dir: Optional[Path] = None   # satellite.cube_dir, absolute; None without a config file
     # Where it came from, for messages: the file, "--no-config", or where get_config looked.
     origin: Optional[str] = field(default=None, compare=False)
+    path: Optional[Path] = field(default=None, compare=False)        # the file, if it came from one
 
     def _from(self) -> str:
         return f" ({self.origin})" if self.origin else ""
+
+    def cube_dir(self) -> Path:
+        """Where the satellite cubes are: satellite.cube_dir (by default captures/satellite/cubes next to the config
+        file), or captures/satellite/cubes in the current directory without a config file."""
+        return self.satellite_cube_dir if self.satellite_cube_dir is not None else DEFAULT_CUBE_DIR
 
     def require_database_url(self) -> str:
         if not self.database_url:
@@ -186,10 +197,10 @@ def load_config(path: Optional[Path]) -> Config:
         raise ConfigError(f"{path} isn't valid JSON: {e}")
     if not isinstance(doc, dict):
         raise ConfigError(f"{path}: expected a JSON object at the top level")
-    unknown = set(doc) - {"smart_loads", "database", "devices", "site", "alerts", "array"}
+    unknown = set(doc) - {"smart_loads", "database", "devices", "site", "alerts", "array", "satellite"}
     if unknown:
         raise ConfigError(f"{path}: unknown key(s) {', '.join(sorted(unknown))}; "
-                          f"known: alerts, array, database, devices, site, smart_loads")
+                          f"known: alerts, array, database, devices, satellite, site, smart_loads")
 
     devices = {}
     raw_devices = doc.get("devices", {})
@@ -248,7 +259,18 @@ def load_config(path: Optional[Path]) -> Config:
     return Config(smart_load_names=names, database_url=database_url, devices=devices,
                   site=_site(path, doc["site"]) if "site" in doc else None, test_database_url=test_database_url,
                   alerts=_alerts(path, doc["alerts"]) if "alerts" in doc else None,
-                  array=_array(path, doc["array"]) if "array" in doc else None, origin=str(path))
+                  array=_array(path, doc["array"]) if "array" in doc else None,
+                  satellite_cube_dir=_cube_dir(path, doc.get("satellite", {})), origin=str(path), path=Path(path))
+
+
+def _cube_dir(path: Path, spec) -> Path:
+    """satellite.cube_dir, relative to the config file's folder (an absolute one stays as it is)."""
+    if not isinstance(spec, dict) or set(spec) - {"cube_dir"}:
+        raise ConfigError(f'{path}: "satellite" must be {{"cube_dir": "captures/satellite/cubes"}}')
+    cube_dir = spec.get("cube_dir", str(DEFAULT_CUBE_DIR))
+    if not isinstance(cube_dir, str) or not cube_dir.strip():
+        raise ConfigError(f"{path}: satellite.cube_dir must be a directory, e.g. \"captures/satellite/cubes\"")
+    return Path(path).resolve().parent / cube_dir.strip()
 
 
 NTFY_TOPIC = re.compile(r"[-_A-Za-z0-9]{1,64}")      # what ntfy accepts as a topic name

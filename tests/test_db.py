@@ -70,7 +70,8 @@ def free_port():
 def test_migrate_creates_everything_and_is_idempotent(run, config, conn):
     code, out, _ = run("db", "migrate", "--config", config)
     assert code == ExitCode.OK and "0001_initial" in out and "0002_units" in out and "0003_weather" in out
-    assert "0004_wide_values" in out and "0005_alert_log" in out and "Applied 5 migration" in out
+    assert "0004_wide_values" in out and "0005_alert_log" in out and "0006_daily_energy" in out
+    assert "Applied 6 migration" in out
     assert conn.execute("SELECT count(*) FROM register_meta").fetchone()[0] == len(db.STORED_REGISTERS)
     assert conn.execute("SELECT name, type, gain, unit, device FROM register_meta WHERE address = 30005").fetchone() \
         == ("plant_grid_sensor_active_power", "s32", 1000.0, "kW", "plant")
@@ -103,7 +104,8 @@ def test_0002_upgrades_existing_readings(conn):
     rid = conn.execute("INSERT INTO readings (ip_addr, started_at, ended_at, version) "
                        "VALUES ('192.168.1.100', now(), now(), '0.1.0') RETURNING id").fetchone()[0]
     conn.execute("INSERT INTO register_values VALUES (%s, 30014, 880)", (rid,))
-    assert db.migrate(conn) == ["0002_units", "0003_weather", "0004_wide_values", "0005_alert_log"]
+    assert db.migrate(conn) == ["0002_units", "0003_weather", "0004_wide_values", "0005_alert_log",
+                                "0006_daily_energy"]
     assert conn.execute("SELECT unit_id, poll_id FROM readings WHERE id = %s", (rid,)).fetchone() == (247, rid)
     assert conn.execute("SELECT plant_ess_soc FROM raw_plant_register_values WHERE reading_id = %s",
                         (rid,)).fetchone() == (880,)
@@ -168,7 +170,7 @@ def test_0004_moves_every_value(conn):
     old_reading(conn, 247, [(30014, 880)], when + datetime.timedelta(minutes=5))        # an early, partial reading
     before = sorted(conn.execute("SELECT reading_id, address, value FROM register_values").fetchall())
 
-    assert db.migrate(conn) == ["0004_wide_values", "0005_alert_log"]
+    assert db.migrate(conn) == ["0004_wide_values", "0005_alert_log", "0006_daily_energy"]
     assert sorted(conn.execute("SELECT reading_id, address, value FROM register_values").fetchall()) == before
     assert sorted(conn.execute("SELECT reading_id, address, value FROM register_values_v1").fetchall()) == before
     assert conn.execute("SELECT count(*) FROM raw_plant_register_values").fetchone()[0] == 4
@@ -234,7 +236,7 @@ def test_backfill_runs_while_poll_writes_then_migrate_copies_the_rest(conn):
                  "VALUES ('127.0.0.1', 247, nextval('poll_ids'), now(), now(), 'test', 'timed out')")   # a failed one
     before = sorted(conn.execute("SELECT reading_id, address, value FROM register_values").fetchall())
 
-    assert db.migrate(conn) == ["0004_wide_values", "0005_alert_log"]
+    assert db.migrate(conn) == ["0004_wide_values", "0005_alert_log", "0006_daily_energy"]
     assert rows() == (4, 4) and db.wide_layout(conn)
     assert sorted(conn.execute("SELECT reading_id, address, value FROM register_values").fetchall()) == before
     assert sorted(conn.execute("SELECT reading_id, address, value FROM register_values_v1").fetchall()) == before

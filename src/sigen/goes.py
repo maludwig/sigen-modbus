@@ -19,12 +19,20 @@ box falls in: ~1.4 MB of ACMF's 24 MB. Scans are fetched in parallel processes (
 threads would wait on each other's network reads) and appended in time order. Scans already in a cube are skipped,
 so running it again only fetches what's new.
 
-Needs numpy, h5py and fsspec[http] (dependencies of the package); imported only by `sigen satellite`.
+Readers never see a half-written cube: each run appends to a copy (<cube>.tmp) and swaps it in with os.replace when
+the product is done, so a reader opens either the old file or the new one, and a crash leaves the old one whole.
+Only one run at a time per cube directory: it holds <cube dir>/satellite.pid (claim_pid_file), and a second run
+refuses (exit 7) while that process is alive.
+
+Needs numpy, h5py and fsspec[http] (dependencies of the package).
 """
 import concurrent.futures
 import datetime
 import math
+import os
 import re
+import shutil
+import sys
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -35,7 +43,7 @@ from zoneinfo import ZoneInfo
 import h5py
 import numpy as np
 
-from sigen.errors import ConnectionFailed, SigenError
+from sigen.errors import ConnectionFailed, PreconditionFailed, SigenError
 
 DEFAULT_SATELLITE = "18"                 # GOES-West: western North America and the Pacific
 PRODUCTS = ("ACM", "COD", "ACHA")
@@ -259,6 +267,103 @@ def append_box(path: Path, box: Box, t0: datetime.datetime, product: str, satell
                 cube[name][n] = data
 
 
+SWAP_TRIES, SWAP_WAIT = 50, 0.1          # a reader holding the cube open (Windows won't replace it): up to ~5 s
+
+
+def working_copy(path: Path) -> Path:
+    """<cube>.tmp: a copy of the cube at `path` to append to (none yet if the cube doesn't exist)."""
+    tmp = path.with_name(path.name + ".tmp")
+    if path.exists():
+        shutil.copyfile(path, tmp)
+    elif tmp.exists():
+        tmp.unlink()                     # left by a run that crashed before its first swap
+    return tmp
+
+
+def swap_in(tmp: Path, path: Path, tries: int = SWAP_TRIES, wait: float = SWAP_WAIT) -> None:
+    """Replace the cube at `path` with `tmp` in one step. On Windows a file another process has open can't be
+    replaced; readers hold a cube only for a moment, so retry for a while before giving up."""
+    for attempt in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                raise SigenError(f"couldn't replace {path.name}: something has it open; the new scans are in "
+                                 f"{tmp.name}, and the next run starts over from {path.name}")
+            time.sleep(wait)
+
+
+# ---------- one run at a time ----------
+PID_FILE = "satellite.pid"
+PID_STALE = datetime.timedelta(hours=3)  # older than this, a PID file is ignored: its number may be someone else's now
+
+
+def process_alive(pid: int) -> bool:
+    """Whether a process with this ID is running."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(0x1000, False, pid)            # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5                       # access denied: it exists, it isn't ours
+        try:
+            code = wintypes.DWORD()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)                  # signal 0: only checks (on Windows os.kill would terminate it instead)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def claim_pid_file(cube_dir: Path, pid: Optional[int] = None) -> Path:
+    """Write this process's ID to <cube dir>/satellite.pid, created exclusively. If the file exists and names a live
+    process (and is under PID_STALE old), raise PreconditionFailed; a stale one is replaced."""
+    pid = os.getpid() if pid is None else pid
+    path = Path(cube_dir) / PID_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                owner = int(path.read_text(encoding="ascii").strip() or 0)
+                age = time.time() - path.stat().st_mtime
+            except (OSError, ValueError):
+                owner, age = 0, 0.0      # unreadable or half-written: treat as stale
+            if owner != pid and process_alive(owner) and age < PID_STALE.total_seconds():
+                raise PreconditionFailed(f"sigen satellite is already running (process {owner}, {path}); "
+                                         "it will pick up everything this run would have")
+            path.unlink(missing_ok=True)
+            continue
+        with os.fdopen(fd, "w", encoding="ascii") as f:
+            f.write(f"{pid}\n")
+        return path
+    raise PreconditionFailed(f"couldn't claim {path}: another run keeps creating it")
+
+
+def release_pid_file(path: Path, pid: Optional[int] = None) -> None:
+    """Remove the PID file if it's still ours."""
+    pid = os.getpid() if pid is None else pid
+    try:
+        if int(path.read_text(encoding="ascii").strip() or 0) == pid:
+            path.unlink()
+    except (OSError, ValueError):
+        pass
+
+
 def _network_errors() -> tuple:
     """What a failed read raises: OSError (incl. timeouts and fsspec's FileNotFoundError for a 404), and
     aiohttp's own errors, which aren't all OSErrors."""
@@ -323,13 +428,26 @@ def build_cubes(*, lat: float, lon: float, timezone: str, start: datetime.dateti
                 boxes = pool.map(fetch_box, *zip(*calls))
             else:
                 boxes = (fetch_box(*call, opener=opener) for call in calls)
-            fetched = 0
+            fetched, working, failed, boxes = 0, {}, None, iter(boxes)      # working: cube -> its <cube>.tmp
             try:
-                for (key, t0, path), (box, n_bytes) in zip(todo, boxes):      # in time order
-                    append_box(path, box, t0, product, satellite, km, lat, lon)
+                for key, t0, path in todo:                                     # in time order
+                    try:
+                        box, n_bytes = next(boxes)
+                    except _network_errors() as e:
+                        failed = ConnectionFailed(f"reading {product} from {bucket_url(satellite)} failed: {e}")
+                        break
+                    if path not in working:
+                        working[path] = working_copy(path)
+                    append_box(working[path], box, t0, product, satellite, km, lat, lon)
                     fetched += n_bytes
-            except _network_errors() as e:
-                raise ConnectionFailed(f"reading {product} from {bucket_url(satellite)} failed: {e}")
+            except BaseException:
+                for tmp in working.values():          # a scan may be half-written: the cubes stay as they were
+                    tmp.unlink(missing_ok=True)
+                raise
+            for path, tmp in working.items():         # every scan appended so far is whole: swap them in
+                swap_in(tmp, path)
+            if failed is not None:
+                raise failed
             result = ProductResult(product, len(keys), len(todo), fetched, time.perf_counter() - began,
                                    sorted(p for p in present if p.exists()))
             log(f"{product}: {result.scans} scans, {result.added} added, {result.scans - result.added} already in "

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sigen: uPlot trial</title>
+  <link rel="stylesheet" href="{{ uplot }}.min.css">
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0 auto; padding: 12px 16px; max-width: 1150px;
+           background: #fff; color: #222; }
+    h1 { font-size: 1.2em; margin: 6px 0; }
+    .meta { color: #666; font-size: 0.85em; }
+    .error { color: #a00; }
+    #plot { width: 100%; }
+    #now { font-size: 1.6em; font-weight: bold; margin: 10px 0 2px; font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <h1>uPlot trial: Other, the last hour, live</h1>
+  <p class="meta">The house's power minus all 24 smart loads, at every plant reading (every 15 s), drawn in the browser
+    by uPlot from <a href="{{ url_for('other_json') }}">{{ url_for('other_json') }}</a>. The page keeps the points and
+    asks only for newer ones, every {{ every }} s.</p>
+  <div id="plot"></div>
+  <div id="now">Now: -</div>
+  <div class="meta" id="status">Loading…</div>
+  <script src="{{ uplot }}.iife.min.js"></script>
+  <script>
+    const EVERY = {{ every }} * 1000, KEEP = 3600;      // check every EVERY ms; keep the last KEEP seconds of points
+    const DATA = "{{ url_for('other_json') }}";
+    const el = document.getElementById("plot"), now = document.getElementById("now"),
+          status = document.getElementById("status");
+    const size = () => ({width: el.clientWidth, height: Math.round(Math.min(Math.max(el.clientWidth * 0.5, 260), 440))});
+    // ts: unix seconds, for uPlot's time axis; last: the newest "t" exactly as the server sent it, for ?since= (a Date
+    // keeps only milliseconds: rebuilt from one, the newest reading's microseconds would be lost and it'd come again)
+    let ts = [], kws = [], last = null, plot = null, busy = false;
+    const clock = (seconds) => new Date(seconds * 1000).toLocaleTimeString("en-CA", {hour12: false});   // this device's time
+
+    function draw() {
+      if (plot === null) {
+        const kw = (u, v) => (v == null ? "-" : `${v.toFixed(3)} kW`);
+        plot = new uPlot({
+          ...size(),
+          series: [{}, {label: "Other", stroke: "#555", width: 1.5, value: kw}],
+          axes: [{}, {label: "kW", values: (u, ticks) => ticks.map((t) => t.toFixed(1))}],
+        }, [ts, kws], el);
+        window.addEventListener("resize", () => plot.setSize(size()));
+      } else {
+        plot.setData([ts, kws]);                     // redraws, new points or not
+      }
+      const n = ts.length;
+      now.textContent = n ? `Now: ${kws[n - 1].toFixed(3)} kW (at ${clock(ts[n - 1])})` : "Now: - (no readings in the last hour)";
+    }
+
+    async function update() {
+      if (busy) return;                              // the last check hasn't come back yet
+      busy = true;
+      const checked = Date.now() / 1000;
+      try {
+        const r = await fetch(last === null ? DATA : `${DATA}?since=${encodeURIComponent(last)}`);
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        if (d.t.length) last = d.t[d.t.length - 1];
+        ts.push(...d.t.map((iso) => Date.parse(iso) / 1000));
+        kws.push(...d.kw);
+        const cut = ts.length ? ts[ts.length - 1] - KEEP : 0;   // slide the window: drop what's over an hour older
+        let old = 0;
+        while (old < ts.length && ts[old] < cut) old++;
+        ts.splice(0, old);
+        kws.splice(0, old);
+        draw();
+        status.textContent = `Checked at ${clock(checked)}: ${d.t.length} new reading${d.t.length === 1 ? "" : "s"}` +
+                             (old ? `, ${old} dropped off the start` : "") + `; ${ts.length} on the chart.`;
+      } catch (e) {
+        status.innerHTML = `<span class="error">Checked at ${clock(checked)}: failed (${e.message}); ` +
+                           `trying again in ${EVERY / 1000} s.</span>`;
+      } finally {
+        busy = false;
+      }
+    }
+
+    update();
+    setInterval(update, EVERY);
+  </script>
+</body>
+</html>

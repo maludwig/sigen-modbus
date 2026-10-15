@@ -8,6 +8,11 @@ pytest                       # in parallel, a worker per CPU core (pytest-xdist)
 Use an editable install (`-e`): a plain `pip install .` copies the code once, and later edits
 won't show up. Without installing at all: `PYTHONPATH=src python -m sigen …`.
 
+The daily page's Sankey diagram is plain JavaScript (`src/sigen/static/my_sankey.js`, no
+dependencies). Its layout is tested with Node's built-in test runner
+(`node --test tests/js/my_sankey.test.js`); `pytest` runs that too when Node is installed, and
+skips it when it isn't. No npm packages are needed.
+
 ## Layout
 
 ```

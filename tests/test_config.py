@@ -1,5 +1,6 @@
 """The --config file: loading, validation, and how names show up."""
 import json
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +26,23 @@ def test_example_config_is_valid():
     c = load_config(REPO / "config.example.json")
     assert c.smart_load_names and c.database_url and c.test_database_url and c.alerts
     assert c.devices["inverter"].units == (1,) and c.site.altitude_m == 1045 and c.array.kw(1) == 5.0
+    assert c.cube_dir() == REPO.resolve() / "captures" / "satellite" / "cubes"
+
+
+def test_satellite_cube_dir_is_relative_to_the_config_file(tmp_path, monkeypatch):
+    folder = tmp_path / "conf"
+    folder.mkdir()
+    monkeypatch.chdir(tmp_path)                                   # not the config's folder
+    default = folder.resolve() / "captures" / "satellite" / "cubes"
+    assert load_config(write(folder, {})).cube_dir() == default    # no satellite section: the default, there
+    assert load_config(write(folder, {"satellite": {}})).cube_dir() == default
+    assert load_config(write(folder, {"satellite": {"cube_dir": "../data"}})).cube_dir() == folder.resolve() / "../data"
+    absolute = tmp_path / "elsewhere"
+    assert load_config(write(folder, {"satellite": {"cube_dir": str(absolute)}})).cube_dir() == absolute
+    assert Config().cube_dir() == Path("captures/satellite/cubes")   # no config file: the current directory
+    for bad in ({"dir": "x"}, {"cube_dir": ""}, {"cube_dir": 3}, ["x"]):
+        with pytest.raises(ConfigError, match="satellite"):
+            load_config(write(folder, {"satellite": bad}))
 
 
 def test_find_config_walks_up(tmp_path):

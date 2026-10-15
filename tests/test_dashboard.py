@@ -3,12 +3,16 @@ database (skipped without one, like test_db.py)."""
 import datetime
 import json
 import math
+import re
+import struct
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pytest
+from matplotlib.dates import date2num
 
-from sigen import charts, db, dashboard
-from sigen.config import Config
+from sigen import charts, db, dashboard, goes, goes_shade
+from sigen.config import Config, Site
 from sigen.errors import ExitCode
 from sigen.registers import BY_NAME
 
@@ -74,6 +78,45 @@ def test_battery_power_with_soc():
     flat = charts.Series(t[:1], {charts.SOC: [73.0], "plant_backup_soc": [73.0], "plant_charge_cut_off_soc": [73.0]})
     assert charts.battery_power_figure(power, TZ, flat).axes[1].get_ylim() == (68.0, 78.0)   # MIN_SOC_SPAN
     assert len(charts.battery_power_figure(power, TZ, charts.Series([], {})).axes) == 1       # no plant readings
+
+
+def strip_colours(ax, t):
+    """{strip label: its RGBA at time t} from a chart's strip image (draw_strips)."""
+    image = ax.images[0]
+    rgba = np.asarray(image.get_array())
+    x0, x1, _, _ = image.get_extent()
+    column = int((date2num(t) - x0) / (x1 - x0) * rgba.shape[1])
+    return {label.get_text(): tuple(float(c) for c in rgba[int(y), column])
+            for y, label in zip(ax.get_yticks(), ax.get_yticklabels())}
+
+
+def test_satellite_strips():
+    t = [NOW + datetime.timedelta(minutes=10 * k) for k in range(3)]
+    strings = charts.StringData(t, {n: [300.0] * 3 for n in charts.STRINGS}, {n: [1.0] * 3 for n in charts.STRINGS})
+    sky = goes_shade.ShadeSeries(t, [5.0, 20.0, 30.0], [150.0] * 3,
+                                 {"trans_top": [1.0, 0.5, math.nan], "prob_0km": [0.0, 1.0, 0.25]})
+    fig = charts.strings_figure(strings, TZ, "power", satellite=sky)
+    ax, strip = fig.axes                                     # every strip in one panel, as one image
+    assert [x.get_text() for x in strip.get_yticklabels()] == [label for _, label, _, _ in charts.SATELLITE_STRIPS]
+    assert {x.get_fontsize() for x in strip.get_yticklabels()} == {charts.STRIP_LABEL_SIZE}
+    first, second, third = (strip_colours(strip, x + datetime.timedelta(seconds=30)) for x in t)
+    top, overhead, cloud = (charts.SATELLITE_STRIPS[k][1] for k in (0, 1, 5))   # trans_top, trans_0km, prob_0km
+    # 5° sun: too low (pale blue); 0.5 through: mid grey; no value: see-through (the hatching shows)
+    assert first[top] == pytest.approx(charts.to_rgba(charts.LOW_SUN_COLOUR))
+    assert second[top] == (0.5, 0.5, 0.5, 1) and third[top][3] == 0
+    assert (first[cloud], second[cloud], third[cloud]) == ((1, 1, 1, 1), (0, 0, 0, 1), (0.75, 0.75, 0.75, 1))  # 1 − prob
+    assert first[overhead] == first[top] and second[overhead][3] == 0     # a column it doesn't have: only the low sun
+    assert "GOES-West" in strip.get_xlabel()
+
+
+def test_envelope_keeps_each_columns_extremes():
+    t = [NOW + datetime.timedelta(seconds=k) for k in range(1000)]
+    v = [math.sin(k / 7) for k in range(1000)]
+    v[500] = 9.0                                             # a one-reading spike: a mean would flatten it
+    times, values = charts.envelope(t, v, 100)
+    assert len(times) <= 200 and times == sorted(times)
+    assert max(values) == 9.0 and min(values) == min(v)
+    assert charts.envelope(t[:200], v[:200], 100) == (t[:200], v[:200])   # few enough already: untouched
 
 
 def test_dashboard_needs_a_database_url(run):
@@ -212,6 +255,132 @@ def test_string_power_with_clear_sky(seeded, conn, tmp_path):
     assert "clear sky:" in ax.get_title()
 
 
+def test_wet_bulb():
+    assert charts.wet_bulb(20.0, 50.0) == pytest.approx(13.7, abs=0.1)     # Stull 2011's worked example
+    assert charts.wet_bulb(0.0, 100.0) == pytest.approx(0.0, abs=0.3)      # saturated air: about the air itself
+
+
+def test_precipitation(seeded, conn):
+    day = datetime.datetime(2026, 10, 1, tzinfo=TZ)
+    at = day.replace
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO open_meteo_weather (fetched_at, resolution_minutes, valid_at, weather_code, temperature_2m, "
+            "relative_humidity_2m) VALUES (%s, 15, %s, %s, %s, 100)",
+            [(T0, at(hour=12, minute=0), 3, 0.0), (T0, at(hour=12, minute=15), 3, 0.0),   # overcast, wet-bulb ~0: snow
+             (T0, at(hour=12, minute=45), 61, 4.0),     # rain by its code; 12:30 is missing
+             (T0, at(hour=13, minute=0), 73, 4.0)])     # snow by its code, however warm
+        cur.executemany(
+            "INSERT INTO radar_frames (fetched_at, frame_at, rain_mm_h, snow_cm_h, covered) VALUES (%s, %s, %s, %s, true)",
+            [(T0, at(hour=h, minute=m), r, s) for h, m, r, s in (
+                (12, 0, 0.0, 0.0), (12, 6, 0.15, 0.15), (12, 12, 0.3, 0.2), (12, 24, 0.5, 0.4), (12, 36, 1.0, 0.6),
+                (12, 48, 0.2, 0.15), (12, 54, 0.1, 0.1), (13, 6, 0.0, 0.0))]
+            + [(T0, day - datetime.timedelta(days=3), 2.0, 1.5),          # the week's most
+               (T0, day - datetime.timedelta(days=8), 9.0, 9.0)])        # more than a week before the window's end
+        cur.execute("INSERT INTO radar_frames (fetched_at, error) VALUES (%s, 'HTTP 500')", (T0,))
+    p = charts.precipitation(conn, day, day + datetime.timedelta(days=1))
+    # 12:00 is the end of its own period; 12:24 falls in the missing 12:30, filled in: the codes either side differ,
+    # so the wet-bulb of 2 °C (halfway) decides: rain. 13:06 is past the last row: no kind.
+    assert p.kinds == ["snow", "snow", "snow", "rain", "rain", "snow", "snow", None]
+    assert p.kind == "snow" and p.top == {"rain": 2.0, "snow": 1.5}
+    shares = p.shares()                                                  # snow_cm_h ÷ 1.5, log scale k = 20
+    assert shares[0] == 0 and shares[1] == pytest.approx(math.log1p(2) / math.log1p(20))
+    assert charts.precipitation(conn, at(hour=12, minute=30), at(hour=12, minute=45)).kind == "rain"
+    dry = charts.precipitation(conn, day - datetime.timedelta(days=20), day - datetime.timedelta(days=19))
+    assert (dry.times, dry.kind, dry.top) == ([], "rain", {"rain": 1.0, "snow": 1.0})   # a clear day: white "Rain"
+
+    strings = charts.string_readings(conn)                               # 12:00 to 12:30
+    plain = charts.strings_figure(strings, TZ, "power")
+    ax, strip = charts.strings_figure(strings, TZ, "power", precip=p).axes
+    assert strip_colours(strip, at(hour=12, minute=1)) == {"Snow": (1, 1, 1, 1)}         # 0 cm/h: white
+    grey = 1 - math.log1p(2) / math.log1p(20)                            # 0.15 of 1.5 cm/h, lerped to black
+    assert strip_colours(strip, at(hour=12, minute=7))["Snow"] == pytest.approx((grey, grey, grey, 1))
+    assert ax.get_xlim() == plain.axes[0].get_xlim()                     # the 13:06 frame doesn't widen the axis
+    dry_strip = charts.strings_figure(strings, TZ, "power", precip=dry).axes[1]
+    assert strip_colours(dry_strip, at(hour=12, minute=1)) == {"Rain": (0, 0, 0, 0)}     # no frame: see-through
+
+
+DAY2 = datetime.datetime(2026, 10, 2, tzinfo=TZ)
+
+
+@pytest.fixture
+def a_day(seeded, conn):
+    """2026-10-02: plant readings with the six lifetime energy counters and the four powers, and the first reading
+    after midnight, which closes the day. Its totals: solar 30, house 15, battery 3.5 in / 1.25 out, grid 8.1 in / 20
+    out. Flows only from 00:00:10-00:01:10 (the battery runs the house, 1 kW) and 12:00-12:01 (5 kW of sun: 1 to the
+    house, 2 to the battery, 2 exported); the other gaps are over 5 minutes."""
+    def plant(at, counters, pv, battery, grid, load):
+        t = DAY2 + at
+        names = ["plant_accumulated_pv_energy", "plant_accumulated_load_consumption",
+                 "plant_accumulated_battery_charge_energy", "plant_accumulated_battery_discharge_energy",
+                 "plant_accumulated_grid_import_energy", "plant_accumulated_grid_export_energy"]
+        db.insert_reading(conn, ip="127.0.0.1", unit_id=247, poll_id=db.next_poll_id(conn), started_at=t, ended_at=t,
+                          values=sorted([stored(n, c) for n, c in zip(names, counters)]
+                                        + [stored("plant_photovoltaic_power", pv), stored("plant_ess_power", battery),
+                                           stored("plant_grid_sensor_active_power", grid),
+                                           stored("plant_total_load_power", load)]))
+    m = lambda h, mi, s=0: datetime.timedelta(hours=h, minutes=mi, seconds=s)
+    #     when            solar   house   chg    dis     in      out      pv  batt grid load
+    plant(m(0, 0, 10), (100, 200, 50, 40, 100, 50), 0, -1, 0, 1)
+    plant(m(0, 1, 10), (100, 200.02, 50, 40.02, 100, 50), 0, -1, 0, 1)
+    plant(m(12, 0), (120, 210, 52, 41, 105, 60), 5, 2, -2, 1)
+    plant(m(12, 1), (120.08, 211, 52.03, 41, 105.5, 61), 5, 2, -2, 1)
+    plant(m(23, 59, 59), (129, 214, 53.4, 41.2, 108, 70), 0, 0, 0, 1)
+    plant(m(24, 0, 5), (130, 215, 53.5, 41.25, 108.1, 70), 0, 0, 0, 1)    # the next day's first: it closes this one
+    return seeded
+
+
+def test_day_energy(a_day, conn):
+    e = charts.day_energy(conn, DAY2, DAY2 + datetime.timedelta(days=1))
+    assert e.totals == pytest.approx({"solar": 30, "load": 15, "battery_charged": 3.5, "battery_discharged": 1.25,
+                                      "grid_imported": 8.1, "grid_exported": 20})     # midnight to midnight
+    minute = 1 / 60
+    assert e.flows == pytest.approx({("Battery", "Load"): minute, ("Solar", "Load"): minute,
+                                     ("Solar", "Battery"): 2 * minute, ("Solar", "Grid"): 2 * minute,
+                                     ("Battery", "Grid"): 0, ("Grid", "Load"): 0, ("Grid", "Battery"): 0})
+    # 10-03 so far: its only reading is the one that closed 10-02 (days share their boundary: they add up exactly);
+    # with no reading after it, that's also its closing reading, so nothing yet
+    so_far = charts.day_energy(conn, DAY2 + datetime.timedelta(days=1), DAY2 + datetime.timedelta(days=2))
+    assert so_far.totals == {key: 0 for key, _ in charts.DAY_TOTALS} and so_far.first == DAY2 + datetime.timedelta(
+        days=1, seconds=5)
+    assert charts.day_energy(conn, DAY2 - datetime.timedelta(days=30), DAY2 - datetime.timedelta(days=29)) is None
+    data = charts.sankey(e)          # every flow here is a minute's worth, far under 0.5 % of the day: none drawn
+    assert (data["sources"], data["sinks"], data["flows"]) == ([], [], [])
+    assert len(data["dropped"]) == 4 and {"from": "Battery", "to": "Load", "kwh": round(minute, 4)} in data["dropped"]
+
+
+def test_sankey_leaves_out_flows_under_half_a_percent():
+    totals = {"solar": 30, "battery_discharged": 2, "grid_imported": 0.1,       # 32.1 kWh in: the cut-off is 0.1605
+              "battery_charged": 5, "load": 15, "grid_exported": 10}
+    flows = {("Solar", "Load"): 13, ("Solar", "Battery"): 5, ("Solar", "Grid"): 10, ("Battery", "Load"): 1.9,
+             ("Battery", "Grid"): 0.1, ("Grid", "Load"): 0.1, ("Grid", "Battery"): 0}
+    data = charts.sankey(charts.DayEnergy(totals, flows, T0, T0))
+    assert data["cutoff"] == pytest.approx(0.1605)
+    assert data["dropped"] == [{"from": "Battery", "to": "Grid", "kwh": 0.1}, {"from": "Grid", "to": "Load", "kwh": 0.1}]
+    # Each dropped flow comes off both its ends; the grid source has nothing left to draw: left out
+    assert [(n["name"], n["kwh"]) for n in data["sources"]] == [("Solar", 30), ("Battery", 1.9)]
+    assert [(n["name"], n["kwh"]) for n in data["sinks"]] == [("Battery", 5), ("Load", 14.9), ("Grid", 9.9)]
+    assert {"from": 1, "to": 1, "kwh": 1.9} in data["flows"] and len(data["flows"]) == 4   # re-indexed: battery → load
+    sinkless = charts.sankey(charts.DayEnergy(totals, {("Solar", "Load"): 20, ("Solar", "Grid"): 0.1}, T0, T0))
+    assert [n["name"] for n in sinkless["sinks"]] == ["Load"]          # a sink whose flows all went: left out too
+
+
+def test_daily_page(a_day):
+    client = app_for(a_day)
+    html = client.get("/daily?day=2026-10-02").get_data(as_text=True)
+    assert "Daily totals: Friday 2026-10-02" in html and "30.00 kWh" in html and "Exported to the grid" in html
+    assert "/static/my_sankey.js" in html and '"flows": [' in html and "http-equiv" not in html   # a past day
+    assert "Not drawn: 4 flows under 0.5 %" in html          # this day's flows are all tiny
+    script = client.get("/static/my_sankey.js")
+    assert script.status_code == 200 and b"MySankey" in script.data and "javascript" in script.mimetype
+    flows = re.findall(r"<tr><td>(\w+)</td><td>(\w+)</td><td class=\"kwh\">([\d.]+)</td></tr>", html)
+    assert ("Solar", "Grid", "0.033") in flows and ("Battery", "Load", "0.017") in flows and len(flows) == 7
+    assert "29.917" in html                                  # solar's counter (30) minus its bands (5 kW for 1 minute)
+    assert "No readings that day." in client.get("/daily?day=2026-09-01").get_data(as_text=True)
+    assert "Bad day" in client.get("/daily?day=yesterday").get_data(as_text=True)
+    assert 'href="/daily?day=2026-10-01"' in client.get("/?day=2026-10-01").get_data(as_text=True)   # linked
+
+
 def test_live_limits():
     t = [NOW + datetime.timedelta(minutes=k) for k in range(10)]
     dark, lit = [0.0, 3.0, 9.9], [12.0, 250.0, 0.0, 300.0, 15.0]                 # a dark gap in the middle stays
@@ -230,35 +399,325 @@ def app_for(config_path):
     return dashboard.create_app(Config(database_url=url, origin="test")).test_client()
 
 
+def png_size(data: bytes):
+    """A PNG's (width, height) in pixels, from its IHDR chunk."""
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    return struct.unpack(">II", data[16:24])
+
+
+def declared_sizes(html: str):
+    """{chart name: (width, height)} from the page's <img> tags."""
+    return {name: (int(w), int(h)) for name, w, h in re.findall(
+        r'/chart/(\w+)\.png[^"]*" alt="[^"]*" loading="lazy"\s+width="(\d+)" height="(\d+)"', html)}
+
+
 def test_pages(seeded):
     client = app_for(seeded)
     page = client.get("/?day=2026-10-01")
     html = page.get_data(as_text=True)
     assert page.status_code == 200 and "Thursday 2026-10-01" in html and "http-equiv" not in html  # a past day
-    for name in dashboard.CHARTS:
-        assert f"/chart/{name}.png?day=2026-10-01" in html
-        r = client.get(f"/chart/{name}.png?day=2026-10-01")
-        assert r.status_code == 200 and r.mimetype == "image/png" and r.data[:8] == b"\x89PNG\r\n\x1a\n"
+    sizes = declared_sizes(html)
+    assert list(sizes) == list(dashboard.CHARTS)           # every image has its box reserved
+    assert sizes["string_power"] == charts.pixels(charts.strings_size(precip=True))   # no site: no satellite strips
+    for day in ("2026-10-01", "2026-09-01"):                # with readings, and a day without any ("no data")
+        for name in dashboard.CHARTS:
+            assert f"/chart/{name}.png?day=2026-10-01" in html
+            r = client.get(f"/chart/{name}.png?day={day}")
+            assert r.status_code == 200 and r.mimetype == "image/png"
+            assert png_size(r.data) == sizes[name], (name, day)         # exactly the box the page reserved
     assert 'http-equiv="refresh" content="300"' in client.get("/").get_data(as_text=True)        # today: live
     assert client.get("/chart/nope.png").status_code == 404
     bad = client.get("/chart/string_power.png?hours=x")
-    assert bad.status_code == 400 and bad.data[:4] == b"\x89PNG"
+    assert bad.status_code == 400 and png_size(bad.data) == sizes["string_power"]
     assert "Bad window" in client.get("/?day=yesterday").get_data(as_text=True)
+
+
+class FakeProcess:
+    def __init__(self):
+        self.running = True
+
+    def poll(self):
+        return None if self.running else 0
+
+
+def test_the_page_starts_a_satellite_fetch(seeded, tmp_path):
+    url = json.loads(seeded.read_text(encoding="utf-8"))["database"]["url"]
+    started = []
+
+    def launcher(command, log):
+        started.append((command, log, FakeProcess()))
+        return started[-1][2]
+    config = Config(database_url=url, site=Site(51.0443, -114.0631, "America/Edmonton"),
+                    path=tmp_path / "config.json", satellite_cube_dir=tmp_path / "cubes", origin="test")
+    client = dashboard.create_app(config, launcher=launcher).test_client()
+    assert client.get("/?day=2026-10-01").status_code == 200
+    (command, log, process), = started
+    assert command[1:4] == ["-m", "sigen", "satellite"]
+    assert command[4:] == ["--start", "2026-10-01 00:00", "--end", "2026-10-02 00:00", "--config",
+                           str(tmp_path / "config.json"), "--cube-dir", str(tmp_path / "cubes")]
+    assert log == tmp_path / "cubes" / dashboard.SATELLITE_LOG
+    client.get("/?day=2026-09-30")
+    assert len(started) == 1                                 # ours is still running: none started
+    process.running = False
+    client.get("/?day=2026-09-30")
+    assert len(started) == 2 and started[1][0][5] == "2026-09-30 00:00"
+    started[1][2].running = False
+    client.get("/?day=2026-09-30")
+    assert len(started) == 2                                 # that window had one in the last 10 minutes
+    client.get("/?hours=744")
+    assert len(started) == 2                                 # longer than MAX_FETCH: never from the page
+    r = client.get("/chart/string_power.png?day=2026-10-01")  # no cubes in tmp_path yet: the strips are hatched
+    with_strips = charts.pixels(charts.strings_size(precip=True, satellite=True))
+    assert r.status_code == 200 and png_size(r.data) == with_strips
+    assert declared_sizes(client.get("/?day=2026-10-01").get_data(as_text=True))["string_power"] == with_strips
+    no_site = dashboard.create_app(Config(database_url=url, origin="t"), launcher=launcher).test_client()
+    no_site.get("/?day=2026-09-29")
+    assert len(started) == 2                                 # no site: nothing to fetch
+
+
+def test_the_uplot_page_and_its_strips_start_satellite_fetches(seeded, tmp_path):
+    url = json.loads(seeded.read_text(encoding="utf-8"))["database"]["url"]
+    started = []
+
+    def launcher(command, log):
+        started.append(FakeProcess())
+        return started[-1]
+    config = Config(database_url=url, site=Site(51.0443, -114.0631, "America/Edmonton"),
+                    path=tmp_path / "config.json", satellite_cube_dir=tmp_path / "cubes", origin="test")
+    client = dashboard.create_app(config, launcher=launcher).test_client()
+    def env(query):
+        page = client.get(f"/uplot_dashboard{query}").get_data(as_text=True)
+        return json.loads(re.search(r"LiveCharts\.start\((.*)\);", page).group(1))
+    assert env("?day=2026-10-01")["sunrise"] is None         # not "today": no night sky
+    assert len(started) == 1                                 # opening the page
+    rise, _ = goes.sun_rise_set(datetime.datetime.now(TZ).date(), 51.0443, -114.0631)
+    assert env("")["sunrise"] == rise.timestamp()            # today's, for the string charts' night sky
+    night = client.get("/night").get_data(as_text=True)      # today, before sunrise whatever the time: tomorrow's
+    tomorrow, _ = goes.sun_rise_set(datetime.datetime.now(TZ).date() + datetime.timedelta(days=1), 51.0443, -114.0631)
+    assert json.loads(re.search(r"LiveCharts\.start\((.*)\);", night).group(1))["sunrise"] == tomorrow.timestamp()
+    started[-1].running = False
+    n = len(started)                                         # (today's page started one too)
+    client.get("/data/string_power_strips.json?day=2026-09-30")
+    assert len(started) == n + 1                             # the page's strips, fetched again every few minutes
+    started[-1].running = False
+    client.get("/data/string_power_strips.json?day=2026-09-30")
+    assert len(started) == n + 1                             # that window had one in the last 10 minutes
+
+
+def test_the_clear_sky_model_ends_now_or_half_an_hour_after_sunset():
+    site = Site(51.0443, -114.0631, "America/Edmonton")
+    rise, sunset = goes.sun_rise_set(datetime.date(2026, 10, 11), site.latitude, site.longitude)
+    _, yesterday = goes.sun_rise_set(datetime.date(2026, 10, 10), site.latitude, site.longitude)
+    half = datetime.timedelta(minutes=30)
+    assert dashboard.model_end(NOW, site) == NOW                                   # 14:30: the sun's up
+    late = datetime.datetime(2026, 10, 11, 22, 0, tzinfo=TZ)
+    assert dashboard.model_end(late, site) == sunset + half
+    small_hours = datetime.datetime(2026, 10, 11, 3, 0, tzinfo=TZ)
+    assert dashboard.model_end(small_hours, site) == yesterday + half             # the last sunset was yesterday's
+    assert dashboard.model_end(sunset + datetime.timedelta(minutes=10), site) == sunset + datetime.timedelta(minutes=10)
+    north = Site(80.0, 0.0, "UTC")                                                # the midnight sun: no sunset
+    assert dashboard.model_end(datetime.datetime(2026, 6, 21, 23, 0, tzinfo=datetime.timezone.utc), north).hour == 23
+
+
+def test_satellite_command_rounds_the_end_up():
+    config = Config(site=Site(51.0, -114.0, "America/Edmonton"), path=None, origin="t")
+    start, end = NOW - datetime.timedelta(hours=6), NOW + datetime.timedelta(seconds=1)
+    command = dashboard.satellite_command(config, start, end, TZ)
+    assert command[4:8] == ["--start", "2026-10-11 08:30", "--end", "2026-10-11 14:31"]
+
+
+def test_uplot_trial_page_and_its_data_when_the_database_is_down(hangs_up):
+    client = dashboard.create_app(Config(database_url=f"postgresql://u:x@127.0.0.1:{hangs_up}/x", origin="t"),
+                                  launcher=None).test_client()
+    html = client.get("/uplot").get_data(as_text=True)                 # the page itself needs no database
+    assert f"{dashboard.UPLOT}.iife.min.js" in html and f"{dashboard.UPLOT}.min.css" in html
+    assert 'const DATA = "/data/other.json"' in html and "const EVERY = 5 * 1000" in html
+    r = client.get("/data/other.json")
+    assert r.status_code == 503 and r.get_json()["error"].startswith("database:")
+
+
+def test_uplot_dashboard_has_every_charts_title(hangs_up):
+    client = dashboard.create_app(Config(database_url=f"postgresql://u:x@127.0.0.1:{hangs_up}/x", origin="t"),
+                                  launcher=None).test_client()
+    html = client.get("/uplot_dashboard?day=2026-10-01").get_data(as_text=True)   # the data comes later, by fetch
+    assert all(f'id="plot-{name}"' in html for name in dashboard.CHARTS)
+    assert "Battery temperatures (left axis)" in html and f"{dashboard.UPLOT}.iife.min.js" in html
+    assert "/static/live_charts.js" in html
+
+    def env(query):
+        page = client.get(f"/uplot_dashboard{query}").get_data(as_text=True)
+        return json.loads(re.search(r"LiveCharts\.start\((.*)\);", page).group(1))
+    past = env("?day=2026-10-01")
+    assert past["data"]["string_voltage"] == "/data/string_voltage.json?day=2026-10-01"
+    assert set(past["data"]) == set(dashboard.CHARTS) | {"string_power_strips"}   # every chart, and the strips
+    assert (past["live"], past["keep"], past["today"]) == (False, None, False)   # a past day: never topped up
+    assert (env("?hours=6")["live"], env("?hours=6")["keep"], env("?hours=6")["today"]) == (True, 21600.0, False)
+    assert env("")["today"] is True and env("")["every"] == dashboard.LIVE_EVERY
+    assert "Bad window" in client.get("/uplot_dashboard?hours=x").get_data(as_text=True)
+
+
+def test_string_voltage_as_json(seeded, monkeypatch):
+    client = app_for(seeded)
+    r = client.get("/data/string_voltage.json?day=2026-10-01")
+    d = r.get_json()
+    assert r.status_code == 200 and r.headers["Cache-Control"] == "no-store"
+    assert d["t"] == ["2026-10-01T18:00:05.000000Z", "2026-10-01T18:15:05.000000Z", "2026-10-01T18:30:05.000000Z"]
+    assert d["volts"] == {n: [300.0, 301.0, 302.0] for n in ("1", "2", "3", "4")}
+    later = T0 + datetime.timedelta(hours=1)
+    monkeypatch.setattr(dashboard.datetime, "datetime", type("Frozen", (datetime.datetime,), {
+        "now": classmethod(lambda cls, tz=None: later.astimezone(tz))}))
+    d = client.get(f"/data/string_voltage.json?since={d['t'][0]}").get_json()
+    assert d["t"] == ["2026-10-01T18:15:05.000000Z", "2026-10-01T18:30:05.000000Z"]   # strictly after
+    assert d["volts"]["4"] == [301.0, 302.0]
+    assert client.get("/data/string_voltage.json?since=soon").status_code == 400
+    assert client.get("/data/nonsense.json").status_code == 404
+
+
+def test_string_power_and_its_strips_as_json(seeded):
+    client = app_for(seeded)                                # no site or array: no clear-sky model, no satellite
+    d = client.get("/data/string_power.json?day=2026-10-01").get_json()
+    assert d["t"] == SEEDED_T and d["sky"] is None and d["faces"] == {}
+    assert d["kw"]["1"] == [0.3, 0.602, 0.906] and d["kw"]["4"] == [1.2, 2.408, 3.624]   # V × I: 300 V × 1 A × n …
+    d = client.get("/data/string_power_strips.json?day=2026-10-01").get_json()
+    (radar,) = d["strips"]                                  # the radar's only: no site, no satellite strips
+    assert radar["label"] == "Rain" and radar["starts"] == [] and radar["length"] == 360.0
+    assert len(d["notes"]) == 1 and d["notes"][0].startswith("Rain:")
+
+
+def test_string_power_with_the_clear_sky_model(seeded, tmp_path, monkeypatch):
+    from test_pvmodel import ARRAY, SITE, config_with
+    url = json.loads(seeded.read_text(encoding="utf-8"))["database"]["url"]
+    c = config_with(tmp_path, site=SITE, array=ARRAY, database={"url": url})      # cubes: none under tmp_path
+    client = dashboard.create_app(c, launcher=None).test_client()
+    d = client.get("/data/string_power.json?day=2026-10-01").get_json()
+    sunset = goes.sun_rise_set(datetime.date(2026, 10, 1), SITE["latitude"], SITE["longitude"])[1]
+    stop = sunset + dashboard.MODEL_AFTER_SUNSET                  # every minute from midnight to 30 min after sunset
+    assert d["sky"]["t"][0] == "2026-10-01T06:00:00.000000Z" and set(d["sky"]["kw"]) == {"1", "2", "3", "4"}
+    assert dashboard.iso_utc(stop - datetime.timedelta(minutes=1)) <= d["sky"]["t"][-1] < dashboard.iso_utc(stop)
+    assert max(d["sky"]["kw"]["1"]) > 0 and d["sky"]["kw"]["1"][-1] == 0
+    assert d["faces"] == {"1": "south", "2": "east", "3": "west", "4": "north"}
+    strips =client.get("/data/string_power_strips.json?day=2026-10-01").get_json()["strips"]
+    assert [s["label"] for s in strips][1:] == [label for _, label, _, _ in charts.SATELLITE_STRIPS]
+    assert all(colour is None for s in strips[1:] for colour in s["colours"])   # no cubes: every scan hatched
+    frozen_an_hour_later(monkeypatch)                     # a top-up: since is UTC, "now" the site's time
+    r = client.get(f"/data/string_power.json?since={SEEDED_T[-1]}")
+    assert r.status_code == 200 and r.get_json()["t"] == []
+    sky = r.get_json()["sky"]["t"]                          # the last SKY_MARGIN of the model again, to now
+    assert (sky[0], sky[-1], len(sky)) == ("2026-10-01T17:31:00.000000Z", "2026-10-01T19:00:00.000000Z", 90)
+
+
+def frozen_an_hour_later(monkeypatch):
+    """"Now", for ?since= (which must be within MAX_HOURS of it): an hour after the seeded readings."""
+    later = T0 + datetime.timedelta(hours=1)
+    monkeypatch.setattr(dashboard.datetime, "datetime", type("Frozen", (datetime.datetime,), {
+        "now": classmethod(lambda cls, tz=None: later.astimezone(tz))}))
+
+
+SEEDED_T = ["2026-10-01T18:00:05.000000Z", "2026-10-01T18:15:05.000000Z", "2026-10-01T18:30:05.000000Z"]
+
+
+def test_load_energy_as_json(seeded):
+    client = app_for(seeded)
+    d = client.get("/data/load_energy.json?day=2026-10-01").get_json()
+    assert d == {"first": SEEDED_T[0], "last": SEEDED_T[-1], "house": 1.5,
+                 "bars": {"slot 1": 0.72, "slot 7": 0.1, "Other": 0.68}}           # as test_energy_by_load
+    assert client.get("/data/load_energy.json?day=2026-09-30").get_json()["bars"] == {}
+
+
+def test_load_counters_and_snapshots_as_json(seeded, monkeypatch):
+    client = app_for(seeded)
+    d = client.get("/data/load_counters.json?day=2026-10-01").get_json()
+    assert d["t"] == SEEDED_T
+    assert d["kwh"] == {"slot 1": [10.0, 10.36, 10.72], "slot 7": [5.0, 5.05, 5.1], charts.OTHER: [85.0, 85.34, 85.68]}
+    d = client.get("/data/load_snapshots.json?day=2026-10-01").get_json()
+    assert d["t"] == SEEDED_T and list(d["kw"]) == ["slot 1", "slot 7", charts.OTHER]
+    assert d["kw"]["slot 1"] == [1.44, 1.44, 0.0] and d["kw"][charts.OTHER] == pytest.approx([0.36, 0.86, 0.6])
+    frozen_an_hour_later(monkeypatch)
+    d = client.get(f"/data/load_counters.json?since={SEEDED_T[0]}").get_json()
+    assert d["t"] == SEEDED_T[1:] and d["kwh"]["slot 1"] == [10.36, 10.72]       # even one new reading
+    d = client.get(f"/data/load_counters.json?since={SEEDED_T[-1]}").get_json()
+    assert d == {"t": [], "kwh": {charts.OTHER: []}}       # nothing new; the slots that didn't move are left out
+    d = client.get(f"/data/load_snapshots.json?since={SEEDED_T[1]}").get_json()
+    assert d["t"] == SEEDED_T[2:] and d["kw"]["slot 7"] == [0.3]
+
+
+def test_battery_charts_as_json(seeded, conn, monkeypatch):
+    conn.execute("INSERT INTO open_meteo_weather (fetched_at, resolution_minutes, valid_at, temperature_2m) VALUES "
+                 "(%s, 15, %s, -3.5)", (T0, T0 - datetime.timedelta(seconds=5)))   # 12:00:00
+    soc_at = T0 + datetime.timedelta(minutes=30, seconds=1)          # a plant reading a moment after the last poll's
+    db.insert_reading(conn, ip="127.0.0.1", unit_id=247, poll_id=db.next_poll_id(conn), started_at=soc_at,
+                      ended_at=soc_at, values=sorted([stored("plant_ess_soc", 80.0), stored("plant_backup_soc", 20.0),
+                                                      stored("plant_charge_cut_off_soc", 100.0)]))
+    client = app_for(seeded)
+    d = client.get("/data/battery_temps.json?day=2026-10-01").get_json()
+    assert d["t"] == SEEDED_T
+    assert d["c"] == {"coolest cluster": [8.0, 9.0, 10.0], "warmest cluster": [12.0, 13.0, 14.0],
+                      "average cell": [10.0, 11.0, 12.0], "inverter internal": [35.0, 35.0, 35.0]}
+    assert d["air"] == {"t": ["2026-10-01T18:00:00.000000Z"], "c": [-3.5]}
+    d = client.get("/data/battery_power.json?day=2026-10-01").get_json()
+    assert d["kw"] == {"battery": [0.5, 1.5, -1.0], "pv": [2.0, 2.0, 2.0]}
+    soc = {"t": ["2026-10-01T18:30:06.000000Z"], "pct": {"SOC": [80.0], "backup reserve": [20.0],
+                                                         "charge cut-off": [100.0]}}
+    assert d["soc"] == soc                                  # (the seeded plant readings have no SOC)
+    frozen_an_hour_later(monkeypatch)
+    d = client.get(f"/data/battery_temps.json?since={SEEDED_T[-1]}").get_json()
+    assert d["t"] == [] and d["air"]["c"] == [-3.5]        # the air of the last AIR_MARGIN again: the page dedupes
+    d = client.get(f"/data/battery_power.json?since=2026-10-01T18:30:30Z").get_json()
+    assert d["t"] == [] and d["soc"] == soc                 # the plant's of the last SOC_MARGIN again
+
+
+def test_other_as_json(seeded):
+    client = app_for(seeded)
+    r = client.get("/data/other.json?day=2026-10-01")
+    d = r.get_json()
+    assert r.status_code == 200 and r.headers["Cache-Control"] == "no-store"
+    assert d["kw"] == pytest.approx([0.36, 0.86, 0.6])               # total − all 24 slots, as the chart's Other
+    assert d["t"] == ["2026-10-01T18:00:05.000000Z", "2026-10-01T18:15:05.000000Z", "2026-10-01T18:30:05.000000Z"]
+    assert set(d) == {"t", "kw"}                                       # no timezone: the browser shows its own
+    assert client.get("/data/other.json").get_json()["kw"] == []      # the default, the last hour: nothing then
+    bad = client.get("/data/other.json?hours=x")
+    assert bad.status_code == 400 and "bad window" in bad.get_json()["error"]
+
+
+def test_other_since_a_time(seeded, conn, monkeypatch):
+    client = app_for(seeded)
+    # one more reading, with microseconds, as real ones have: 12:45:05.997599 MDT
+    odd = T0 + datetime.timedelta(minutes=45, microseconds=997599)
+    db.insert_reading(conn, ip="127.0.0.1", unit_id=247, poll_id=db.next_poll_id(conn), started_at=odd, ended_at=odd,
+                      values=plant_values(11, 5.2, 102, 0.5, 0.3, 1.2))
+    first, *rest = client.get("/data/other.json?day=2026-10-01").get_json()["t"]
+    assert rest[-1] == "2026-10-01T18:45:05.997599Z"
+    # "now" for the endpoint: an hour after the seeded readings (since must be within MAX_HOURS of it)
+    later = T0 + datetime.timedelta(hours=1)
+    monkeypatch.setattr(dashboard.datetime, "datetime", type("Frozen", (datetime.datetime,), {
+        "now": classmethod(lambda cls, tz=None: later.astimezone(tz))}))
+    d = client.get(f"/data/other.json?since={first}").get_json()
+    assert d["t"] == rest and d["kw"] == pytest.approx([0.86, 0.6, 0.4])   # strictly after: the first isn't again
+    # The exact string back: nothing new. Cut to milliseconds (what a JavaScript Date keeps), the last comes again.
+    assert client.get(f"/data/other.json?since={rest[-1]}").get_json() == {"t": [], "kw": []}
+    assert client.get("/data/other.json?since=2026-10-01T18:45:05.997Z").get_json()["t"] == [rest[-1]]
+    assert client.get("/data/other.json?since=2026-10-01T12:45:05.997599-06:00").get_json()["t"] == []  # any offset
+    for bad in ("soon", "2026-10-01T18:00:05", "2026-10-01T19:01:00Z", "2026-08-01T00:00:00Z"):
+        r = client.get(f"/data/other.json?since={bad}")        # not a time; no timezone; the future; too long ago
+        assert r.status_code == 400 and "since" in r.get_json()["error"], bad
 
 
 def test_database_down_is_drawn_not_raised(hangs_up):
     client = dashboard.create_app(Config(database_url=f"postgresql://u:s3cret@127.0.0.1:{hangs_up}/x",
                                          origin="t")).test_client()
     r = client.get("/chart/load_energy.png")
-    assert r.status_code == 503 and r.data[:4] == b"\x89PNG"
+    assert r.status_code == 503 and png_size(r.data) == charts.pixels(charts.ENERGY_SIZE)   # the chart's own box
 
 
 def test_cli_starts_the_server(run, seeded, monkeypatch):
     calls = []
-    monkeypatch.setattr("flask.Flask.run", lambda self, **kw: calls.append(kw))
+    monkeypatch.setattr("flask.Flask.run", lambda self, **kw: calls.append(
+        {**kw, "templates_auto_reload": self.config["TEMPLATES_AUTO_RELOAD"]}))
     code, _, err = run("dashboard", "--config", seeded, "--port", 8123, "--reload")
     assert code == ExitCode.OK and "http://127.0.0.1:8123/" in err
     assert calls == [{"host": "0.0.0.0", "port": 8123, "debug": False, "use_debugger": False, "use_reloader": True,
-                      "threaded": True}]
+                      "threaded": True, "templates_auto_reload": True}]    # a changed template shows without a restart
+    run("dashboard", "--config", seeded, "--port", 8123)
+    assert calls[1]["use_reloader"] is False and calls[1]["templates_auto_reload"] is False
     password = psycopg.conninfo.conninfo_to_dict(json.loads(seeded.read_text())["database"]["url"]).get("password")
     assert not password or password not in err

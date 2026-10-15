@@ -381,6 +381,8 @@ def status(conn, migrations: Optional[Sequence[Migration]] = None) -> dict:
             out["alerts"] = conn.execute(
                 "SELECT count(*) FILTER (WHERE NOT was_suppressed AND error IS NULL), count(error), "
                 "count(*) FILTER (WHERE was_suppressed), max(alerted_at) FROM alert_log").fetchone()
+        if conn.execute("SELECT to_regclass('daily_energy')").fetchone()[0] is not None:         # 0006
+            out["daily_energy"] = conn.execute("SELECT count(*), min(day), max(day) FROM daily_energy").fetchone()
         out["tables"] = table_sizes(conn)
     return out
 
@@ -389,7 +391,8 @@ def status(conn, migrations: Optional[Sequence[Migration]] = None) -> dict:
 # listed here has no such column (register_meta, register_values_v1).
 ROW_TIMES = {"readings": "started_at", "raw_plant_register_values": "started_at",
              "raw_inverter_register_values": "started_at", "open_meteo_weather": "fetched_at",
-             "radar_frames": "fetched_at", "alert_log": "alerted_at", "schema_migrations": "applied_at"}
+             "radar_frames": "fetched_at", "alert_log": "alerted_at", "schema_migrations": "applied_at",
+             "daily_energy": "computed_at"}
 
 
 @dataclass

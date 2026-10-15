@@ -188,6 +188,13 @@ reading, the weather and alert tables, and **each table's size** with its growth
 not.
 
 ```
+sigen db daily [--from DATE] [--to DATE]
+```
+Stores each finished day's energy in `daily_energy` (solar, the house, the battery in and out, the
+grid in and out, and the flows between them), so a month or a year is one `SUM`. Without dates: the
+days not stored yet; with them, that range, recomputed. `poll` does this by itself every 10 minutes.
+
+```
 sigen db query "SELECT * FROM readings ORDER BY id DESC LIMIT 10" [--json] [--max-rows 1000] [--max-width 80]
 ```
 Runs SQL and prints the rows as a table (or JSON). **Read-only**: anything that would change the
@@ -200,7 +207,8 @@ sigen poll [--ip …] [--interval 60] [--count N] [--weather] [--radar] [--alert
 Reads every unit on a schedule (lined up with the clock) and stores each reading. Runs until
 Ctrl+C unless `--count`. `--weather` and `--radar` also record the weather at your site in the
 background; `--alerts` watches the battery and pushes problems to your phone (see "Alerts").
-When logging its output to a file, set `PYTHONUNBUFFERED=1`.
+It also stores each finished day's energy (see `sigen db daily`). When logging its output to a
+file, set `PYTHONUNBUFFERED=1`.
 
 When something goes wrong, `poll` carries on where it can:
 - the device doesn't answer, drops the connection or is busy: the reading is stored with its
@@ -218,12 +226,16 @@ To run it for good (at boot, restarted after a crash, logging to the journal), s
 sigen dashboard [--host 0.0.0.0] [--port 8050] [--reload]
 ```
 A web page of charts from the database: each PV string's power against its clear-sky model
-(from the config's `site` and `array`), energy by load, smart-load power, the battery's
+(from the config's `site` and `array`), with strips underneath for the radar's rain or snow at
+your site and NOAA's satellite cloud; energy by load, smart-load power, the battery's
 temperatures, and battery and solar power with the state of charge and reserve. Windows: today,
 the last 6 h / 24 h / 3 days, or any day; a window that reaches now refreshes every 5 minutes.
+Opening the page also fetches that window's satellite data in the background (`sigen satellite`,
+see below). **Daily totals** (`/daily`) shows a day's energy and a diagram of where it went (solar
+to the house, the battery and the grid, and so on), drawn in the browser with no libraries.
 It listens on every interface, so a phone on the same network can open
 `http://<this computer's IP>:8050/` (printed at start; Windows Firewall asks the first time).
-Read-only.
+Read-only. `--reload` restarts it when its code changes, and re-reads changed page templates.
 
 **The dashboard has no login.** Anyone who can reach the port can see your power use, your
 battery and when you're home. Keep it on your own network: never forward the port from your
@@ -280,7 +292,9 @@ Saves NOAA GOES-West cloud data (cloud mask, optical depth, cloud-top height; ev
 for a box around your site, a day at a time, as HDF5 files for your own analysis (comparing the
 clouds with what your panels made, say). GOES-West covers western North
 America and the Pacific. A day takes about a minute and ~210 MB of downloads; re-running only
-fetches what's new.
+fetches what's new. The files go in the config's `satellite.cube_dir`. Each file is updated by
+writing a copy and swapping it in, so readers never see half of one, and only one run at a time
+works in a folder: a second one exits with 7 while the first is still going.
 
 ### Network
 
@@ -310,7 +324,7 @@ it with `--ip 127.0.0.1 --port 10502`. See [docs/DEVELOPMENT.md](docs/DEVELOPMEN
 | 4 | the device returned a Modbus exception (incl. a refused write) |
 | 5 | **verify failed**: the read-back doesn't match, or the state is unknown after a dropped write |
 | 6 | refused by the allowlist |
-| 7 | precondition failed: `--expect-current`, undo after an outside change, or the database isn't migrated |
+| 7 | precondition failed: `--expect-current`, undo after an outside change, the database isn't migrated, or `sigen satellite` is already running |
 | 8 | dry run: a change is needed but `--apply` wasn't given |
 | 9 | not found: no SigenStor found, nothing to undo, or a missing file |
 | 10 | database unreachable, or it rejected a query |
@@ -340,7 +354,8 @@ Every section is optional; a command that needs one says so. Start from `config.
   "array": {"panel": {"kw": 0.5, "gamma_pct_per_c": -0.28, "mount": "close_mount_glass_glass"},
             "albedo": 0.2,
             "faces": {"south": {"tilt": 20, "azimuth": 180}, "west": {"tilt": 20, "azimuth": 270}},
-            "strings": {"1": {"panels": 10, "face": "south"}, "2": {"panels": 8, "face": "west"}}}
+            "strings": {"1": {"panels": 10, "face": "south"}, "2": {"panels": 8, "face": "west"}}},
+  "satellite": {"cube_dir": "captures/satellite/cubes"}
 }
 ```
 - `smart_loads`: names for the smart-load circuits (slots 1–24), for display.
@@ -357,6 +372,8 @@ Every section is optional; a command that needs one says so. Start from `config.
   coefficient, pvlib mounting type), the ground albedo, each roof face's tilt and azimuth (degrees
   clockwise from true north), and which face each PV input's string is on and how many panels it
   has.
+- `satellite`: where `sigen satellite` keeps its files and the dashboard reads them. A relative
+  `cube_dir` is relative to the config file's folder (the default: `captures/satellite/cubes` there).
 
 `config.json` is in `.gitignore`: it holds your passwords and your location.
 
@@ -374,6 +391,11 @@ Tables:
 - `open_meteo_weather`: the weather model's conditions at your site, hourly and every 15 minutes.
 - `radar_frames`: the radar's rain and snow rate at your site, every 6 minutes.
 - `alert_log`: every alert, sent or held back.
+- `daily_energy`: each finished day's energy, one row per local day: each lifetime counter's
+  increase between this computer's readings at the two midnights, and the flows between solar,
+  the battery, the house and the grid. `SELECT sum(solar_kwh) FROM daily_energy WHERE day >=
+  '2027-01-01'` is a year's solar. Days add up exactly; a gap in polling moves energy to the day
+  before the gap.
 - `schema_migrations`: which migrations have been applied.
 
 Plant and inverter every 15 seconds take about 10 MB a day (~4 GB a year); `sigen db status`

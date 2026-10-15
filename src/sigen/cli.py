@@ -324,6 +324,10 @@ def cmd_db_status(args) -> int:
         sent, failed, suppressed, last_alert = s["alerts"]
         print(f"Alerts:        {sent:,} sent, {failed:,} failed, {suppressed:,} suppressed"
               + (f"; last {utc(last_alert)}" if last_alert else ""))
+    if "daily_energy" in s:
+        days, first_day, last_day = s["daily_energy"]
+        print(f"Daily energy:  {days:,} day(s) stored" + (f", {first_day} to {last_day}" if days else "")
+              + " (`sigen db daily` adds finished days; `sigen poll` does too)")
     tables = s["tables"]
     print("Table sizes:   data + indexes + TOAST; growth = average row size × rows from the last 24 h; "
           "a year = 365 × a day")
@@ -376,6 +380,30 @@ def format_query_table(columns: List[str], rows: List[tuple], max_width: int = 0
         lines.append(" | ".join(c.rjust(w) if num else c.ljust(w)
                                 for c, w, num in zip(r, widths, numeric)).rstrip())
     return "\n".join(lines)
+
+
+def _site_tz(config):
+    """The config's site timezone, else this computer's."""
+    from zoneinfo import ZoneInfo
+    return ZoneInfo(config.site.timezone) if config.site else datetime.datetime.now().astimezone().tzinfo
+
+
+def cmd_db_daily(args) -> int:
+    from sigen import daily, db
+    config = _config(args)
+    url = config.require_database_url()
+    conn = db.connect(url)
+    try:
+        db.check_ready(conn)
+        days = daily.update(conn, _site_tz(config), args.first, args.last, log=print)
+    finally:
+        conn.close()
+    if days:
+        print(f"Stored {len(days)} day(s) in daily_energy.")
+    else:
+        print("Nothing to store: " + ("no finished day in that range." if args.first or args.last
+                                     else "every finished day is stored already."))
+    return ExitCode.OK
 
 
 def cmd_db_query(args) -> int:
@@ -448,7 +476,7 @@ def cmd_poll(args) -> int:
         tz = ZoneInfo(config.site.timezone) if config.site else None       # else this computer's
         watcher = alerts.Watcher(alerts.Sender(alert_config, alert_store, out=print, err=err), tz=tz,
                                  out=print, err=err)
-    background, store = _weather_background(args, config, url, watcher)
+    background, store = _background(args, config, url, watcher)
     units = {args.unit_id: "plant", **{u: "inverter" for u in _inverter_units(config)}}
     extras = [what for what, on in (("Open-Meteo hourly and every 15 min", args.weather),
                                     ("radar every 6 min", args.radar),
@@ -468,15 +496,25 @@ def cmd_poll(args) -> int:
                 s.close()
 
 
-def _weather_background(args, config, url, watcher=None):
-    """The background jobs for poll's --weather / --radar: (Background, Store), or (None, None). With a watcher
-    (--alerts), each 15-minute Open-Meteo row's air temperature goes to it too."""
+def _background(args, config, url, watcher=None):
+    """poll's background jobs, one at a time in their own thread: (Background, Store or None).
+    Always: storing each finished day in daily_energy (sigen.daily), checked every 10 minutes, with its own
+    connection. With --weather / --radar: the fetches, sharing a Store; with a watcher (--alerts), each 15-minute
+    Open-Meteo row's air temperature goes to it too."""
+    from sigen import daily, db, weather
+    tz = _site_tz(config)
+
+    def daily_energy():
+        conn = db.connect(url)
+        try:
+            daily.update(conn, tz, log=print)
+        finally:
+            conn.close()
+    jobs = [weather.Job("daily energy", daily.CHECK_EVERY, daily_energy)]
     if not (args.weather or args.radar):
-        return None, None
-    from sigen import weather
+        return weather.Background(jobs, err), None
     site = config.require_site()
     store = weather.Store(url, err)
-    jobs = []
     if args.weather:
         for resolution in weather.RESOLUTIONS:
             def fetch(resolution=resolution):
@@ -561,7 +599,9 @@ def _local_time(text: str, timezone: str, what: str) -> datetime.datetime:
 def cmd_satellite(args) -> int:
     from zoneinfo import ZoneInfo
     from sigen import goes
-    site = _config(args).require_site()
+    config = _config(args)
+    site = config.require_site()
+    cube_dir = args.cube_dir if args.cube_dir is not None else config.cube_dir()
     try:
         if args.start or args.end:
             if not (args.start and args.end) or args.day:
@@ -583,10 +623,14 @@ def cmd_satellite(args) -> int:
     daylight = None if args.all_day else args.daylight
     err(f"GOES-{args.satellite} {', '.join(args.products)} ±{args.km:g} km around {site.latitude}, {site.longitude}, "
         f"{start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} {site.timezone}"
-        + ("" if daylight is None else f", within {daylight:g} min of daylight") + f", into {args.cube_dir}")
-    goes.build_cubes(lat=site.latitude, lon=site.longitude, timezone=site.timezone, start=start, end=end,
-                     cube_dir=args.cube_dir, products=args.products, km=args.km, satellite=args.satellite,
-                     sector=args.sector, workers=args.workers, daylight_minutes=daylight, log=print)
+        + ("" if daylight is None else f", within {daylight:g} min of daylight") + f", into {cube_dir}")
+    pid_file = goes.claim_pid_file(cube_dir)          # another run still going: exit 7
+    try:
+        goes.build_cubes(lat=site.latitude, lon=site.longitude, timezone=site.timezone, start=start, end=end,
+                         cube_dir=cube_dir, products=args.products, km=args.km, satellite=args.satellite,
+                         sector=args.sector, workers=args.workers, daylight_minutes=daylight, log=print)
+    finally:
+        goes.release_pid_file(pid_file)
     return ExitCode.OK
 
 
@@ -638,6 +682,9 @@ def cmd_dashboard(args) -> int:
     from sigen import dashboard
     config = _config(args)
     app = dashboard.create_app(config)
+    # The reloader restarts on .py changes only, and Flask caches templates unless debugging: with --reload, re-read
+    # a template when it changes, so editing one shows on the next page load.
+    app.config["TEMPLATES_AUTO_RELOAD"] = args.reload
     where = [f"http://127.0.0.1:{args.port}/"]
     if args.host == "0.0.0.0" and (lan := _lan_address()):
         where.append(f"http://{lan}:{args.port}/  (other devices on this network)")
@@ -829,6 +876,20 @@ def build_parser() -> argparse.ArgumentParser:
                                      "7 if migrations are pending or register_meta is out of date.")
     _config_option(ds, "database.url")
     ds.set_defaults(func=cmd_db_status)
+    dd = dsub.add_parser("daily", formatter_class=fmt, epilog=EXIT_CODE_HELP,
+                         help="store each finished day's energy in daily_energy",
+                         description="Compute each finished local day's energy (the dashboard's daily page: solar, "
+                                     "the house, the battery, the grid, and every flow between them) and store it in "
+                                     "daily_energy, so a month or a year is one SUM. A day is finished once a reading "
+                                     "after its midnight is stored. Without --from / --to: the days not stored yet. "
+                                     "With them: every finished day in that range, recomputed. `sigen poll` does the "
+                                     "former every 10 minutes by itself. Exit 7 if the schema isn't ready.")
+    _config_option(dd, "database.url, and site.timezone for where days start (else this computer's)")
+    dd.add_argument("--from", dest="first", metavar="DATE", type=datetime.date.fromisoformat,
+                    help="the first day to (re)compute, e.g. 2026-10-07")
+    dd.add_argument("--to", dest="last", metavar="DATE", type=datetime.date.fromisoformat,
+                    help="the last day to (re)compute")
+    dd.set_defaults(func=cmd_db_daily)
     dq = dsub.add_parser("query", formatter_class=fmt, epilog=EXIT_CODE_HELP,
                          help="run SQL read-only and print the rows",
                          description="Run SQL against the database and print each statement's rows as a "
@@ -858,7 +919,8 @@ def build_parser() -> argparse.ArgumentParser:
                                     "Refuses to start (exit 7) until `sigen db migrate` is up to date. "
                                     "With devices.inverter.mac in the config (Windows and Linux), it finds the "
                                     "inverter by MAC after 3 connection failures in a row and follows it "
-                                    "to its new IP.")
+                                    "to its new IP. Every 10 minutes it also stores any finished day's energy "
+                                    "in daily_energy (as `sigen db daily` does).")
     pl.add_argument("--ip", metavar="ADDRESS",
                     help="SigenStor IP address (default: devices.inverter.ip from the config; "
                          "polling never uses scanning)")
@@ -921,8 +983,10 @@ def build_parser() -> argparse.ArgumentParser:
                                     "add it to per-day HDF5 files ('cubes') in --cube-dir. Reads only "
                                     "the box from NOAA's public AWS bucket (HTTP Range requests, ~2.5 MB a scan for "
                                     "all three products instead of ~33 MB), several scans at once. Scans already in "
-                                    "a cube are skipped, so re-running only fetches what's new. Exit 3 if NOAA "
-                                    "couldn't be reached.")
+                                    "a cube are skipped, so re-running only fetches what's new. Each cube is updated "
+                                    "by appending to a copy and swapping it in, so readers never see half a scan. "
+                                    "One run at a time per --cube-dir (satellite.pid there): exit 7 if another is "
+                                    "still running. Exit 3 if NOAA couldn't be reached.")
     _config_option(sa, "site (where the box is centred, and its timezone for the dates)")
     sa.add_argument("--day", metavar="DATE", help="local date, e.g. 2026-10-10 (default: today)")
     sa.add_argument("--start", metavar="TIME", help='local start, e.g. "2026-10-10 06:00" (with --end, instead of --day)')
@@ -936,8 +1000,9 @@ def build_parser() -> argparse.ArgumentParser:
                           help="only scans from MINUTES before sunrise to MINUTES after sunset (default: 60)")
     daylight.add_argument("--all-day", action="store_true", help="every scan, night included")
     sa.add_argument("--workers", type=_positive(int, 1), default=8, help="scans fetched at once (default: 8)")
-    sa.add_argument("--cube-dir", metavar="DIR", type=Path, default=Path("captures/satellite/cubes"),
-                    help="where the cubes go (default: captures/satellite/cubes)")
+    sa.add_argument("--cube-dir", metavar="DIR", type=Path,
+                    help="where the cubes go (default: the config's satellite.cube_dir, else "
+                         "captures/satellite/cubes next to the config file)")
     sa.add_argument("--satellite", default="18", help="GOES satellite number (default: 18, GOES-West)")
     sa.add_argument("--sector", default="F", choices=["F", "C"], help="F = full disk (default), C = CONUS")
     sa.set_defaults(func=cmd_satellite)

@@ -44,7 +44,7 @@ sigen = "sigen.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-sigen = ["migrations/*.sql", "migrations/backfill/*.sql", "templates/*.html"]
+sigen = ["migrations/*.sql", "migrations/backfill/*.sql", "templates/*.html", "static/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

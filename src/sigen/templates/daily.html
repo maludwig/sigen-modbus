@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% if live %}<meta http-equiv="refresh" content="{{ refresh }}">{% endif %}
+  <title>sigen: daily totals {{ description }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0 auto; padding: 12px 16px; max-width: 1150px;
+           background: #fff; color: #222; }
+    nav a { display: inline-block; margin: 0 10px 6px 0; padding: 4px 10px; border: 1px solid #bbb;
+            border-radius: 6px; text-decoration: none; color: #222; }
+    nav a.on { background: #222; color: #fff; border-color: #222; }
+    h1 { font-size: 1.2em; margin: 6px 0; }
+    .meta { color: #666; font-size: 0.85em; }
+    .error { color: #a00; }
+    table { border-collapse: collapse; margin: 10px 0; }
+    td { padding: 3px 14px 3px 0; }
+    td.kwh, th.kwh { text-align: right; font-variant-numeric: tabular-nums; }
+    table.flows th { text-align: left; padding: 3px 14px 3px 0; border-bottom: 1px solid #ccc; }
+    table.flows tr.rest td { color: #666; font-style: italic; border-bottom: 1px solid #eee; }
+    #sankey { width: 100%; display: block; margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="{{ url_for('page', **query) }}">Charts</a>
+    <a href="{{ url_for('daily') }}" class="{{ 'on' if not query else '' }}">Today</a>
+    {% for label, params in nav %}
+      <a href="{{ url_for('daily', **params) }}">{{ label }}</a>
+    {% endfor %}
+  </nav>
+  {% if error %}
+    <p class="error">{{ error }}</p>
+  {% else %}
+    <h1>Daily totals: {{ description }}</h1>
+    <p class="meta">Drawn {{ drawn.strftime("%Y-%m-%d %H:%M:%S") }} ({{ tz }}).
+      {% if live %}Reloads every {{ refresh // 60 }} minutes.{% endif %}</p>
+    {% if energy is none %}
+      <p>No readings that day.</p>
+    {% else %}
+      <table>
+        {% for key, label in totals %}
+          <tr><td>{{ label }}</td>
+              <td class="kwh">{{ "%.2f kWh"|format(energy.totals[key]) if key in energy.totals else "no readings" }}</td></tr>
+        {% endfor %}
+      </table>
+      <canvas id="sankey"></canvas>
+      {% if sankey.dropped %}
+        <p class="meta">Not drawn: {{ sankey.dropped|length }} flow{{ "s" if sankey.dropped|length > 1 }} under 0.5 %
+          of the day's energy in ({{ "%.2f"|format(sankey.cutoff) }} kWh):
+          {% for f in sankey.dropped %}{{ f.from }} → {{ f.to }} {{ "%.3f"|format(f.kwh) }} kWh{{ ", " if not loop.last }}{% endfor %};
+          taken off the diagram's totals at both ends (not off the table above).</p>
+      {% endif %}
+      <p class="meta">Totals: each lifetime counter's increase from this day's first reading to the first after its
+        midnight, by this server's clock. Readings from {{ span }}. The bands are estimated from the 15-second power
+        readings: solar serves the house first, then the battery, then the grid; the battery and the grid serve the
+        house first. They add up to a little less than the totals (the inverter's losses).</p>
+      <table class="flows">
+        <tr><th>From</th><th>To</th><th class="kwh">kWh</th></tr>
+        {% for source, key in [("Solar", "solar"), ("Battery", "battery_discharged"), ("Grid", "grid_imported")] %}
+          {% set ns = namespace(banded=0.0) %}
+          {% for (frm, to), kwh in energy.flows.items() if frm == source %}
+            {% set ns.banded = ns.banded + kwh %}
+            <tr><td>{{ frm }}</td><td>{{ to }}</td><td class="kwh">{{ "%.3f"|format(kwh) }}</td></tr>
+          {% endfor %}
+          {% if key in energy.totals %}
+            <tr class="rest"><td>{{ source }}</td><td>in no band: its counter minus its bands</td>
+                <td class="kwh">{{ "%.3f"|format(energy.totals[key] - ns.banded) }}</td></tr>
+          {% endif %}
+        {% endfor %}
+      </table>
+      <script src="{{ url_for('static', filename='my_sankey.js') }}"></script>
+      <script>
+        const sankey = {{ sankey|tojson }};
+        const canvas = document.getElementById("sankey");
+        let pending = false;
+        const redraw = () => { pending = false; MySankey.draw(canvas, sankey); };
+        redraw();
+        window.addEventListener("resize", () => { if (!pending) { pending = true; requestAnimationFrame(redraw); } });
+      </script>
+    {% endif %}
+  {% endif %}
+</body>
+</html>
