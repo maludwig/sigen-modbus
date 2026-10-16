@@ -60,6 +60,9 @@ change is the event, so they're worth logging anyway).
   later; the dashboard, daily totals and alerts leave flagged polls out.
 - **Alarms** (plant 30027–30030, 30072, 30280; inverter 30605–30609) decode with the protocol's
   appendices; `0xFFFF` means "not available", not 16 alarms.
+- **Refresh rate**: the Energy Controller updates its Modbus values about every 1.1 s (measured: 1.103 s, on its
+  own cycle); between updates every read returns the same value. Polling faster than about once a second gains
+  nothing. It answers a read in about a millisecond.
 - **Energy counters** move in 0.01 kWh steps: good for energy over 15 minutes or more, useless at
   15-second intervals (they read 0 or 2.4 kW). Power registers have 1 W resolution and about ±10 W
   of noise.

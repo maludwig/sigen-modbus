@@ -65,7 +65,8 @@ Group=sigen
 WorkingDirectory=/opt/sigen-modbus
 Environment=SIGEN_CONFIG=/etc/sigen-modbus/config.json
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/sigen-modbus/.venv/bin/sigen poll --interval 15 --weather --radar --alerts
+# What it does (interval, offset, weather, radar, alerts) is the config's "poll" section; options added here would win.
+ExecStart=/opt/sigen-modbus/.venv/bin/sigen poll
 # Ctrl+C, in effect: poll stops its background threads and prints its summary.
 KillSignal=SIGINT
 Restart=on-failure
@@ -79,6 +80,15 @@ PrivateTmp=yes
 [Install]
 WantedBy=multi-user.target
 ```
+
+and in `/etc/sigen-modbus/config.json`, the settings (see the README's "Config file"):
+
+```
+"poll": {"interval": 15, "weather": true, "radar": true, "alerts": true}
+```
+
+Changing them later is an edit of the config and `sudo systemctl restart sigen-poll`; the unit stays as it is.
+`journalctl -u sigen-poll` shows, at each start, every setting and where it came from.
 
 `time-sync.target` only waits for a real clock sync if a service provides it. With
 systemd-timesyncd (Ubuntu, Raspberry Pi OS), enable its companion:
@@ -181,7 +191,8 @@ User=sigen
 Group=sigen
 WorkingDirectory=/opt/sigen-modbus
 Environment=SIGEN_CONFIG=/etc/sigen-modbus/config.json
-ExecStart=/opt/sigen-modbus/.venv/bin/sigen dashboard --port 8050
+# The port and host are the config's "dashboard" section (default: every interface, port 8050).
+ExecStart=/opt/sigen-modbus/.venv/bin/sigen dashboard
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=yes

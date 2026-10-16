@@ -94,6 +94,7 @@ Then start logging:
 ```
 sigen poll --interval 15 --weather --radar --alerts
 ```
+(or put those settings in the config's `"poll"` section, as `config.example.json` does, and run plain `sigen poll`).
 
 and, in another terminal, the dashboard, remember to activate the venv again:
 ```
@@ -202,8 +203,12 @@ database is refused (exit 10). Several statements work, e.g. local times:
 `sigen db query "SET TIME ZONE 'America/Edmonton'; SELECT started_at, plant_ess_soc_pct FROM plant_register_values ORDER BY reading_id DESC LIMIT 5"`.
 
 ```
-sigen poll [--ip …] [--interval 60] [--offset 0] [--count N] [--weather] [--radar] [--alerts]
+sigen poll [--ip …] [--interval 60] [--offset 0] [--count N] [--[no-]weather] [--[no-]radar] [--[no-]alerts]
 ```
+Each of `--interval`, `--offset`, `--weather`, `--radar`, `--alerts` and the capture options can
+also come from the config's `"poll"` section; the command line wins (`--no-alerts` over `"alerts":
+true`). At start `poll` prints every setting, its value, and where it came from (command line,
+config or default).
 Reads every unit on a schedule (lined up with the clock: `--interval 15` polls at :00, :15, :30,
 :45) and stores each reading. If a second computer polls the same device, give it an `--offset`
 (e.g. `--offset 7`: :07, :22, …), so the two don't read it at the same instant. Runs until Ctrl+C unless
@@ -368,7 +373,9 @@ Every section is optional; a command that needs one says so. Start from `config.
             "albedo": 0.2,
             "faces": {"south": {"tilt": 20, "azimuth": 180}, "west": {"tilt": 20, "azimuth": 270}},
             "strings": {"1": {"panels": 10, "face": "south"}, "2": {"panels": 8, "face": "west"}}},
-  "satellite": {"cube_dir": "captures/satellite/cubes"}
+  "satellite": {"cube_dir": "captures/satellite/cubes"},
+  "poll": {"interval": 15, "offset": 0, "weather": true, "radar": true, "alerts": true},
+  "dashboard": {"host": "0.0.0.0", "port": 8050, "reload": false}
 }
 ```
 - `smart_loads`: names for the smart-load circuits (slots 1–24), for display.
@@ -387,6 +394,12 @@ Every section is optional; a command that needs one says so. Start from `config.
   has.
 - `satellite`: where `sigen satellite` keeps its files and the dashboard reads them. A relative
   `cube_dir` is relative to the config file's folder (the default: `captures/satellite/cubes` there).
+- `poll`, `dashboard`: what `sigen poll` and `sigen dashboard` do on this computer when the command
+  line doesn't say, named like their options without the dashes: `poll` takes `interval`,
+  `offset`, `weather`, `radar`, `alerts`, `capture_open_meteo_weather` and `capture_radar`;
+  `dashboard` takes `host`, `port` and `reload`. An option on the command line wins; a setting in
+  neither is the option's default. Handy when two computers poll the same device: each one's
+  `offset` and `alerts` live in its own config.
 
 `config.json` is in `.gitignore`: it holds your passwords and your location.
 

@@ -10,7 +10,9 @@
                   "loadhub": {"ip": "192.168.1.101", "mac": "02:ab:cd:ef:00:02"}},
       "site": {"latitude": 51.0443, "longitude": -114.0631, "timezone": "America/Edmonton"},
       "alerts": {"ntfy_topic": "someone-solar-1a2b3c4d", "ntfy_server": "https://ntfy.sh"},
-      "satellite": {"cube_dir": "captures/satellite/cubes"}
+      "satellite": {"cube_dir": "captures/satellite/cubes"},
+      "poll": {"interval": 15, "offset": 0, "weather": true, "radar": true, "alerts": true},
+      "dashboard": {"host": "0.0.0.0", "port": 8050, "reload": false}
     }
 
 Smart-load names are display only: they appear in summaries and tables, never in dumps
@@ -27,6 +29,11 @@ secret, so it lives here rather than in the code, and is masked in what sigen pr
 `sigen satellite` keeps its cubes and the dashboard reads them; a relative directory is relative to the config
 file's own folder (default: captures/satellite/cubes there).
 
+poll and dashboard hold that command's settings, named like its options without the dashes (COMMAND_SETTINGS):
+what this computer's `sigen poll` / `sigen dashboard` does without them on the command line. An option given on the
+command line wins (`--no-weather` over "weather": true); a setting in neither takes the option's built-in default.
+A relative capture directory is relative to the config file's folder.
+
 Which file: get_config() takes --config if given, else the file named by $SIGEN_CONFIG, else the
 nearest config.json in the current directory or above it (the repo's, from anywhere inside it).
 With none of them the config is empty, and a command that needs a section says where it looked.
@@ -36,13 +43,20 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from sigen.data_io import read_json_file
 from sigen.errors import ConfigError, NotFound
 from sigen.netlookup import normalize_mac
 
 SMART_LOAD_SLOTS = range(1, 25)
+# Each command's settings: name -> kind ("bool"; "number", low, high; "integer", low, high; "text"; "dir": a
+# directory, relative to the config file's folder). The names are the command's options without the dashes.
+COMMAND_SETTINGS: Dict[str, Dict[str, tuple]] = {
+    "poll": {"interval": ("number", 1, 86400), "offset": ("number", 0, 86400), "weather": ("bool",),
+             "radar": ("bool",), "alerts": ("bool",), "capture_open_meteo_weather": ("dir",), "capture_radar": ("dir",)},
+    "dashboard": {"host": ("text",), "port": ("integer", 1, 65535), "reload": ("bool",)},
+}
 
 
 @dataclass(frozen=True)
@@ -110,6 +124,7 @@ class Config:
     alerts: Optional[Alerts] = None
     array: Optional[Array] = None
     satellite_cube_dir: Optional[Path] = None   # satellite.cube_dir, absolute; None without a config file
+    commands: Dict[str, Dict[str, Any]] = field(default_factory=dict)   # "poll" -> {"weather": True, …} (as given)
     # Where it came from, for messages: the file, "--no-config", or where get_config looked.
     origin: Optional[str] = field(default=None, compare=False)
     path: Optional[Path] = field(default=None, compare=False)        # the file, if it came from one
@@ -197,10 +212,10 @@ def load_config(path: Optional[Path]) -> Config:
         raise ConfigError(f"{path} isn't valid JSON: {e}")
     if not isinstance(doc, dict):
         raise ConfigError(f"{path}: expected a JSON object at the top level")
-    unknown = set(doc) - {"smart_loads", "database", "devices", "site", "alerts", "array", "satellite"}
+    known = {"smart_loads", "database", "devices", "site", "alerts", "array", "satellite", *COMMAND_SETTINGS}
+    unknown = set(doc) - known
     if unknown:
-        raise ConfigError(f"{path}: unknown key(s) {', '.join(sorted(unknown))}; "
-                          f"known: alerts, array, database, devices, satellite, site, smart_loads")
+        raise ConfigError(f"{path}: unknown key(s) {', '.join(sorted(unknown))}; known: {', '.join(sorted(known))}")
 
     devices = {}
     raw_devices = doc.get("devices", {})
@@ -260,7 +275,38 @@ def load_config(path: Optional[Path]) -> Config:
                   site=_site(path, doc["site"]) if "site" in doc else None, test_database_url=test_database_url,
                   alerts=_alerts(path, doc["alerts"]) if "alerts" in doc else None,
                   array=_array(path, doc["array"]) if "array" in doc else None,
-                  satellite_cube_dir=_cube_dir(path, doc.get("satellite", {})), origin=str(path), path=Path(path))
+                  satellite_cube_dir=_cube_dir(path, doc.get("satellite", {})),
+                  commands={c: _command_settings(path, c, doc[c]) for c in COMMAND_SETTINGS if c in doc},
+                  origin=str(path), path=Path(path))
+
+
+def _command_settings(path: Path, command: str, spec) -> Dict[str, Any]:
+    """A command's section (COMMAND_SETTINGS), each value checked and converted (a "dir" to an absolute Path)."""
+    kinds = COMMAND_SETTINGS[command]
+    if not isinstance(spec, dict):
+        raise ConfigError(f'{path}: "{command}" must be an object of settings, e.g. {{"{next(iter(kinds))}": …}}')
+    unknown = set(spec) - set(kinds)
+    if unknown:
+        raise ConfigError(f"{path}: {command}: unknown setting(s) {', '.join(sorted(unknown))}; "
+                          f"known: {', '.join(kinds)}")
+    out = {}
+    for name, value in spec.items():
+        kind, where = kinds[name], f"{command}.{name}"
+        if kind[0] == "bool":
+            if not isinstance(value, bool):
+                raise ConfigError(f"{path}: {where} must be true or false, got {value!r}")
+            out[name] = value
+        elif kind[0] == "number":
+            out[name] = _number(path, where, value, kind[1], kind[2])
+        elif kind[0] == "integer":
+            if isinstance(value, bool) or not isinstance(value, int) or not kind[1] <= value <= kind[2]:
+                raise ConfigError(f"{path}: {where} must be a whole number from {kind[1]} to {kind[2]}, got {value!r}")
+            out[name] = value
+        elif not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"{path}: {where} must be a non-empty string, got {value!r}")
+        else:
+            out[name] = Path(path).resolve().parent / value.strip() if kind[0] == "dir" else value.strip()
+    return out
 
 
 def _cube_dir(path: Path, spec) -> Path:

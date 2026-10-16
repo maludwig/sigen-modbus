@@ -34,5 +34,7 @@
       "2": {"panels": 8, "face": "west"}
     }
   },
-  "satellite": {"cube_dir": "captures/satellite/cubes"}
+  "satellite": {"cube_dir": "captures/satellite/cubes"},
+  "poll": {"interval": 15, "offset": 0, "weather": true, "radar": true, "alerts": true},
+  "dashboard": {"host": "0.0.0.0", "port": 8050, "reload": false}
 }

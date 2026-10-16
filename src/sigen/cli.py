@@ -10,12 +10,13 @@
     sigen db status   [CONFIG]
     sigen db query    SQL [CONFIG] [--json] [--max-rows N] [--max-width CHARS]
     sigen poll        [--ip IP] [CONFIG] [--interval SECONDS] [--offset SECONDS] [--count N]
-                      [--weather [--capture-open-meteo-weather DIR]] [--radar [--capture-radar DIR]] [--alerts]
+                      [--[no-]weather [--capture-open-meteo-weather DIR]] [--[no-]radar [--capture-radar DIR]]
+                      [--[no-]alerts]
     sigen weather     [CONFIG] [--resolution 60 15] [--record-to-db] [--capture DIR]
     sigen radar       [CONFIG] [--record-to-db] [--capture DIR]
     sigen satellite   [CONFIG] [--day DATE | --start TIME --end TIME] [--products ACM COD ACHA] [--km 200]
                       [--daylight MINUTES | --all-day] [--workers 8] [--cube-dir DIR]
-    sigen dashboard   [CONFIG] [--host 0.0.0.0] [--port 8050] [--reload]
+    sigen dashboard   [CONFIG] [--host 0.0.0.0] [--port 8050] [--[no-]reload]
     sigen ntfy-test   [CONFIG] [--msg TEXT] [--title TEXT] [--priority LEVEL] [--record-to-db] [--ntfy-server URL]
     sigen mac-lookup  (--ip IP | --mac MAC [--ip-range RANGE])      (Windows and Linux)
     sigen registers   [--writable]
@@ -24,7 +25,9 @@
 CONFIG is --config FILE or --no-config. Without either, the config is the file named by
 $SIGEN_CONFIG, else the nearest config.json in the current directory or above it (see
 sigen/config.py). --ip always wins over the config's devices.inverter.ip. set and undo never
-use the config: writes go only to an explicit --ip.
+use the config: writes go only to an explicit --ip. poll and dashboard take their settings from
+the config's "poll" / "dashboard" sections too (POLL_SETTINGS, DASHBOARD_SETTINGS): an option on
+the command line wins, then the config, then the built-in default.
 
 Exit codes are listed in sigen/errors.py and in `sigen --help`.
 """
@@ -96,6 +99,49 @@ def _config_option(p: argparse.ArgumentParser, what: str) -> None:
 
 def _config(args) -> Config:
     return Config(origin="--no-config") if args.no_config else get_config(args.config)
+
+
+# The settings poll and dashboard also take from the config (sigen.config.COMMAND_SETTINGS has their types):
+# (setting = the option's dest, the option, its built-in default). The parser leaves them None when not given.
+POLL_SETTINGS = [("interval", "--interval", 60.0), ("offset", "--offset", 0.0), ("weather", "--weather", False),
+                 ("radar", "--radar", False), ("alerts", "--alerts", False),
+                 ("capture_open_meteo_weather", "--capture-open-meteo-weather", None),
+                 ("capture_radar", "--capture-radar", None)]
+DASHBOARD_SETTINGS = [("host", "--host", "0.0.0.0"), ("port", "--port", 8050), ("reload", "--reload", False)]
+
+
+def _settings(args, config: Config, command: str, settings) -> List[tuple]:
+    """Fill in each of `settings` the command line left out: from the config's section for `command`, else the
+    built-in default. Returns [(option, value as text, where it came from)], one per setting."""
+    section = config.commands.get(command, {})
+    shown = []
+    for name, option, default in settings:
+        if getattr(args, name) is not None:
+            source = "command line"
+        elif name in section:
+            setattr(args, name, section[name])
+            source = "config"
+        else:
+            setattr(args, name, default)
+            source = "default"
+        value = getattr(args, name)
+        if isinstance(value, bool):
+            text = "on" if value else "off"
+        elif isinstance(value, float):
+            text = f"{value:g}"
+        else:
+            text = "(none)" if value is None else str(value)
+        shown.append((option, text, source))
+    return shown
+
+
+def _print_settings(config: Config, shown) -> None:
+    """One line per setting: the option, its value, and where it came from (to stderr, beside poll's other notes)."""
+    err(f"Settings ({f'config: {config.path}' if config.path else config.origin}):")
+    width = max(len(option) for option, _, _ in shown)
+    vwidth = min(max(len(text) for _, text, _ in shown), 10)      # a long path only pushes its own line's source
+    for option, text, source in shown:
+        err(f"  {option:<{width}}  {text:<{vwidth}}  {source}")
 
 
 def _connector(args, unit: Optional[int] = None):
@@ -439,6 +485,7 @@ def cmd_poll(args) -> int:
     import socket
     from sigen import db, netlookup, poll
     config = _config(args)
+    _print_settings(config, _settings(args, config, "poll", POLL_SETTINGS))
     url = config.require_database_url()
     inverter = config.devices.get("inverter")
     target = args.ip or (inverter.ip if inverter else None)
@@ -689,6 +736,7 @@ def _lan_address() -> Optional[str]:
 def cmd_dashboard(args) -> int:
     from sigen import dashboard
     config = _config(args)
+    _settings(args, config, "dashboard", DASHBOARD_SETTINGS)
     app = dashboard.create_app(config)
     # The reloader restarts on .py changes only, and Flask caches templates unless debugging: with --reload, re-read
     # a template when it changes, so editing one shows on the next page load.
@@ -932,32 +980,38 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--ip", metavar="ADDRESS",
                     help="SigenStor IP address (default: devices.inverter.ip from the config; "
                          "polling never uses scanning)")
-    _config_option(pl, "database.url, devices.inverter (ip, mac, units), and site for --weather / --radar")
-    pl.add_argument("--interval", metavar="SECONDS", type=_positive(float, 1.0), default=60.0,
-                    help="seconds between polls (default: 60; minimum 1)")
-    pl.add_argument("--offset", metavar="SECONDS", type=float, default=0.0,
-                    help="poll this long after each --interval boundary of the clock (default: 0, on it; e.g. "
-                         "--interval 15 --offset 7 polls at :07, :22, :37, :52). For a second poller of the same "
-                         "device: two reading it at the same instant seem to catch its totals mid-refresh")
+    _config_option(pl, "database.url, devices.inverter (ip, mac, units), site for --weather / --radar, and the "
+                       "poll section's settings")
+    pl.add_argument("--interval", metavar="SECONDS", type=_positive(float, 1.0),
+                    help="seconds between polls (default: poll.interval in the config, else 60; minimum 1)")
+    pl.add_argument("--offset", metavar="SECONDS", type=float,
+                    help="poll this long after each --interval boundary of the clock (default: poll.offset in the "
+                         "config, else 0, on it; e.g. --interval 15 --offset 7 polls at :07, :22, :37, :52). For a "
+                         "second poller of the same device, so the two don't read it at the same instant")
     pl.add_argument("--count", metavar="N", type=_positive(int, 1),
                     help="stop after N polls (default: run until Ctrl+C; weather fetches don't count)")
-    pl.add_argument("--weather", action="store_true",
+    on_off = argparse.BooleanOptionalAction
+    pl.add_argument("--weather", action=on_off,
                     help="also store Open-Meteo for the config's site: at start, then hourly (60 min row) "
-                         "and every 15 min (15 min row), in a background thread")
-    pl.add_argument("--radar", action="store_true",
+                         "and every 15 min (15 min row), in a background thread (default: poll.weather in the "
+                         "config, else off)")
+    pl.add_argument("--radar", action=on_off,
                     help="also store Environment Canada radar at the site: at start (backfilling the "
-                         "3 hours GeoMet keeps), then every 6 min, in a background thread")
-    pl.add_argument("--alerts", action="store_true",
+                         "3 hours GeoMet keeps), then every 6 min, in a background thread (default: poll.radar in "
+                         "the config, else off)")
+    pl.add_argument("--alerts", action=on_off,
                     help="after every poll, check the battery (cold, heater signatures, grid down, below the "
                          "reserve, alarms) over the last 6 hours and push new problems to the config's ntfy topic, "
                          "each kind at most once an hour; every alert is logged in alert_log. Use with --weather "
-                         "for the outside air")
+                         "for the outside air (default: poll.alerts in the config, else off)")
     pl.add_argument("--capture-open-meteo-weather", metavar="DIR", type=Path,
                     help="with --weather: also save every whole Open-Meteo response (past day and "
-                         "3-day forecast) to DIR, one timestamped JSON file per fetch")
+                         "3-day forecast) to DIR, one timestamped JSON file per fetch (default: "
+                         "poll.capture_open_meteo_weather in the config, else none)")
     pl.add_argument("--capture-radar", metavar="DIR", type=Path,
                     help="with --radar: also save every whole GeoMet response (rain, snow and coverage per "
-                         "frame; the coverage one is ~40 kB) to DIR")
+                         "frame; the coverage one is ~40 kB) to DIR (default: poll.capture_radar in the config, "
+                         "else none)")
     pl.set_defaults(func=cmd_poll)
 
     we = sub.add_parser("weather", formatter_class=fmt, epilog=EXIT_CODE_HELP,
@@ -1031,12 +1085,16 @@ def build_parser() -> argparse.ArgumentParser:
                                     "window that reaches now is topped up every 15 s with only the newer readings. "
                                     "Read-only. Listens on all interfaces by default so a phone on the same network "
                                     "can open it (Windows Firewall asks the first time).")
-    _config_option(da, "database.url, smart-load names, and site.timezone for local times")
-    da.add_argument("--host", default="0.0.0.0",
-                    help="address to listen on (default: 0.0.0.0, every interface; 127.0.0.1 = this computer only)")
-    da.add_argument("--port", type=_positive(int, 1), default=8050, help="port (default: 8050)")
-    da.add_argument("--reload", action="store_true",
-                    help="restart when sigen's code changes (Flask's reloader; its debugger stays off)")
+    _config_option(da, "database.url, smart-load names, site.timezone for local times, and the dashboard section's "
+                       "settings")
+    da.add_argument("--host",
+                    help="address to listen on (default: dashboard.host in the config, else 0.0.0.0, every "
+                         "interface; 127.0.0.1 = this computer only)")
+    da.add_argument("--port", type=_positive(int, 1),
+                    help="port (default: dashboard.port in the config, else 8050)")
+    da.add_argument("--reload", action=argparse.BooleanOptionalAction,
+                    help="restart when sigen's code changes (Flask's reloader; its debugger stays off) "
+                         "(default: dashboard.reload in the config, else off)")
     da.set_defaults(func=cmd_dashboard)
 
     nt = sub.add_parser("ntfy-test", formatter_class=fmt, epilog=EXIT_CODE_HELP,
