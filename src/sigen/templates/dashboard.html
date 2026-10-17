@@ -53,6 +53,7 @@
       {% for label, params in nav %}{% if not loop.first %}<a href="{{ url_for('page', **params) }}" title="The day after">▶</a>{% endif %}{% endfor %}
     </span>
     <a href="{{ url_for('daily', **daily_query) }}">Daily totals</a>
+    <a href="{{ url_for('all_time') }}">All-time</a>
   </nav>
   <script>
     (() => {

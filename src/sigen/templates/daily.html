@@ -29,6 +29,7 @@
     {% for label, params in nav %}
       <a href="{{ url_for('daily', **params) }}">{{ label }}</a>
     {% endfor %}
+    <a href="{{ url_for('all_time') }}">All-time</a>
   </nav>
   {% if error %}
     <p class="error">{{ error }}</p>

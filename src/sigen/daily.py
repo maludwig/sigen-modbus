@@ -81,3 +81,20 @@ def update(conn, tz, first: Optional[datetime.date] = None, last: Optional[datet
             done.append(day)
             log(f"daily energy {describe(row)}")
     return done
+
+
+def all_time_energy(conn) -> Optional["charts.DayEnergy"]:
+    """Every finished day in daily_energy added up, as one charts.DayEnergy: the totals and the flows summed, the
+    first and last readings spanned, covered_hours summed -- for an all-time Sankey. None if the table is empty.
+    (The table stores each day once so this is a single SUM; see the module docstring.) A total summed to NULL
+    because no stored day read that counter becomes 0.0."""
+    sums = ", ".join(f"SUM({c})" for c in (*TOTALS.values(), *FLOWS.values()))
+    count, first, last, covered, *values = conn.execute(
+        "SELECT count(*), min(first_reading), max(last_reading), COALESCE(SUM(covered_hours), 0), "
+        f"{sums} FROM daily_energy").fetchone()
+    if not count:
+        return None
+    n = len(TOTALS)
+    totals = {key: float(v or 0.0) for key, v in zip(TOTALS, values[:n])}
+    flows = {flow: float(v or 0.0) for flow, v in zip(FLOWS, values[n:])}
+    return charts.DayEnergy(totals, flows, first, last, float(covered))

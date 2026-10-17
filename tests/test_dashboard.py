@@ -681,6 +681,61 @@ def test_energy_readings_stay_time_ordered_after_backfill(conn):
                                                             base + datetime.timedelta(minutes=30)]
 
 
+# ---------- the all-time Sankey: every finished day in daily_energy added up ----------
+def _flows(**kw):
+    """All seven flow keys (NOT NULL in daily_energy), zero except those named, e.g. solar_load=5.0."""
+    from sigen import daily
+    names = {("Solar", "Load"): "solar_load", ("Solar", "Battery"): "solar_battery", ("Solar", "Grid"): "solar_grid",
+             ("Battery", "Load"): "battery_load", ("Battery", "Grid"): "battery_grid", ("Grid", "Load"): "grid_load",
+             ("Grid", "Battery"): "grid_battery"}
+    return {flow: kw.get(names[flow], 0.0) for flow in daily.FLOWS}
+
+
+def _insert_daily_energy(conn, day, totals, flows, covered=24.0):
+    from sigen import daily
+    cols = {"day": day, "timezone": "America/Edmonton", "first_reading": T0, "last_reading": T0,
+            "covered_hours": covered, "method": daily.METHOD}
+    cols.update({daily.TOTALS[k]: v for k, v in totals.items()})
+    cols.update({daily.FLOWS[k]: v for k, v in flows.items()})
+    names = list(cols)
+    conn.execute(f"INSERT INTO daily_energy ({', '.join(names)}) "
+                 f"VALUES ({', '.join('%(' + n + ')s' for n in names)})", cols)
+
+
+def test_all_time_energy_sums_the_daily_energy_table(conn):
+    from sigen import daily
+    _insert_daily_energy(conn, datetime.date(2026, 10, 1), {"solar": 10.0, "load": 7.0, "grid_imported": 2.0},
+                         _flows(solar_load=5.0, grid_load=2.0), covered=20.0)
+    _insert_daily_energy(conn, datetime.date(2026, 10, 2), {"solar": 12.0, "load": 8.0, "grid_imported": 1.0},
+                         _flows(solar_load=7.0, solar_battery=3.0, grid_load=1.0), covered=22.0)
+    e = daily.all_time_energy(conn)
+    assert e.totals["solar"] == 22.0 and e.totals["load"] == 15.0 and e.totals["grid_imported"] == 3.0
+    assert e.totals["grid_exported"] == 0.0                         # never set: summed NULL -> 0.0
+    assert e.flows[("Solar", "Load")] == 12.0 and e.flows[("Solar", "Battery")] == 3.0 and e.flows[("Grid", "Load")] == 3.0
+    assert e.covered_hours == 42.0
+    assert [n["name"] for n in charts.sankey(e)["sources"]] == ["Solar", "Grid"]     # a drawable Sankey
+
+
+def test_all_time_energy_is_none_without_finished_days(conn):
+    from sigen import daily
+    assert daily.all_time_energy(conn) is None
+
+
+def test_all_time_page(config, conn):
+    _insert_daily_energy(conn, datetime.date(2026, 10, 1), {"solar": 10.0, "load": 7.0, "grid_imported": 2.0},
+                         _flows(solar_load=5.0, grid_load=2.0))
+    _insert_daily_energy(conn, datetime.date(2026, 10, 2), {"solar": 12.0, "load": 8.0, "grid_imported": 1.0},
+                         _flows(solar_load=6.0, solar_battery=4.0, grid_load=2.0))
+    html = app_for(config).get("/all-time").get_data(as_text=True)
+    assert "Where all your energy has gone" in html and "/static/my_sankey.js" in html
+    assert '"name": "Solar"' in html and '"flows": [' in html and '"flows": []' not in html   # a real Sankey
+    assert ">All-time<" in html and 'class="on"' in html                                       # the nav, this page on
+
+
+def test_all_time_page_without_days(config):
+    assert "No finished days yet" in app_for(config).get("/all-time").get_data(as_text=True)
+
+
 def test_cli_starts_the_server(run, seeded, monkeypatch):
     calls = []
     monkeypatch.setattr("flask.Flask.run", lambda self, **kw: calls.append(

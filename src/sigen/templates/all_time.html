@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sigen: all-time totals</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0 auto; padding: 12px 16px; max-width: 1150px;
+           background: #fff; color: #222; }
+    nav a { display: inline-block; margin: 0 10px 6px 0; padding: 4px 10px; border: 1px solid #bbb;
+            border-radius: 6px; text-decoration: none; color: #222; }
+    nav a.on { background: #222; color: #fff; border-color: #222; }
+    h1 { font-size: 1.2em; margin: 6px 0; }
+    .meta { color: #666; font-size: 0.85em; }
+    .error { color: #a00; }
+    #sankey { width: 100%; display: block; margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="{{ url_for('page') }}">Charts</a>
+    <a href="{{ url_for('daily') }}">Daily totals</a>
+    <a href="{{ url_for('all_time') }}" class="on">All-time</a>
+  </nav>
+  {% if error %}
+    <p class="error">{{ error }}</p>
+  {% elif energy is none %}
+    <h1>All-time totals</h1>
+    <p>No finished days yet. (A day lands in the totals once a reading after its local midnight is stored.)</p>
+  {% else %}
+    <h1>Where all your energy has gone</h1>
+    <p class="meta">Drawn {{ drawn.strftime("%Y-%m-%d %H:%M:%S") }} ({{ tz }}). Finished days {{ span }},
+      {{ "%.0f"|format(energy.covered_hours) }} h of power readings. Each day's totals are its lifetime counters'
+      increase; the bands are estimated from the 15-second power readings (solar serves the house first, then the
+      battery, then the grid; the battery and the grid serve the house first), so they add up to a little less than
+      the totals &mdash; the inverter's losses and any time the poller missed.</p>
+    <canvas id="sankey"></canvas>
+    {% if sankey.dropped %}
+      <p class="meta">Not drawn: {{ sankey.dropped|length }} flow{{ "s" if sankey.dropped|length > 1 }} under 0.5 %
+        of all energy in ({{ "%.2f"|format(sankey.cutoff) }} kWh):
+        {% for f in sankey.dropped %}{{ f.from }} &rarr; {{ f.to }} {{ "%.2f"|format(f.kwh) }} kWh{{ ", " if not loop.last }}{% endfor %};
+        taken off the diagram's totals at both ends.</p>
+    {% endif %}
+    <script src="{{ url_for('static', filename='my_sankey.js') }}"></script>
+    <script>
+      const sankey = {{ sankey|tojson }};
+      const canvas = document.getElementById("sankey");
+      let pending = false;
+      const redraw = () => { pending = false; MySankey.draw(canvas, sankey); };
+      redraw();
+      window.addEventListener("resize", () => { if (!pending) { pending = true; requestAnimationFrame(redraw); } });
+    </script>
+  {% endif %}
+</body>
+</html>

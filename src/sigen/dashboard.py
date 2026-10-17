@@ -38,6 +38,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, abort, redirect, render_template, request, url_for
 
 from sigen import charts, db, sync
+from sigen import daily as daily_mod       # aliased: the `daily()` route below would shadow the module name
 from sigen.config import Config
 from sigen.errors import DatabaseError
 
@@ -229,6 +230,28 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
                                span=(f"{energy.first.astimezone(tz):%H:%M} to {energy.last.astimezone(tz):%H:%M}"
                                      if energy is not None else ""),
                                drawn=datetime.datetime.now(tz))
+
+    @app.get("/all-time")
+    def all_time():
+        """Every finished day in daily_energy added up: one Sankey of where all the energy has gone (static/my_sankey.js)."""
+        energy = sankey = error = None
+        conn = None
+        try:
+            conn = db.connect(url)
+            with db.errors_as("reading the all-time energy"):
+                conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+                energy = daily_mod.all_time_energy(conn)
+        except DatabaseError as e:
+            error = f"database: {e}"
+        finally:
+            if conn is not None:
+                conn.close()
+        if energy is not None:
+            sankey = charts.sankey(energy)
+        return render_template("all_time.html", error=error, tz=str(tz), energy=energy, sankey=sankey,
+                               drawn=datetime.datetime.now(tz),
+                               span=(f"{energy.first.astimezone(tz):%Y-%m-%d} to {energy.last.astimezone(tz):%Y-%m-%d}"
+                                     if energy is not None else ""))
 
     # ---------- the data endpoints: numbers for charts drawn in the browser ----------
     # Each answers JSON {"t": [ISO 8601 UTC, to the microsecond: "2026-10-14T03:01:30.997599Z"], …the values…} for
