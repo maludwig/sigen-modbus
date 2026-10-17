@@ -507,8 +507,9 @@ def test_string_power_with_the_clear_sky_model(seeded, tmp_path, monkeypatch):
     assert max(d["sky"]["kw"]["1"]) > 0 and d["sky"]["kw"]["1"][-1] == 0
     assert d["faces"] == {"1": "south", "2": "east", "3": "west", "4": "north"}
     strips =client.get("/data/string_power_strips.json?day=2026-10-01").get_json()["strips"]
-    assert [s["label"] for s in strips][1:] == [label for _, label, _, _ in charts.SATELLITE_STRIPS]
-    assert all(colour is None for s in strips[1:] for colour in s["colours"])   # no cubes: every scan hatched
+    assert strips[0]["label"] == "PV / clear-sky" and strips[1]["label"] == "Rain"   # the PV strip is nearest the chart
+    assert [s["label"] for s in strips][2:] == [label for _, label, _, _ in charts.SATELLITE_STRIPS]
+    assert all(colour is None for s in strips[2:] for colour in s["colours"])   # no cubes: every scan hatched
     frozen_an_hour_later(monkeypatch)                     # a top-up: since is UTC, "now" the site's time
     r = client.get(f"/data/string_power.json?since={SEEDED_T[-1]}")
     assert r.status_code == 200 and r.get_json()["t"] == []
@@ -734,6 +735,30 @@ def test_all_time_page(config, conn):
 
 def test_all_time_page_without_days(config):
     assert "No finished days yet" in app_for(config).get("/all-time").get_data(as_text=True)
+
+
+def test_measured_strip():
+    """PV / clear-sky per 15-min block: measured half the model (grey), the model too low (pale blue), the model but
+    no reading (hatched), 1.5× (white→orange), and 3× (clamped to full orange)."""
+    import pandas as pd
+    base = datetime.datetime(2026, 10, 5, 12, 0, tzinfo=datetime.timezone.utc)
+    m = lambda mins: base + datetime.timedelta(minutes=mins)
+    idx = pd.date_range(base, periods=75, freq="1min", tz="UTC")             # five 15-min blocks
+    cols = list(charts.STRINGS)
+    totals = [0.5 if idx[15] <= t < idx[30] else 4.0 for t in idx]           # block 2 under the 1 kW low-sun floor
+    clear = pd.DataFrame({n: [tot / len(cols) for tot in totals] for n in cols}, index=idx)
+    first = cols[0]
+    # two readings in blocks 1, 4 and 5 (none in 2 and 3); kW on string 1 = 0.4 × amps -> 2, 6 and 12 kW (model 4)
+    times = [m(5), m(10), m(50), m(55), m(65), m(70)]
+    amps = [5.0, 5.0, 15.0, 15.0, 30.0, 30.0]
+    sd = charts.StringData(times=times,
+                           volts={n: ([400.0] * 6 if n == first else [0.0] * 6) for n in cols},
+                           amps={n: (amps if n == first else [0.0] * 6) for n in cols})
+    strip, note = charts.measured_strip(sd, clear)
+    assert strip.label == "PV / clear-sky" and strip.length == charts.STRIP_BLOCK
+    assert strip.starts == [m(0), m(15), m(30), m(45), m(60)]
+    assert strip.colours == ["#808080", charts.LOW_SUN_COLOUR, None, "#ffc680", charts.STRIP_OVER_COLOUR]
+    assert "orange = twice it" in note and "per 15 min" in note
 
 
 def test_cli_starts_the_server(run, seeded, monkeypatch):

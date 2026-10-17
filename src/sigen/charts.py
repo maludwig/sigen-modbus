@@ -680,3 +680,51 @@ def satellite_strips(s) -> Tuple[List[Strip], str]:
                     "measured cloud top or at 2 / 5 / 10 km would shade it; white = clear, black = no sun, pale blue = "
                     f"sun below {SATELLITE_LOW_SUN}°, hatched = no scan")
 
+
+STRIP_BLOCK = datetime.timedelta(minutes=15)     # the PV-vs-clear-sky strip's bar width
+STRIP_LOW_SUN_KW = 1.0                            # a block whose clear-sky model is under this: sun too low to judge
+STRIP_OVER_COLOUR = "#ff8c00"                     # ratio 2 and up: measured twice the model (cloud-edge over-irradiance)
+
+
+def _ratio_colour(ratio: float) -> str:
+    """A measured / clear-sky ratio as a colour: black at 0 through white at 1 (the model), then white to
+    STRIP_OVER_COLOUR at 2 and above (over the model: cloud edges reflecting extra light onto the sunlit panels)."""
+    if ratio <= 1.0:
+        grey = max(ratio, 0.0)                                       # black (nothing) to white (at the model)
+        return _hex((grey, grey, grey))
+    over = min(ratio - 1.0, 1.0)                                     # white to orange at twice the model, held above
+    return _hex(tuple(w + over * (o - w) for w, o in zip((1.0, 1.0, 1.0), _rgb(STRIP_OVER_COLOUR))))
+
+
+def measured_strip(measured: StringData, clear_sky, block: datetime.timedelta = STRIP_BLOCK,
+                   low_sun_kw: float = STRIP_LOW_SUN_KW) -> Tuple[Strip, str]:
+    """The array's measured PV power as a share of its clear-sky model, per `block`, as a strip: black = nothing,
+    white = at the model (a clear-sky day), orange = twice it (cloud edges reflecting extra light onto the sunlit
+    panels); pale blue where the model is under `low_sun_kw` (the sun's too low to judge the array), hatched (no bar)
+    where there's no reading or no model. Measured is the strings' V × I (string_readings) summed over the array; the
+    model is clear_sky_strings (kW per string). Both are on this server's UTC clock, so the blocks are clock-aligned.
+    Whole-array, so it's robust to the provisional string-to-face assignment. Needs pandas."""
+    import pandas as pd
+    rule = pd.Timedelta(block)
+    model = clear_sky.sum(axis=1).resample(rule).mean()              # whole-array clear-sky kW per block
+    if measured.times:
+        total = [sum(kws) for kws in zip(*(measured.kw(n) for n in STRINGS))]
+        meas = pd.Series(total, index=pd.DatetimeIndex(measured.times)).resample(rule).mean().reindex(model.index)
+    else:
+        meas = pd.Series(index=model.index, dtype=float)
+    colours: List[Optional[str]] = []
+    for m, c in zip(meas.to_numpy(), model.to_numpy()):
+        if math.isnan(c):
+            colours.append(None)                                    # no model: nothing to compare against
+        elif c < low_sun_kw:
+            colours.append(LOW_SUN_COLOUR)                          # the sun's too low to judge
+        elif math.isnan(m):
+            colours.append(None)                                    # a model but no reading there
+        else:
+            colours.append(_ratio_colour(m / c))                    # black -> white (at the model) -> orange (over it)
+    minutes = int(block.total_seconds() // 60)
+    return Strip("PV / clear-sky", [t.to_pydatetime() for t in model.index], block, colours), (
+        f"PV / clear-sky: the array's measured power (string V × I) as a share of the clear-sky model, per {minutes} "
+        f"min; black = nothing, white = at the model (a clear day), orange = twice it (cloud edges reflecting extra "
+        f"light onto the sunlit panels); pale blue = model under {low_sun_kw:g} kW (sun too low), hatched = no reading")
+

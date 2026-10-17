@@ -243,13 +243,15 @@ A web page of live charts, drawn in your browser by [uPlot](https://github.com/l
 (loaded from a CDN) from the database's numbers: where the window's energy went (a Sankey
 diagram: solar to the house, the battery and the grid, and so on); each PV string's voltage, and
 its power against its clear-sky model (from the config's `site` and `array`) with strips
-underneath for the radar's rain or snow at your site and NOAA's satellite cloud; energy and power
+underneath: how the measured power compares to that model (**PV / clear-sky**), the radar's rain
+or snow at your site, and NOAA's satellite cloud; energy and power
 now by load; smart-load energy and power; the battery's temperatures; and battery and solar power
 with the state of charge and reserve. A menu picks the window: today, the last 10 min to 7 days,
 or any day. A window that reaches now is topped up every 15 s with only the newer readings
 (`/data/<chart>.json?since=…`, which your own code can use too). Times show in your browser's time
 zone. Opening the page also fetches that window's satellite data in the background (`sigen
-satellite`, see below). **Daily totals** (`/daily`) shows a day's totals and every flow.
+satellite`, see below). **Daily totals** (`/daily`) shows a day's totals and every flow;
+**All-time** (`/all-time`) a Sankey of every finished day in `daily_energy` added up.
 It listens on every interface, so a phone on the same network can open
 `http://<this computer's IP>:8050/` (printed at start; Windows Firewall asks the first time).
 Read-only. `--reload` restarts it when its code changes, and re-reads changed page templates.

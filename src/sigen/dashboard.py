@@ -345,6 +345,10 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         fetch_satellite(start, end)                      # in the background: these are the cubes there are now
         strip, note = charts.precipitation_strip(charts.precipitation(conn, start, end))
         strips, notes = [strip], [note]
+        if config.array is not None and config.site is not None:     # measured PV vs the clear-sky model, nearest the chart
+            clear_sky = charts.clear_sky_strings(conn, config.site, config.array, start, end)
+            pv_strip, pv_note = charts.measured_strip(charts.string_readings(conn, start, end), clear_sky)
+            strips, notes = [pv_strip] + strips, [pv_note] + notes
         satellite = satellite_series(start, end)
         if satellite is not None:
             more, note = charts.satellite_strips(satellite)
