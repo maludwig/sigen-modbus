@@ -560,6 +560,16 @@ def insert_alert(conn, attempt) -> int:
              a.http_code, a.ntfy_id, a.error)).fetchone()[0]
 
 
+def insert_battery_heater(conn, *, polled_at: datetime.datetime, battery: int,
+                          heater_on: Optional[bool], error: Optional[str] = None) -> int:
+    """One cloud poll of a battery pack's heating status -> its battery_heater id. Exactly one of heater_on / error
+    is set (the table's CHECK): heater_on on a reading, error on a grumpy poll (then heater_on stays NULL)."""
+    with errors_as("storing the battery heater poll failed"):
+        return conn.execute(
+            "INSERT INTO battery_heater (polled_at, battery, heater_on, error) VALUES (%s, %s, %s, %s) RETURNING id",
+            (polled_at, battery, heater_on, error)).fetchone()[0]
+
+
 def last_alerts_sent(conn) -> Dict[Optional[str], datetime.datetime]:
     """{kind: when the last alert of that kind was sent} (suppressed ones don't count; failed sends do: they were
     tried). For keeping the per-kind cooldown across a restart of `poll`."""

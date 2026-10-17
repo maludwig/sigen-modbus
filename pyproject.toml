@@ -20,6 +20,8 @@ dependencies = [
     "flask",
     "jinja2",
     "pvlib",
+    "requests",
+    "cryptography",
 ]
 
 [project.optional-dependencies]
@@ -30,7 +32,6 @@ dev = [
     "matplotlib",                # the notebooks' figures; the dashboard draws in the browser
 
     "pandas",
-    "requests",
     "eccodes",
 ]
 

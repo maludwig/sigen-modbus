@@ -84,9 +84,25 @@ change is the event, so they're worth logging anyway).
 - **Cold**: the BMS throttles charging (30047, the allowed charge power): ~1.7–2.3 kW at 7 °C,
   ~3.6 kW at 10 °C, full power from ~16 °C, extrapolating to ~0 at 0–1 °C. It depends on more
   than the coolest cluster (SOC, perhaps).
-- **Self-heating?** Twice, cold cells (~8 °C) warmed at up to ~10 °C/h as soon as charging began,
-  and kept warming briefly after it stopped. That's far more than charging current explains, so
-  probably a heater in the pack, but its power shows up in no register.
+- **Each pack has its own heater** (confirmed 2026-10-16 against the mySigen app, which reports a per-pack
+  "Heating status"). On a cold morning the coolest cluster jumps from ~8 °C to ~15 °C at 8–18 °C/h — far more than
+  the charging current (a few watts of I²R) explains. The rule, from one morning watched minute by minute: the
+  heater comes **on when charging is wanted and the pack is cold** (seen on-states from 7.7 to ~14 °C), and **off at
+  ~15 °C** (both packs), after which the cells still drift up ~0.7 °C from soak and the inverter's heat. The
+  packs switch on and off independently (each at its own 15 °C). The only live
+  window on the heater is the **cloud** ("Heating status"); `sigen poll` logs it to `battery_heater` when a cloud
+  section is configured (BOT_README "The cloud").
+- **A "cluster" is a pack.** The two registers for temperature clusters (30620/30621, min/max) are the two battery packs.
+  Average-cell temperature ≈ the mean of the two. Each pack is N × 3.2 V × 314 Ah LiFePO4 (6→6.03 kWh, 9→9.04 kWh).
+- **Charging splits power equally between the packs, not by capacity**, so the smaller 6.0 climbs in SOC faster; over
+  their life the energy has split in proportion to capacity (both ~3.4 cycles). The **86 % charge cut-off is
+  per-pack**: Battery(1) stops at 86 % while Battery(2) keeps charging; the stopped pack's power is exported, not
+  moved to the other pack. The BMS's per-pack charge limit rises with temperature (2.2 kW at 8.5 °C → 5.2 kW at
+  ~19 °C), so a cold pack charges slowly until the heater warms it.
+- **The "available discharge energy" register is a voltage/temperature estimate, not a running total.** It jumps up
+  when current starts (the cells' IR raises the voltage) and sags with zero current as the voltage relaxes — it can
+  fall while nothing flows. For energy in/out trust SOC, "room left" or the lifetime counters; this one swings with
+  current.
 - **Round trip** at the battery's DC port: ~96 % (discharging ~0.150 kWh per SOC point on 15 kWh
   of batteries, charging ~0.156). Just below 100 % the BMS re-trims SOC, so the first points down
   from full are "short".

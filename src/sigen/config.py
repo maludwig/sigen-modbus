@@ -114,6 +114,25 @@ class Alerts:
     ntfy_server: str = DEFAULT_NTFY_SERVER
 
 
+DEFAULT_CLOUD_BASE_URL = "https://api-us.sigencloud.com"
+DEFAULT_CLOUD_APP_URL = "https://app-us.sigencloud.com"
+
+
+@dataclass(frozen=True)
+class Cloud:
+    """Where and how to reach the Sigen cloud. The rotating access/refresh tokens live in token_file (gitignored),
+    NOT here. The app's two static constants -- the password key and the OAuth client credential -- live here rather
+    than in the code, so they are not committed to the public repo; they are "public" (the same for every install,
+    extractable from the app) but kept out of the source on purpose. `sigen cloud login` creates the token file."""
+    token_file: Path                           # absolute (resolved against the config folder)
+    base_url: str = DEFAULT_CLOUD_BASE_URL      # the region's API host (api-us, api-eu, …)
+    app_base_url: str = DEFAULT_CLOUD_APP_URL   # the region's web-app host, sent as origin/referer (app-us, …)
+    station_id: Optional[str] = None           # for device queries, e.g. the heater poll
+    batteries: Tuple[str, ...] = ()            # battery pack SNs to poll, e.g. ("110AXX1234000A", "110AXX1234000B")
+    obfuscation_key: Optional[str] = None      # the app's static 16-byte AES password key; needed only by login
+    client_basic: Optional[str] = None         # the app's OAuth client Basic credential (base64); login + refresh
+
+
 @dataclass(frozen=True)
 class Config:
     smart_load_names: Dict[int, str] = field(default_factory=dict)   # slot -> name
@@ -124,6 +143,7 @@ class Config:
     alerts: Optional[Alerts] = None
     array: Optional[Array] = None
     satellite_cube_dir: Optional[Path] = None   # satellite.cube_dir, absolute; None without a config file
+    cloud: Optional["Cloud"] = None              # the "cloud" section; None without one
     commands: Dict[str, Dict[str, Any]] = field(default_factory=dict)   # "poll" -> {"weather": True, …} (as given)
     # Where it came from, for messages: the file, "--no-config", or where get_config looked.
     origin: Optional[str] = field(default=None, compare=False)
@@ -154,6 +174,13 @@ class Config:
             raise ConfigError(f'the config has no alerts{self._from()}; add "alerts": {{"ntfy_topic": "…"}} '
                               f'(a long random name: on a public ntfy server anyone who knows it can read it)')
         return self.alerts
+
+    def require_cloud(self) -> "Cloud":
+        if self.cloud is None:
+            raise ConfigError(f'the config has no cloud section{self._from()}; add '
+                              f'"cloud": {{"token_file": "scratch/cloud_token.json", "station_id": "…"}}, '
+                              f'then run `sigen cloud login`')
+        return self.cloud
 
     def require_array(self) -> Array:
         if self.array is None:
@@ -212,7 +239,8 @@ def load_config(path: Optional[Path]) -> Config:
         raise ConfigError(f"{path} isn't valid JSON: {e}")
     if not isinstance(doc, dict):
         raise ConfigError(f"{path}: expected a JSON object at the top level")
-    known = {"smart_loads", "database", "devices", "site", "alerts", "array", "satellite", *COMMAND_SETTINGS}
+    known = {"smart_loads", "database", "devices", "site", "alerts", "array", "satellite", "cloud",
+             *COMMAND_SETTINGS}
     unknown = set(doc) - known
     if unknown:
         raise ConfigError(f"{path}: unknown key(s) {', '.join(sorted(unknown))}; known: {', '.join(sorted(known))}")
@@ -276,8 +304,45 @@ def load_config(path: Optional[Path]) -> Config:
                   alerts=_alerts(path, doc["alerts"]) if "alerts" in doc else None,
                   array=_array(path, doc["array"]) if "array" in doc else None,
                   satellite_cube_dir=_cube_dir(path, doc.get("satellite", {})),
+                  cloud=_cloud(path, doc["cloud"]) if "cloud" in doc else None,
                   commands={c: _command_settings(path, c, doc[c]) for c in COMMAND_SETTINGS if c in doc},
                   origin=str(path), path=Path(path))
+
+
+def _cloud(path: Path, spec) -> "Cloud":
+    """The "cloud" section: token_file (required, a path relative to the config folder); base_url, app_base_url,
+    station_id, batteries (all optional); and the app's two static constants, obfuscation_key and client_basic
+    (optional, kept here instead of in the code so they are not committed -- login needs both, refresh needs
+    client_basic)."""
+    if not isinstance(spec, dict) or "token_file" not in spec or set(spec) - {
+            "token_file", "base_url", "app_base_url", "station_id", "batteries", "obfuscation_key", "client_basic"}:
+        raise ConfigError(f'{path}: "cloud" must be {{"token_file": "scratch/cloud_token.json"}}, optionally with '
+                          f'"base_url", "app_base_url", "station_id", "batteries", "obfuscation_key", "client_basic"')
+    token_file = spec["token_file"]
+    if not isinstance(token_file, str) or not token_file.strip():
+        raise ConfigError(f"{path}: cloud.token_file must be a non-empty string")
+    base_url = spec.get("base_url", DEFAULT_CLOUD_BASE_URL)
+    if not isinstance(base_url, str) or not re.match(r"^https?://", base_url):
+        raise ConfigError(f'{path}: cloud.base_url must be a URL like "{DEFAULT_CLOUD_BASE_URL}", got {base_url!r}')
+    app_base_url = spec.get("app_base_url", DEFAULT_CLOUD_APP_URL)
+    if not isinstance(app_base_url, str) or not re.match(r"^https?://", app_base_url):
+        raise ConfigError(f'{path}: cloud.app_base_url must be a URL like "{DEFAULT_CLOUD_APP_URL}", got '
+                          f'{app_base_url!r}')
+    station = spec.get("station_id")
+    if station is not None and (not isinstance(station, str) or not station.strip()):
+        raise ConfigError(f"{path}: cloud.station_id must be a non-empty string")
+    batteries = spec.get("batteries", [])
+    if (not isinstance(batteries, list) or any(not isinstance(b, str) or not b.strip() for b in batteries)):
+        raise ConfigError(f"{path}: cloud.batteries must be a list of pack SN strings")
+    for name in ("obfuscation_key", "client_basic"):
+        value = spec.get(name)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ConfigError(f"{path}: cloud.{name} must be a non-empty string")
+    return Cloud(token_file=Path(path).resolve().parent / token_file.strip(), base_url=base_url.rstrip("/"),
+                 app_base_url=app_base_url.rstrip("/"),
+                 station_id=station.strip() if station else None, batteries=tuple(batteries),
+                 obfuscation_key=spec["obfuscation_key"].strip() if spec.get("obfuscation_key") else None,
+                 client_basic=spec["client_basic"].strip() if spec.get("client_basic") else None)
 
 
 def _command_settings(path: Path, command: str, spec) -> Dict[str, Any]:

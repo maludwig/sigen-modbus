@@ -82,7 +82,7 @@ def seconds_to_boundary(interval: float, wall_now: float, offset: float = 0.0) -
 def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[int, str], db_url: str,
         interval: float, count: Optional[int] = None, offset: float = 0.0,
         rediscover: Optional[Callable[[str], Optional[str]]] = None, rediscover_after: int = 3,
-        background=None, watcher=None,
+        background=None, watcher=None, cloud_heater=None,
         glitch_retries: int = GLITCH_RETRIES, glitch_retry_delay: float = GLITCH_RETRY_DELAY,
         out=print, err=lambda msg: print(msg, file=sys.stderr),
         monotonic=time.monotonic, sleep=time.sleep, wall=time.time) -> int:
@@ -99,8 +99,10 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
     background (a sigen.weather.Background, for --weather / --radar) is started once the
     schema checks out and stopped as soon as polling ends; its fetches don't count as polls.
     watcher (a sigen.alerts.Watcher, for --alerts) loads its history then too, sees every poll
-    after it's stored, and gets a few seconds at the end to send what's queued. Neither can
-    stop the polling.
+    after it's stored, and gets a few seconds at the end to send what's queued. cloud_heater (a
+    sigen.heater.HeaterPoller, with a "cloud" config section) logs each battery pack's heating
+    status from the cloud on its own gated cadence, fed the PV and temperature of each poll
+    through observe(). None of these can stop the polling.
 
     After a glitched poll (poll_verdict), the next poll is `glitch_retry_delay` seconds later
     rather than on the schedule, up to `glitch_retries` in a row, and only if that's before the
@@ -121,6 +123,8 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
             watcher.start(conn, units, now_utc())
         if background is not None:
             background.start()
+        if cloud_heater is not None:
+            cloud_heater.start()
         deadline = monotonic()             # the next scheduled poll
         retry_at: Optional[float] = None   # a glitch retry, sooner than that
         retries = 0                        # glitch retries in a row so far
@@ -160,6 +164,8 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
                     err(f"{stamp}  {where}: FAILED after {seconds:.2f}s: {result.error}")
             if watcher is not None:
                 watcher.observe(results, units, now_utc(), glitch=verdict if glitch else None)
+            if cloud_heater is not None:
+                cloud_heater.observe(results, units)
             if any(r.fatal for r in results.values()):
                 err("Stopping: the device rejected a register that should exist. That's more likely "
                     "a bug in sigen's register map than a device problem.")
@@ -191,6 +197,8 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
     finally:
         if background is not None:
             background.stop()
+        if cloud_heater is not None:
+            cloud_heater.stop()
         if watcher is not None:
             watcher.stop()
         if polls:

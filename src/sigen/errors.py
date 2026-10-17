@@ -81,3 +81,9 @@ class SchemaNotReady(SigenError):
     """The database schema doesn't match this code: migrations pending or edited,
     or register_meta out of date. Fixed by `sigen db migrate` (or a new migration)."""
     exit_code = ExitCode.PRECONDITION
+
+
+class CloudError(SigenError):
+    """A problem talking to the Sigen cloud: unreachable, an HTTP/API error, or a token that
+    expired or was rejected (re-run `sigen cloud login`, or `sigen cloud refresh`)."""
+    exit_code = ExitCode.CONNECTION

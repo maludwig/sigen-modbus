@@ -314,6 +314,37 @@ fetches what's new. The files go in the config's `satellite.cube_dir`. Each file
 writing a copy and swapping it in, so readers never see half of one, and only one run at a time
 works in a folder: a second one exits with 7 while the first is still going.
 
+### The cloud
+
+`sigen` can also read your system from Sigenergy's **mySigen cloud**, for the few things the local
+Modbus server doesn't expose: the **LoadHub / gateway**'s grid, inverter and generator
+measurements and its contactor states (the LoadHub has no Modbus at all), and each **battery
+pack's heating status**. It uses mySigen's own app API over HTTPS, is read-only, and needs your
+mySigen account. Everything else in `sigen` works without it.
+
+```
+sigen cloud login     # prompts for your mySigen password and the emailed code; saves the tokens
+sigen cloud refresh   # mint a fresh access token from the saved refresh token (no password)
+sigen cloud query     # the batteries' heating status (--path /device/gateway/<stationId>, --sn, --json)
+```
+An access token lasts about 12 hours; the refresh token is single-use, so each `refresh` rotates
+it and saves the new one (written atomically). `login` is the one interactive step (your password);
+after that `refresh` keeps access alive with no password. Only
+one process should refresh at a time — `poll` owns it while it runs (it keeps more than an hour of
+life in hand), so `query` never refreshes on its own: it errors if the token has expired, and you
+run `cloud refresh`. Needs the config's `"cloud"` section (below).
+
+The tokens live in the file named by `cloud.token_file`, never in `config.json`; keep that file out
+of anything you share, and create it with `sigen cloud login`. `login` and `refresh` also need the
+app's two static constants, `cloud.obfuscation_key` and `cloud.client_basic` (below) — the same for
+every mySigen install, but kept in your config rather than baked into this code.
+
+**Battery heater logging.** With a `"cloud"` section in the config, `sigen poll` logs each battery
+pack's heating status to the `battery_heater` table from a background thread. A cloud problem never
+stops the Modbus poll; it refreshes the token at launch, and polls every 10 minutes at rest, or
+every minute when the battery might be heating (PV over 0.2 kW and the coolest cluster below 15 °C,
+or a heater already on). Restart `poll` after adding the cloud section to turn it on.
+
 ### Network
 
 ```
@@ -374,6 +405,10 @@ Every section is optional; a command that needs one says so. Start from `config.
             "faces": {"south": {"tilt": 20, "azimuth": 180}, "west": {"tilt": 20, "azimuth": 270}},
             "strings": {"1": {"panels": 10, "face": "south"}, "2": {"panels": 8, "face": "west"}}},
   "satellite": {"cube_dir": "captures/satellite/cubes"},
+  "cloud": {"token_file": "scratch/cloud_token.json",
+            "base_url": "https://api-us.sigencloud.com", "app_base_url": "https://app-us.sigencloud.com",
+            "obfuscation_key": "the-apps-static-key", "client_basic": "base64-of-the-apps-oauth-client",
+            "station_id": "1234567890123456", "batteries": ["110AXX1234000A", "110AXX1234000B"]},
   "poll": {"interval": 15, "offset": 0, "weather": true, "radar": true, "alerts": true},
   "dashboard": {"host": "0.0.0.0", "port": 8050, "reload": false}
 }
@@ -394,6 +429,17 @@ Every section is optional; a command that needs one says so. Start from `config.
   has.
 - `satellite`: where `sigen satellite` keeps its files and the dashboard reads them. A relative
   `cube_dir` is relative to the config file's folder (the default: `captures/satellite/cubes` there).
+- `cloud`: the mySigen cloud (see "The cloud"). `token_file` is a path (relative to the config
+  folder) where the rotating access and refresh tokens are kept — gitignore it; it is not a secret
+  in `config.json` itself. `station_id` and the `batteries` list (pack serials in the app's order,
+  Battery 1 first) name what `cloud query` and the poll's heater job read. `base_url` and `app_base_url`
+  are your region's API and web-app hosts (both default to the US ones).
+  `obfuscation_key` and `client_basic` are the app's two static constants (the password key and the
+  OAuth client credential): the same for every mySigen install, but kept here rather than in the
+  code so the source carries neither. `login` needs both, `refresh` needs `client_basic`, and a
+  plain `query` with a valid token needs neither. As of this writing, an LLM can trivially find the
+  `obfuscation_key` and `client_basic` from the webapp, at: https://app-us.sigencloud.com/
+  Simply ask it to find the AES key and the Basic Auth string from the webapp.
 - `poll`, `dashboard`: what `sigen poll` and `sigen dashboard` do on this computer when the command
   line doesn't say, named like their options without the dashes: `poll` takes `interval`,
   `offset`, `weather`, `radar`, `alerts`, `capture_open_meteo_weather` and `capture_radar`;
@@ -423,6 +469,9 @@ Tables:
   the battery, the house and the grid. `SELECT sum(solar_kwh) FROM daily_energy WHERE day >=
   '2027-01-01'` is a year's solar. Days add up exactly; a gap in polling moves energy to the day
   before the gap.
+- `battery_heater`: one row per cloud poll of a battery pack's heating status (`sigen poll` with a
+  `cloud` section): `polled_at`, `battery` (1 or 2, the pack's place in `cloud.batteries`),
+  `heater_on` (NULL on a cloud error), `error`.
 - `schema_migrations`: which migrations have been applied.
 
 Plant and inverter every 15 seconds take about 10 MB a day (~4 GB a year); `sigen db status`

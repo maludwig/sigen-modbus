@@ -9,6 +9,9 @@
     sigen db migrate  [CONFIG]
     sigen db status   [CONFIG]
     sigen db query    SQL [CONFIG] [--json] [--max-rows N] [--max-width CHARS]
+    sigen cloud login   [CONFIG]                         (prompts for your Sigen password; handles the emailed code)
+    sigen cloud refresh [CONFIG]                         (mint a fresh access token from the saved refresh token)
+    sigen cloud query   [CONFIG] [--path PATH | --sn SN [--device-type N]] [--json]
     sigen poll        [--ip IP] [CONFIG] [--interval SECONDS] [--offset SECONDS] [--count N]
                       [--[no-]weather [--capture-open-meteo-weather DIR]] [--[no-]radar [--capture-radar DIR]]
                       [--[no-]alerts]
@@ -41,6 +44,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from sigen import __version__
+from sigen.cloud import CloudClient
 from sigen.config import CONFIG_ENV, CONFIG_NAME, Config, get_config
 from sigen.control import DEFAULT_JOURNAL, Journal, plan_undo, set_register
 from sigen.data_io import build_document, capture_filename, read_json_file, save_document
@@ -530,11 +534,16 @@ def cmd_poll(args) -> int:
         watcher = alerts.Watcher(alerts.Sender(alert_config, alert_store, out=print, err=err), tz=tz,
                                  out=print, err=err)
     background, store = _background(args, config, url, watcher)
+    cloud_heater = None
+    if config.cloud is not None:
+        from sigen import heater
+        cloud_heater = heater.HeaterPoller.from_config(config.cloud, url, out=print, err=err)
     units = {args.unit_id: "plant", **{u: "inverter" for u in _inverter_units(config)}}
     extras = [what for what, on in (("Open-Meteo hourly and every 15 min", args.weather),
                                     ("radar every 6 min", args.radar),
                                     ("alerts" + ("" if args.weather else " (no --weather: outside air unknown)"),
-                                     args.alerts)) if on]
+                                     args.alerts),
+                                    ("the batteries' cloud heater status", cloud_heater is not None)) if on]
     print(f"Polling {ip}:{args.port} units {', '.join(f'{u} ({d})' for u, d in units.items())} every "
           f"{args.interval:g}s" + (f", {args.offset:g}s past the boundary" if args.offset else "")
           + f" into {db.redact(url)} (Ctrl+C to stop)"
@@ -543,8 +552,8 @@ def cmd_poll(args) -> int:
     connector_for = lambda address, unit: functools.partial(ModbusClient, address, args.port, unit, args.timeout)
     try:
         return poll.run(connector_for=connector_for, ip=ip, units=units, db_url=url, interval=args.interval,
-                        offset=args.offset,
-                        count=args.count, rediscover=rediscover, background=background, watcher=watcher)
+                        offset=args.offset, count=args.count, rediscover=rediscover, background=background,
+                        watcher=watcher, cloud_heater=cloud_heater)
     finally:
         for s in (store, alert_store):
             if s is not None:
@@ -830,6 +839,64 @@ def cmd_fake_server(args) -> int:
     return ExitCode.OK
 
 
+def _cloud_client(args) -> tuple:
+    cloud = _config(args).require_cloud()
+    return CloudClient(cloud.token_file, cloud.base_url, app_base_url=cloud.app_base_url,
+                       obfuscation_key=cloud.obfuscation_key, client_basic=cloud.client_basic), cloud
+
+
+def cmd_cloud_login(args) -> int:
+    import getpass
+    client, cloud = _cloud_client(args)
+    username = input("Sigen username (email): ").strip()
+    password = getpass.getpass("Sigen password (not shown): ")
+    if not username or not password:
+        err("Need both a username and a password; nothing sent.")
+        return ExitCode.USAGE
+
+    def mfa(body):
+        print(f"The cloud wants a security code (code {body.get('code')}: {body.get('msg')}).")
+        return input("Security code from the email: ").strip()
+
+    tokens = client.login(username, password, mfa)
+    print(f"Logged in. Saved {cloud.token_file} (keep it secret). "
+          f"Access token good for ~{tokens.seconds_left() / 3600:.1f} h.")
+    return ExitCode.OK
+
+
+def cmd_cloud_refresh(args) -> int:
+    client, cloud = _cloud_client(args)
+    tokens = client.refresh()
+    print(f"Refreshed {cloud.token_file}. Access token good for ~{tokens.seconds_left() / 3600:.1f} h.")
+    return ExitCode.OK
+
+
+def cmd_cloud_query(args) -> int:
+    client, cloud = _cloud_client(args)
+    if args.path:
+        print(json.dumps(client.get(args.path), indent=1))
+        return ExitCode.OK
+    if not cloud.station_id:
+        err('this query needs cloud.station_id in the config (or use --path for a raw API path).')
+        return ExitCode.USAGE
+    sns = [args.sn] if args.sn else list(cloud.batteries)
+    if not sns:
+        err('no battery to query: add cloud.batteries to the config, or pass --sn, or use --path.')
+        return ExitCode.USAGE
+    out = {}
+    for sn in sns:
+        data = client.device_dynamic_info(cloud.station_id, sn, args.device_type)
+        if args.json:
+            out[sn] = data
+        else:
+            print(f"\n== {sn}")
+            for row in data.get("realTimeInfo", []) if isinstance(data, dict) else []:
+                print(f"  {row.get('paramKey', ''):42} {row.get('paramValue', '')}")
+    if args.json:
+        print(json.dumps(out, indent=1))
+    return ExitCode.OK
+
+
 # ---------- parser ----------
 def build_parser() -> argparse.ArgumentParser:
     net = _network_parent()
@@ -965,6 +1032,42 @@ def build_parser() -> argparse.ArgumentParser:
                     help="cut table cells longer than CHARS with … (default: 80; 0 = never; "
                          "--json never cuts)")
     dq.set_defaults(func=cmd_db_query)
+
+    cl = sub.add_parser("cloud", formatter_class=fmt, epilog=EXIT_CODE_HELP,
+                        help="talk to the Sigen cloud (login, refresh, query)",
+                        description="Read-only access to the mySigen cloud API, for what Modbus can't give us (the "
+                                    "LoadHub/gateway's grid and contactor data, each battery pack's heating status). "
+                                    "Needs the config's \"cloud\" section: token_file (gitignored; holds the rotating "
+                                    "tokens), station_id / batteries for device queries, and the app's static "
+                                    "constants obfuscation_key (login) and client_basic (login + refresh), which are "
+                                    "kept in the config rather than in this code. The tokens are NOT in the config.")
+    clsub = cl.add_subparsers(dest="cloud_command", required=True, metavar="CLOUD_COMMAND")
+    cli_ = clsub.add_parser("login", formatter_class=fmt, epilog=EXIT_CODE_HELP,
+                            help="log in with your password (prompts; handles the emailed code), save the tokens",
+                            description="Prompt for your Sigen username and password (never stored), log in, and "
+                                        "save the access + refresh tokens to cloud.token_file. If the cloud asks for "
+                                        "an emailed security code, it prompts for that too. One attempt: the account "
+                                        "locks after a few failures, so nothing is retried.")
+    _config_option(cli_, "cloud.token_file (where to save) and cloud.base_url")
+    cli_.set_defaults(func=cmd_cloud_login)
+    clr = clsub.add_parser("refresh", formatter_class=fmt, epilog=EXIT_CODE_HELP,
+                           help="mint a fresh access token from the saved refresh token (no password)",
+                           description="Exchange the saved (single-use) refresh token for a fresh access token and a "
+                                       "new refresh token, saved atomically. No password needed. Don't run this while "
+                                       "`sigen poll` is refreshing (it keeps the token fresh itself).")
+    _config_option(clr, "cloud.token_file")
+    clr.set_defaults(func=cmd_cloud_refresh)
+    clq = clsub.add_parser("query", formatter_class=fmt, epilog=EXIT_CODE_HELP,
+                           help="GET a device's real-time info (default: the batteries' heating status)",
+                           description="Read-only GET using the saved access token (it does NOT refresh; run "
+                                       "`sigen cloud refresh` if it's expired). Default: the heating status, SOC and "
+                                       "voltage of each cloud.batteries pack. --path gets any raw API path instead.")
+    _config_option(clq, "cloud.token_file, cloud.station_id, cloud.batteries")
+    clq.add_argument("--path", help="GET this raw API path and print the JSON, e.g. /device/gateway/<stationId>")
+    clq.add_argument("--sn", help="one device SN to query instead of cloud.batteries")
+    clq.add_argument("--device-type", type=int, default=4, help="2 AIO, 3 inverter, 4 battery, 8 gateway (default: 4)")
+    clq.add_argument("--json", action="store_true", help="print the raw JSON")
+    clq.set_defaults(func=cmd_cloud_query)
 
     pl = sub.add_parser("poll", parents=[net], formatter_class=fmt, epilog=EXIT_CODE_HELP,
                         help="read everything on a schedule and store it in the database (read-only)",

@@ -35,6 +35,15 @@
     }
   },
   "satellite": {"cube_dir": "captures/satellite/cubes"},
+  "cloud": {
+    "token_file": "scratch/cloud_token.json",
+    "base_url": "https://api-us.sigencloud.com",
+    "app_base_url": "https://app-us.sigencloud.com",
+    "obfuscation_key": "the-apps-static-key",
+    "client_basic": "base64-of-the-apps-oauth-client",
+    "station_id": "1234567890123456",
+    "batteries": ["110AXX1234000A", "110AXX1234000B"]
+  },
   "poll": {"interval": 15, "offset": 0, "weather": true, "radar": true, "alerts": true},
   "dashboard": {"host": "0.0.0.0", "port": 8050, "reload": false}
 }
