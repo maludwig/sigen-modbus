@@ -80,17 +80,17 @@ def reading_values(conn, unit: int, names: List[str], start=None, end=None, ids=
             where, params = where + " AND t.reading_id = ANY(%s)", [*params, list(ids)]
         where += _good(conn, "r")
         query = sql.SQL("SELECT t.reading_id, t.started_at, {} FROM {} t JOIN readings r ON r.id = t.reading_id "
-                        "WHERE r.unit_id = %s" + where + " ORDER BY t.reading_id").format(
+                        "WHERE r.unit_id = %s" + where + " ORDER BY t.started_at").format(
             sql.SQL(", ").join(sql.Identifier("t", n) for n in names), sql.Identifier(values_table(regs[0].device)))
         return {rid: (t, {n: v / gains[n] for n, v in zip(names, values) if v is not None})
                 for rid, t, *values in conn.execute(query, [unit, *params])}
     if ids is not None:
-        readings = conn.execute("SELECT id, started_at FROM readings WHERE id = ANY(%s) ORDER BY id",
+        readings = conn.execute("SELECT id, started_at FROM readings WHERE id = ANY(%s) ORDER BY started_at",
                                 (list(ids),)).fetchall()
     else:
         where, params = _between(start, end)
         readings = conn.execute(f"SELECT id, started_at FROM readings WHERE unit_id = %s AND error IS NULL{where}"
-                                f"{_good(conn)} ORDER BY id", [unit, *params]).fetchall()
+                                f"{_good(conn)} ORDER BY started_at", [unit, *params]).fetchall()
     by_address = {r.address: r.name for r in regs}
     out = {rid: (t, {}) for rid, t in readings}
     if out:
@@ -99,7 +99,7 @@ def reading_values(conn, unit: int, names: List[str], start=None, end=None, ids=
         for rid, address, value in conn.execute(
                 "SELECT reading_id, address, value FROM register_values "
                 "WHERE reading_id BETWEEN %s AND %s AND address = ANY(%s)",
-                (readings[0][0], readings[-1][0], list(by_address))):
+                (min(r[0] for r in readings), max(r[0] for r in readings), list(by_address))):
             if rid in out:
                 out[rid][1][by_address[address]] = value / gains[by_address[address]]
     return out
@@ -181,16 +181,18 @@ def window_of(t: datetime.datetime) -> datetime.datetime:
 
 
 def picked_readings(conn, start=None, end=None) -> List[Tuple[int, datetime.datetime]]:
-    """The smallest successful plant reading id of each clock-aligned 15-minute window: [(id, started_at)]."""
+    """The earliest successful plant reading (by time) of each clock-aligned 15-minute window, in time order:
+    [(id, started_at)]. Picked and ordered by started_at, not id -- a backfilled reading has the newest id but an
+    old time."""
     where, params = _between(start, end)
     readings = conn.execute(f"SELECT id, started_at FROM readings WHERE error IS NULL AND unit_id = %s{where}"
-                            f"{_good(conn)} ORDER BY id", [PLANT, *params]).fetchall()
+                            f"{_good(conn)} ORDER BY started_at", [PLANT, *params]).fetchall()
     first_in_window = {}
     for reading_id, started_at in readings:
         w = window_of(started_at)
-        if w not in first_in_window or reading_id < first_in_window[w][0]:
+        if w not in first_in_window or started_at < first_in_window[w][1]:
             first_in_window[w] = (reading_id, started_at)
-    return sorted(first_in_window.values())
+    return sorted(first_in_window.values(), key=lambda r: r[1])
 
 
 @dataclass
@@ -227,7 +229,7 @@ def smart_load_energy(conn, names: Dict[int, str], start=None, end=None,
     (a page topping up its chart wants even one)."""
     where, params = _between(start, end)
     readings = conn.execute(f"SELECT id, started_at FROM readings WHERE error IS NULL AND unit_id = %s{where}"
-                            f"{_good(conn)} ORDER BY id", [PLANT, *params]).fetchall()
+                            f"{_good(conn)} ORDER BY started_at", [PLANT, *params]).fetchall()
     step =-(-len(readings) // max_points) or 1
     picked = readings[::step]
     if readings and picked[-1] != readings[-1]:
@@ -269,12 +271,13 @@ class LoadEnergy:
 def energy_by_load(conn, names: Dict[int, str], start=None, end=None) -> Optional[LoadEnergy]:
     """Latest minus earliest counter over the window's plant readings. None if fewer than two readings."""
     where, params = _between(start, end)
-    firsts = conn.execute(f"SELECT min(id), max(id) FROM readings WHERE error IS NULL AND unit_id = %s{where}"
-                          f"{_good(conn)}", [PLANT, *params]).fetchone()
-    if firsts[0] is None or firsts[0] == firsts[1]:
+    ends = (f"SELECT id, started_at FROM readings WHERE error IS NULL AND unit_id = %s{where}{_good(conn)} "
+            "ORDER BY started_at")
+    first = conn.execute(ends + " LIMIT 1", [PLANT, *params]).fetchone()           # earliest and latest by time,
+    last = conn.execute(ends + " DESC LIMIT 1", [PLANT, *params]).fetchone()       # not min / max id (a backfill breaks that)
+    if first is None or first[0] == last[0]:
         return None
-    (first_id, first_t), (last_id, last_t) = conn.execute(
-        "SELECT id, started_at FROM readings WHERE id IN (%s, %s) ORDER BY id", firsts).fetchall()
+    (first_id, first_t), (last_id, last_t) = first, last
     values = reading_values(conn, PLANT, [*COUNTERS, HOUSE, CHECK], ids=[first_id, last_id])
     start_kwh, end_kwh = values[first_id][1], values[last_id][1]
     delta = {name: round(end_kwh[name] - start_kwh[name], 2) for name in end_kwh}
@@ -325,7 +328,7 @@ def latest_load_power(conn, names: Dict[int, str], start=None, end=None) -> Opti
     reading only, so it's cheap to ask for every few seconds."""
     where, params = _between(start, end)
     row = conn.execute(f"SELECT id FROM readings WHERE error IS NULL AND unit_id = %s{where}{_good(conn)} "
-                       "ORDER BY id DESC LIMIT 1", [PLANT, *params]).fetchone()
+                       "ORDER BY started_at DESC LIMIT 1", [PLANT, *params]).fetchone()
     if row is None:
         return None
     t, values = reading_values(conn, PLANT, [*POWERS, TOTAL_POWER], ids=[row[0]]).get(row[0], (None, {}))
@@ -564,7 +567,7 @@ def day_energy(conn, start: datetime.datetime, end: datetime.datetime) -> Option
             totals[key] = closing[name] - opening[name]
     flows, covered = {f: 0.0 for f in FLOWS}, 0.0
     for (t0, v), (t1, _) in zip(plant, plant[1:]):
-        if t1 - t0 <= MAX_FLOW_GAP and all(n in v for n in FLOW_POWERS):
+        if datetime.timedelta(0) < t1 - t0 <= MAX_FLOW_GAP and all(n in v for n in FLOW_POWERS):
             hours = (t1 - t0) / datetime.timedelta(hours=1)
             _split(flows, v, hours)
             covered += hours

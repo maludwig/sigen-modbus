@@ -108,7 +108,7 @@ def _config(args) -> Config:
 # The settings poll and dashboard also take from the config (sigen.config.COMMAND_SETTINGS has their types):
 # (setting = the option's dest, the option, its built-in default). The parser leaves them None when not given.
 POLL_SETTINGS = [("interval", "--interval", 60.0), ("offset", "--offset", 0.0), ("weather", "--weather", False),
-                 ("radar", "--radar", False), ("alerts", "--alerts", False),
+                 ("radar", "--radar", False), ("alerts", "--alerts", False), ("cloud", "--cloud", True),
                  ("capture_open_meteo_weather", "--capture-open-meteo-weather", None),
                  ("capture_radar", "--capture-radar", None)]
 DASHBOARD_SETTINGS = [("host", "--host", "0.0.0.0"), ("port", "--port", 8050), ("reload", "--reload", False)]
@@ -535,7 +535,7 @@ def cmd_poll(args) -> int:
                                  out=print, err=err)
     background, store = _background(args, config, url, watcher)
     cloud_heater = None
-    if config.cloud is not None:
+    if args.cloud and config.cloud is not None:
         from sigen import heater
         cloud_heater = heater.HeaterPoller.from_config(config.cloud, url, out=print, err=err)
     units = {args.unit_id: "plant", **{u: "inverter" for u in _inverter_units(config)}}
@@ -1157,6 +1157,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "reserve, alarms) over the last 6 hours and push new problems to the config's ntfy topic, "
                          "each kind at most once an hour; every alert is logged in alert_log. Use with --weather "
                          "for the outside air (default: poll.alerts in the config, else off)")
+    pl.add_argument("--cloud", action=on_off,
+                    help="also log each battery pack's self-heating status to battery_heater via the Sigen cloud, "
+                         "on a gated cadence (needs the config's \"cloud\" section). This holds a cloud session; "
+                         "turn it off to free one (default: poll.cloud in the config, else on when a cloud section "
+                         "is present)")
     pl.add_argument("--capture-open-meteo-weather", metavar="DIR", type=Path,
                     help="with --weather: also save every whole Open-Meteo response (past day and "
                          "3-day forecast) to DIR, one timestamped JSON file per fetch (default: "

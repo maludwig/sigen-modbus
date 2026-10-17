@@ -378,7 +378,7 @@ def status(conn, migrations: Optional[Sequence[Migration]] = None) -> dict:
             else:
                 out["register_values"], out["register_values_exact"] = estimate, False
         out["last_reading"] = conn.execute(
-            "SELECT id, started_at, ended_at, error FROM readings ORDER BY id DESC LIMIT 1").fetchone()
+            "SELECT id, started_at, ended_at, error FROM readings ORDER BY started_at DESC LIMIT 1").fetchone()
         if out["ready"]:                       # unit_id only exists once 0002 is applied, glitch once 0007 is
             out["readings_by_unit"] = conn.execute(
                 "SELECT unit_id, count(*), count(error) FROM readings GROUP BY unit_id ORDER BY unit_id").fetchall()

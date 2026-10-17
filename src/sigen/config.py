@@ -54,7 +54,8 @@ SMART_LOAD_SLOTS = range(1, 25)
 # directory, relative to the config file's folder). The names are the command's options without the dashes.
 COMMAND_SETTINGS: Dict[str, Dict[str, tuple]] = {
     "poll": {"interval": ("number", 1, 86400), "offset": ("number", 0, 86400), "weather": ("bool",),
-             "radar": ("bool",), "alerts": ("bool",), "capture_open_meteo_weather": ("dir",), "capture_radar": ("dir",)},
+             "radar": ("bool",), "alerts": ("bool",), "cloud": ("bool",),
+             "capture_open_meteo_weather": ("dir",), "capture_radar": ("dir",)},
     "dashboard": {"host": ("text",), "port": ("integer", 1, 65535), "reload": ("bool",)},
 }
 

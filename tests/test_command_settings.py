@@ -73,6 +73,17 @@ def test_without_a_config_everything_is_the_built_in_default():
     assert {source for _, source in shown.values()} == {"default"}
 
 
+def test_poll_cloud_defaults_on_and_can_be_disabled(tmp_path):
+    # Cloud heater logging defaults ON (unlike weather/radar/alerts), so a machine with a cloud section keeps
+    # logging unless told otherwise; --no-cloud / poll.cloud:false turns it off (e.g. to free a mySigen session).
+    args, shown = merged(["poll"], Config(origin="--no-config"))
+    assert args.cloud is True and shown["--cloud"] == ("on", "default")
+    args, shown = merged(["poll"], load_config(write(tmp_path, {"poll": {"cloud": False}})))
+    assert args.cloud is False and shown["--cloud"] == ("off", "config")
+    args, _ = merged(["poll", "--no-cloud"], load_config(write(tmp_path, {"poll": {"cloud": True}})))
+    assert args.cloud is False                                            # command line wins over the config
+
+
 def test_poll_checks_settings_from_the_config_too(run, tmp_path):
     f = write(tmp_path, {"database": {"url": "postgresql://nobody@127.0.0.1:1/none"}, "poll": {"interval": 15,
                                                                                                "offset": 15}})
@@ -97,7 +108,7 @@ def test_poll_prints_each_setting_and_where_it_came_from(run, tmp_path, config, 
     assert code == ExitCode.OK and "1 stored, 0 failed" in out
     lines = err.splitlines()
     start = lines.index(f"Settings (config: {f}):")
-    assert [line.split() for line in lines[start + 1:start + 8]] == [
+    assert [line.split() for line in lines[start + 1:start + 9]] == [
         ["--interval", "1", "config"], ["--offset", "0", "default"], ["--weather", "off", "config"],
-        ["--radar", "off", "default"], ["--alerts", "off", "command", "line"],
+        ["--radar", "off", "default"], ["--alerts", "off", "command", "line"], ["--cloud", "on", "default"],
         ["--capture-open-meteo-weather", "(none)", "default"], ["--capture-radar", "(none)", "default"]]

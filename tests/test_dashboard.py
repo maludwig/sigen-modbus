@@ -614,6 +614,73 @@ def test_the_window_and_since(seeded, conn, monkeypatch):
         assert r.status_code == 400 and "since" in r.get_json()["error"], bad
 
 
+# ---------- id order is not time order: sigen sync backfills a gap now, so an old-timestamped reading gets the
+# newest id. Every reader must order and bound by started_at, never by id. ----------
+def _insert_energy(conn, t, counters, pv, battery, grid, load):
+    """One plant reading at `t` with the six lifetime energy counters and the four flow powers (like a_day.plant)."""
+    names = ["plant_accumulated_pv_energy", "plant_accumulated_load_consumption",
+             "plant_accumulated_battery_charge_energy", "plant_accumulated_battery_discharge_energy",
+             "plant_accumulated_grid_import_energy", "plant_accumulated_grid_export_energy"]
+    db.insert_reading(conn, ip="127.0.0.1", unit_id=247, poll_id=db.next_poll_id(conn), started_at=t, ended_at=t,
+                      values=sorted([stored(n, c) for n, c in zip(names, counters)]
+                                    + [stored("plant_photovoltaic_power", pv), stored("plant_ess_power", battery),
+                                       stored("plant_grid_sensor_active_power", grid),
+                                       stored("plant_total_load_power", load)]))
+
+
+def _insert_load(conn, t, house_kw, house_kwh=100.0):
+    db.insert_reading(conn, ip="127.0.0.1", unit_id=247, poll_id=db.next_poll_id(conn), started_at=t, ended_at=t,
+                      values=plant_values(10.0, 5.0, house_kwh, 1.0, 0.2, house_kw))
+
+
+def test_day_energy_splits_flows_in_time_order_not_id_order(conn):
+    """A backfilled reading (newest id, earlier time) must not make day_energy step backwards in time: a backward
+    step would be counted with negative hours, giving negative flows (the thin-solar-bar bug)."""
+    noon = datetime.datetime(2026, 10, 5, 12, 0, tzinfo=TZ)
+    c = (120, 210, 52, 41, 105, 60)
+    _insert_energy(conn, noon + datetime.timedelta(seconds=30), c, pv=5, battery=2, grid=-2, load=1)
+    _insert_energy(conn, noon + datetime.timedelta(minutes=1), c, pv=5, battery=2, grid=-2, load=1)
+    _insert_energy(conn, noon, c, pv=5, battery=2, grid=-2, load=1)      # backfilled: newest id, earliest time
+    e = charts.day_energy(conn, datetime.datetime(2026, 10, 5, tzinfo=TZ),
+                          datetime.datetime(2026, 10, 6, tzinfo=TZ))
+    assert all(v >= 0 for v in e.flows.values()), e.flows
+    minute = 1 / 60
+    assert e.flows[("Solar", "Load")] == pytest.approx(minute)          # 2 × 30 s of: 1 kW to load,
+    assert e.flows[("Solar", "Battery")] == pytest.approx(2 * minute)   # 2 kW to the battery,
+    assert e.flows[("Solar", "Grid")] == pytest.approx(2 * minute)      # 2 kW exported
+
+
+def test_energy_by_load_bounds_the_window_by_time_not_id(conn):
+    """The window's first/last readings are the earliest/latest by time, not min/max id."""
+    t0 = datetime.datetime(2026, 10, 6, 12, 0, tzinfo=TZ)
+    _insert_load(conn, t0, 2.0, house_kwh=100.0)
+    _insert_load(conn, t0 + datetime.timedelta(minutes=30), 2.0, house_kwh=101.5)
+    _insert_load(conn, t0 + datetime.timedelta(minutes=15), 2.0, house_kwh=100.7)   # backfilled: newest id, middle time
+    e = charts.energy_by_load(conn, NAMES)
+    assert e.house == 1.5 and e.hours == 0.5         # 101.5 − 100.0 over 12:00→12:30, not 100.7 − 100.0 over 15 min
+
+
+def test_latest_load_power_is_the_newest_by_time(conn):
+    """The live 'current power' tile is the latest reading by time, not by id."""
+    newer = datetime.datetime(2026, 10, 7, 12, 30, tzinfo=TZ)
+    _insert_load(conn, newer, 3.0)
+    _insert_load(conn, datetime.datetime(2026, 10, 7, 12, 0, tzinfo=TZ), 5.0)       # backfilled: newest id, earlier time
+    p = charts.latest_load_power(conn, NAMES)
+    assert p.at == newer and p.house == 3.0          # 12:30's 3 kW, not the backfilled 12:00's 5 kW
+
+
+def test_energy_readings_stay_time_ordered_after_backfill(conn):
+    """smart_load_energy and picked_readings order by time, so a backfilled row doesn't scramble the chart's x-axis."""
+    base = datetime.datetime(2026, 10, 8, 12, 0, tzinfo=TZ)
+    _insert_load(conn, base, 2.0, house_kwh=100.0)
+    _insert_load(conn, base + datetime.timedelta(minutes=30), 2.0, house_kwh=101.0)
+    _insert_load(conn, base + datetime.timedelta(minutes=15), 2.0, house_kwh=100.5)  # backfilled: newest id, middle time
+    assert charts.smart_load_energy(conn, NAMES).times == [base, base + datetime.timedelta(minutes=15),
+                                                           base + datetime.timedelta(minutes=30)]
+    assert [t for _, t in charts.picked_readings(conn)] == [base, base + datetime.timedelta(minutes=15),
+                                                            base + datetime.timedelta(minutes=30)]
+
+
 def test_cli_starts_the_server(run, seeded, monkeypatch):
     calls = []
     monkeypatch.setattr("flask.Flask.run", lambda self, **kw: calls.append(

@@ -44,6 +44,6 @@
     "station_id": "1234567890123456",
     "batteries": ["110AXX1234000A", "110AXX1234000B"]
   },
-  "poll": {"interval": 15, "offset": 0, "weather": true, "radar": true, "alerts": true},
+  "poll": {"interval": 15, "offset": 0, "weather": true, "radar": true, "alerts": true, "cloud": true},
   "dashboard": {"host": "0.0.0.0", "port": 8050, "reload": false}
 }

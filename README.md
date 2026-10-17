@@ -203,7 +203,7 @@ database is refused (exit 10). Several statements work, e.g. local times:
 `sigen db query "SET TIME ZONE 'America/Edmonton'; SELECT started_at, plant_ess_soc_pct FROM plant_register_values ORDER BY reading_id DESC LIMIT 5"`.
 
 ```
-sigen poll [--ip …] [--interval 60] [--offset 0] [--count N] [--[no-]weather] [--[no-]radar] [--[no-]alerts]
+sigen poll [--ip …] [--interval 60] [--offset 0] [--count N] [--[no-]weather] [--[no-]radar] [--[no-]alerts] [--[no-]cloud]
 ```
 Each of `--interval`, `--offset`, `--weather`, `--radar`, `--alerts` and the capture options can
 also come from the config's `"poll"` section; the command line wins (`--no-alerts` over `"alerts":
@@ -343,7 +343,9 @@ every mySigen install, but kept in your config rather than baked into this code.
 pack's heating status to the `battery_heater` table from a background thread. A cloud problem never
 stops the Modbus poll; it refreshes the token at launch, and polls every 10 minutes at rest, or
 every minute when the battery might be heating (PV over 0.2 kW and the coolest cluster below 15 °C,
-or a heater already on). Restart `poll` after adding the cloud section to turn it on.
+or a heater already on). It's on by default whenever a cloud section is present; `--no-cloud` (or
+`poll.cloud: false`) turns it off without removing the config — which also frees the cloud session it
+would otherwise hold (the mySigen account allows only so many at once). Restart `poll` after changing it.
 
 ### Syncing between machines
 
@@ -467,7 +469,7 @@ Every section is optional; a command that needs one says so. Start from `config.
   Simply ask it to find the AES key and the Basic Auth string from the webapp.
 - `poll`, `dashboard`: what `sigen poll` and `sigen dashboard` do on this computer when the command
   line doesn't say, named like their options without the dashes: `poll` takes `interval`,
-  `offset`, `weather`, `radar`, `alerts`, `capture_open_meteo_weather` and `capture_radar`;
+  `offset`, `weather`, `radar`, `alerts`, `cloud`, `capture_open_meteo_weather` and `capture_radar`;
   `dashboard` takes `host`, `port` and `reload`. An option on the command line wins; a setting in
   neither is the option's default. Handy when two computers poll the same device: each one's
   `offset` and `alerts` live in its own config.
