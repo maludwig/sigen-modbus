@@ -345,6 +345,31 @@ stops the Modbus poll; it refreshes the token at launch, and polls every 10 minu
 every minute when the battery might be heating (PV over 0.2 kW and the coolest cluster below 15 °C,
 or a heater already on). Restart `poll` after adding the cloud section to turn it on.
 
+### Syncing between machines
+
+If two machines poll the same SigenStor into separate databases (see "Config file"), an outage on
+one — a reboot, a deploy, a crashed database — leaves a gap the other usually has. `sigen sync`
+fills it: it reads a time window from the other machine's dashboard and writes in the rows this
+database is missing.
+
+```
+sigen sync --url http://othermachine:8050 \
+           --start-at 2026-10-17T16:00:00Z --end-at 2026-10-17T17:30:00Z [--only-sync weather] [--dry-run]
+```
+- `--url` is the other machine's **dashboard** base URL; that machine must be running `sigen
+  dashboard` (it serves the read-only `/sync/*` endpoints). Nothing on the source is modified.
+- `--start-at` / `--end-at` are UTC ISO 8601; the window is half-open `[start, end)`.
+- `--only-sync` picks what to copy, as one or more kinds (default: all): `weather` (Open-Meteo),
+  `radar` (Environment Canada frames), `heater` (the battery-heater log), and `readings` (the
+  readings and their raw register values, regrouped into fresh polls locally).
+- `--dry-run` reports what it would import, per kind, and writes nothing.
+
+Only good rows are copied, database ids are reassigned locally, and a row is skipped if this
+database already has it (matched on a natural key, e.g. the weather period), so `sync` is safe to
+re-run and over overlapping windows. **Both databases must be on the same migration version**
+(`sigen db migrate` on each), or `sync` refuses. When it imports `readings`, it recomputes the
+affected days' totals in `daily_energy` automatically (`daily_energy` itself is never copied).
+
 ### Network
 
 ```

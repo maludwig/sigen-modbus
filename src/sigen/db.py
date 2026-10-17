@@ -169,6 +169,12 @@ def _applied(conn) -> Optional[Dict[int, Tuple[str, str]]]:
     return {v: (n, c) for v, n, c in conn.execute("SELECT version, name, checksum FROM schema_migrations")}
 
 
+def applied_migrations(conn) -> Dict[int, str]:
+    """{version: checksum} for the migrations applied in this schema ({} if migrate has never run). Public accessor
+    for callers (e.g. sigen.sync) that only need the applied set."""
+    return {v: c for v, (n, c) in (_applied(conn) or {}).items()}
+
+
 def _check_applied(applied: Dict[int, Tuple[str, str]], migrations: Sequence[Migration]) -> None:
     known = {m.version: m for m in migrations}
     for version, (name, checksum) in sorted(applied.items()):

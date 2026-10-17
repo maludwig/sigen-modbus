@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, abort, redirect, render_template, request, url_for
 
-from sigen import charts, db
+from sigen import charts, db, sync
 from sigen.config import Config
 from sigen.errors import DatabaseError
 
@@ -472,5 +472,47 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             abort(404)
         what, read = DATA[name]
         return data_response(what, read, {})
+
+    def sync_json(build: Callable):
+        """Run `build(conn)` in a read-only session and return its result as JSON; a database problem is a 503 with
+        the reason, which `sigen sync` surfaces."""
+        conn = None
+        try:
+            conn = db.connect(url)
+            conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+            body = build(conn)
+        except Exception as e:                           # noqa: BLE001 -- report anything as JSON, never a 500 page
+            return Response(json.dumps({"error": str(e)}), status=503, mimetype="application/json",
+                            headers={"Cache-Control": "no-store"})
+        finally:
+            if conn is not None:
+                conn.close()
+        return Response(json.dumps(body), mimetype="application/json", headers={"Cache-Control": "no-store"})
+
+    @app.get("/sync/schema")
+    def sync_schema():
+        """Read-only: this database's applied migrations, for `sigen sync`'s schema guard."""
+        return sync_json(sync.schema_state)
+
+    @app.get("/sync/rows")
+    def sync_rows():
+        """Read-only: good rows of a standalone syncable table in [start, end) (UTC ISO), for `sigen sync`."""
+        table = request.args.get("table", "")
+        if table not in sync.SYNCABLE:
+            abort(404)
+        try:
+            start, end = sync.parse_iso(request.args["start"]), sync.parse_iso(request.args["end"])
+        except (KeyError, sync.SyncError):
+            abort(400)
+        return sync_json(lambda conn: sync.export_rows(conn, table, start, end))
+
+    @app.get("/sync/readings")
+    def sync_readings():
+        """Read-only: the readings cluster (readings + raw_* nested by poll) in [start, end) (UTC ISO)."""
+        try:
+            start, end = sync.parse_iso(request.args["start"]), sync.parse_iso(request.args["end"])
+        except (KeyError, sync.SyncError):
+            abort(400)
+        return sync_json(lambda conn: sync.export_readings(conn, start, end))
 
     return app

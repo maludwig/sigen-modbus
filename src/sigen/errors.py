@@ -87,3 +87,9 @@ class CloudError(SigenError):
     """A problem talking to the Sigen cloud: unreachable, an HTTP/API error, or a token that
     expired or was rejected (re-run `sigen cloud login`, or `sigen cloud refresh`)."""
     exit_code = ExitCode.CONNECTION
+
+
+class SyncError(SigenError):
+    """A problem syncing from a peer database: the peer is unreachable or returned an error, or a
+    request was malformed. (A schema mismatch raises SchemaNotReady instead -- that's a precondition.)"""
+    exit_code = ExitCode.CONNECTION

@@ -203,13 +203,20 @@ PrivateTmp=yes
 WantedBy=multi-user.target
 ```
 
-The dashboard has no login, so keep it on your own network (the README says more).
+The dashboard has no login, so keep it on your own network (the README says more). It also serves
+the read-only `/sync/*` endpoints that `sigen sync` reads, so run it on any machine you want to pull
+data from.
 
 ## More than one poller
 
 Two machines polling the same SigenStor is fine for the device, but each writes its own database,
 and with `--alerts` on both, every alert arrives twice: each has its own cooldown. Give
 `--alerts` to one of them.
+
+When one machine misses a stretch (a reboot, a deploy, an outage), `sigen sync` backfills its gap
+from the other's database — see the README's "Syncing between machines". It reads the other machine
+through that machine's dashboard, so the dashboard must be running on whichever machine you sync
+*from*.
 
 ## MAC following
 

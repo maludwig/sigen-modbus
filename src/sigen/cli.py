@@ -43,7 +43,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from sigen import __version__
+from sigen import __version__, db, sync
 from sigen.cloud import CloudClient
 from sigen.config import CONFIG_ENV, CONFIG_NAME, Config, get_config
 from sigen.control import DEFAULT_JOURNAL, Journal, plan_undo, set_register
@@ -897,6 +897,37 @@ def cmd_cloud_query(args) -> int:
     return ExitCode.OK
 
 
+def cmd_sync(args) -> int:
+    from sigen import daily
+    config = _config(args)
+    local_url = config.require_database_url()
+    start, end = sync.parse_iso(args.start_at), sync.parse_iso(args.end_at)
+    if end <= start:
+        err("--end-at must be after --start-at")
+        return ExitCode.USAGE
+    kinds = sync.resolve_kinds(args.only_sync)
+    conn = db.connect(local_url)
+    try:
+        sync.check_schema(conn, args.url)
+        print(f"Syncing {', '.join(kinds)} from {args.url} for [{sync.iso(start)}, {sync.iso(end)})"
+              + (" -- dry run" if args.dry_run else ""))
+        imported = present = readings_imported = 0
+        for kind in kinds:
+            got, skip = sync.sync_kind(conn, args.url, kind, start, end, args.dry_run, out=print)
+            imported, present = imported + got, present + skip
+            if kind == sync.READINGS_KIND:
+                readings_imported = got
+        if readings_imported and not args.dry_run:        # fresh readings -> the affected days' totals are stale
+            tz = _site_tz(config)
+            print("Recomputing daily totals for the imported days...")
+            daily.update(conn, tz, start.astimezone(tz).date(), end.astimezone(tz).date(), log=print)
+    finally:
+        conn.close()
+    print(f"Done: {imported} imported, {present} already present"
+          + (" (dry run, nothing written)" if args.dry_run else ""))
+    return ExitCode.OK
+
+
 # ---------- parser ----------
 def build_parser() -> argparse.ArgumentParser:
     net = _network_parent()
@@ -1068,6 +1099,25 @@ def build_parser() -> argparse.ArgumentParser:
     clq.add_argument("--device-type", type=int, default=4, help="2 AIO, 3 inverter, 4 battery, 8 gateway (default: 4)")
     clq.add_argument("--json", action="store_true", help="print the raw JSON")
     clq.set_defaults(func=cmd_cloud_query)
+
+    sy = sub.add_parser("sync", formatter_class=fmt, epilog=EXIT_CODE_HELP,
+                        help="backfill gaps in this database from a peer machine's",
+                        description="Pull a time window of rows from a peer's dashboard (its read-only /sync/* "
+                                    "endpoints) and insert the ones missing locally -- for filling gaps left by an "
+                                    "outage. Only good rows, never duplicates (safe to re-run), and identity ids are "
+                                    "reassigned locally. Both databases must be on the same migrations, or it "
+                                    "refuses. Window is [start, end), UTC.")
+    sy.add_argument("--url", required=True, metavar="URL",
+                    help="the peer's dashboard base URL, e.g. http://othermachine:8050")
+    sy.add_argument("--start-at", required=True, metavar="ISO",
+                    help="window start, UTC ISO 8601, inclusive (e.g. 2026-10-17T16:02:15Z)")
+    sy.add_argument("--end-at", required=True, metavar="ISO", help="window end, UTC ISO 8601, exclusive")
+    sy.add_argument("--only-sync", nargs="+", metavar="KIND",
+                    help=f"which kinds to sync (default: all); choices: {', '.join(sorted(sync.KINDS))}")
+    sy.add_argument("--dry-run", action="store_true", help="report what would be imported; write nothing")
+    _config_option(sy, "the LOCAL database URL to write into, and site.timezone (to recompute daily totals after a "
+                       "readings sync)")
+    sy.set_defaults(func=cmd_sync)
 
     pl = sub.add_parser("poll", parents=[net], formatter_class=fmt, epilog=EXIT_CODE_HELP,
                         help="read everything on a schedule and store it in the database (read-only)",
