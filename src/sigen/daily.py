@@ -10,7 +10,10 @@ catches up on any that ended while it wasn't running. Recomputing a day replaces
 import datetime
 from typing import Callable, List, Optional
 
+import psycopg
+
 from sigen import charts, db
+from sigen.config import Array, Site
 
 METHOD = 2                     # how a day is computed (sigen.charts.day_energy): bump it when that changes.
                                # 1: the device's daily counters for solar, house, battery; 2: lifetime counters only
@@ -25,7 +28,7 @@ FLOWS = {("Solar", "Load"): "solar_to_load_kwh", ("Solar", "Battery"): "solar_to
 PLANT = 247
 
 
-def finished_days(conn, tz) -> List[datetime.date]:
+def finished_days(conn: psycopg.Connection, tz: datetime.tzinfo) -> List[datetime.date]:
     """Every local day from the first successful plant reading's to the one before the last's: each has a reading
     after its midnight."""
     first, last = conn.execute("SELECT min(started_at), max(started_at) FROM readings "
@@ -36,10 +39,11 @@ def finished_days(conn, tz) -> List[datetime.date]:
     return [day + datetime.timedelta(days=k) for k in range((last_day - day).days)]
 
 
-def store_day(conn, day: datetime.date, tz, site=None, array=None) -> Optional[dict]:
+def store_day(conn: psycopg.Connection, day: datetime.date, tz: datetime.tzinfo, site: Optional[Site] = None,
+              array: Optional[Array] = None) -> Optional[dict]:
     """Compute `day` and store it (replacing its row, if any). Returns the row stored, or None if the day has no
     plant readings. With `site` and `array`, also store the day's clear-sky model energy (clear_sky_kwh)."""
-    start =datetime.datetime.combine(day, datetime.time(), tz)
+    start = datetime.datetime.combine(day, datetime.time(), tz)
     end = start + datetime.timedelta(days=1)   # wall-clock arithmetic: the next local midnight, DST or not
     with db.errors_as(f"computing the energy of {day}"):
         e = charts.day_energy(conn, start, end)
@@ -62,6 +66,7 @@ def store_day(conn, day: datetime.date, tz, site=None, array=None) -> Optional[d
 
 
 def describe(row: dict) -> str:
+    """One line for the log about a row store_day() returned: kWh with 2 decimals, "-" for a counter not read."""
     kwh = lambda column: "-" if row[column] is None else f"{row[column]:.2f}"
     return (f"{row['day']}: solar {kwh('solar_kwh')}/{kwh('clear_sky_kwh')} clear-sky, "
             f"house {kwh('load_kwh')}, grid in {kwh('grid_imported_kwh')} / "
@@ -69,8 +74,9 @@ def describe(row: dict) -> str:
             f"{kwh('battery_discharged_kwh')} kWh ({row['covered_hours']:.1f} h of readings)")
 
 
-def update(conn, tz, first: Optional[datetime.date] = None, last: Optional[datetime.date] = None,
-           site=None, array=None, log: Callable[[str], None] = lambda msg: None) -> List[datetime.date]:
+def update(conn: psycopg.Connection, tz: datetime.tzinfo, first: Optional[datetime.date] = None,
+           last: Optional[datetime.date] = None, site: Optional[Site] = None, array: Optional[Array] = None,
+           log: Callable[[str], None] = lambda msg: None) -> List[datetime.date]:
     """Store finished days. Without `first` and `last`: those not stored yet. With either: every finished day in
     [first, last], recomputed. With `site` and `array`, each day's clear-sky model energy too. Returns the days
     stored; logs one line each."""
@@ -90,7 +96,7 @@ def update(conn, tz, first: Optional[datetime.date] = None, last: Optional[datet
     return done
 
 
-def all_time_energy(conn) -> Optional["charts.DayEnergy"]:
+def all_time_energy(conn: psycopg.Connection) -> Optional["charts.DayEnergy"]:
     """Every finished day in daily_energy added up, as one charts.DayEnergy: the totals and the flows summed, the
     first and last readings spanned, covered_hours summed -- for an all-time Sankey. None if the table is empty.
     (The table stores each day once so this is a single SUM; see the module docstring.) A total summed to NULL
