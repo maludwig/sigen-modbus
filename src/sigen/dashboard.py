@@ -223,13 +223,14 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
     @app.get("/all-time")
     def all_time():
         """Every finished day in daily_energy added up: one Sankey of where all the energy has gone (static/my_sankey.js)."""
-        energy = sankey = error = None
+        energy = sankey = error = pv = None
         conn = None
         try:
             conn = db.connect(url)
             with db.errors_as("reading the all-time energy"):
                 conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
                 energy = daily_mod.all_time_energy(conn)
+                pv = charts.pv_history(conn, tz)
         except DatabaseError as e:
             error = f"database: {e}"
         finally:
@@ -237,8 +238,8 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
                 conn.close()
         if energy is not None:
             sankey = charts.sankey(energy)
-        return render_template("all_time.html", error=error, tz=str(tz), energy=energy, sankey=sankey,
-                               drawn=datetime.datetime.now(tz),
+        return render_template("all_time.html", error=error, tz=str(tz), energy=energy, sankey=sankey, pv=pv,
+                               uplot=UPLOT, drawn=datetime.datetime.now(tz),
                                span=(f"{energy.first.astimezone(tz):%Y-%m-%d} to {energy.last.astimezone(tz):%Y-%m-%d}"
                                      if energy is not None else ""))
 

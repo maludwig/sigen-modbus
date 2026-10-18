@@ -4,17 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>sigen: all-time totals</title>
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 0 auto; padding: 12px 16px; max-width: 1150px;
-           background: #fff; color: #222; }
-    nav a { display: inline-block; margin: 0 10px 6px 0; padding: 4px 10px; border: 1px solid #bbb;
-            border-radius: 6px; text-decoration: none; color: #222; }
-    nav a.on { background: #222; color: #fff; border-color: #222; }
-    h1 { font-size: 1.2em; margin: 6px 0; }
-    .meta { color: #666; font-size: 0.85em; }
-    .error { color: #a00; }
-    #sankey { width: 100%; display: block; margin: 12px 0; }
-  </style>
+  {% if pv %}<link rel="stylesheet" href="{{ uplot }}.min.css">{% endif %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
 </head>
 <body>
   <nav>
@@ -34,6 +25,12 @@
       increase; the bands are estimated from the 15-second power readings (solar serves the house first, then the
       battery, then the grid; the battery and the grid serve the house first), so they add up to a little less than
       the totals &mdash; the inverter's losses and any time the poller missed.</p>
+    {% if pv %}
+      <h2>Solar produced each day</h2>
+      <div id="pv"></div>
+      <p class="meta">Each finished day's solar generation (kWh); best {{ "%.1f"|format(pv.peak_kwh) }} kWh on
+        {{ pv.peak_day }}. The all-time Sankey below adds these up with the rest.</p>
+    {% endif %}
     <canvas id="sankey"></canvas>
     {% if sankey.dropped %}
       <p class="meta">Not drawn: {{ sankey.dropped|length }} flow{{ "s" if sankey.dropped|length > 1 }} under 0.5 %
@@ -50,6 +47,31 @@
       redraw();
       window.addEventListener("resize", () => { if (!pending) { pending = true; requestAnimationFrame(redraw); } });
     </script>
+    {% if pv %}
+      <script src="{{ uplot }}.iife.min.js"></script>
+      <script>
+        const pvEl = document.getElementById("pv");
+        const pvData = [{{ pv.t|tojson }}, {{ pv.kwh|tojson }}];
+        const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const fmtDay = (v) => { const d = new Date(v * 1000); return MONTHS[d.getMonth()] + " " + d.getDate(); };
+        const pvOpts = () => ({
+          width: pvEl.clientWidth, height: 220, cursor: {y: false},
+          scales: {y: {range: (u, lo, hi) => [0, hi > 0 ? hi * 1.05 : 1]}},
+          series: [{label: "Day", value: (u, v) => v == null ? "--" : fmtDay(v)},
+                   {label: "Solar", stroke: "#d9af1f", width: 1.6, fill: "rgba(232,197,71,0.18)",
+                    value: (u, v) => v == null ? "--" : v.toFixed(1) + " kWh"}],
+          axes: [{space: 80, values: (u, splits) => splits.map(fmtDay)},
+                 {label: "Solar (kWh/day)"}],
+        });
+        const pvPlot = new uPlot(pvOpts(), pvData, pvEl);
+        let pvPending = false;
+        window.addEventListener("resize", () => {
+          if (!pvPending) { pvPending = true; requestAnimationFrame(() => {
+            pvPending = false; pvPlot.setSize({width: pvEl.clientWidth, height: 220});
+          }); }
+        });
+      </script>
+    {% endif %}
   {% endif %}
 </body>
 </html>

@@ -5,35 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>sigen: {{ description or "charts" }}</title>
   <link rel="stylesheet" href="{{ uplot }}.min.css">
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 0 auto; padding: 12px 16px; max-width: 1150px;
-           background: #fff; color: #222; }
-    nav { position: sticky; top: 0; z-index: 100; background: #fff; padding: 8px 0 2px; margin: 0 -2px;
-          border-bottom: 1px solid #e4e4e4; }     /* the window buttons follow you down the page */
-    nav select, nav input { font: inherit; padding: 4px 6px; margin: 0 8px 6px 0; border: 1px solid #bbb;
-                            border-radius: 6px; background: #fff; color: #222; }
-    #day-picker a { padding: 4px 8px; margin-right: 6px; }
-    button.help { font: italic bold 12px Georgia, serif; width: 18px; height: 18px; padding: 0; margin-left: 4px;
-                  border: 1px solid #999; border-radius: 50%; background: #fff; color: #666; cursor: pointer;
-                  vertical-align: 2px; }
-    button.help[aria-expanded="true"] { background: #666; color: #fff; }
-    .note { margin: 2px 0 6px; }
-    .mouse-only { display: none; }
-    @media (hover: hover) and (pointer: fine) { .mouse-only { display: inline; } }   /* not on a phone */
-    /* uPlot's legend: its Time row and each value follow the mouse; with no mouse they'd only ever say "--", so a
-       phone gets just each line's colour and name (a tap still hides or shows the line) */
-    @media not all and (hover: hover) and (pointer: fine) {
-      .u-legend .u-series:first-child, .u-legend .u-value { display: none; }
-    }
-    nav a { display: inline-block; margin: 0 10px 6px 0; padding: 4px 10px; border: 1px solid #bbb;
-            border-radius: 6px; text-decoration: none; color: #222; }
-    nav a.on { background: #222; color: #fff; border-color: #222; }
-    h1 { font-size: 1.2em; margin: 6px 0; }
-    h2 { font-size: 1em; margin: 18px 0 4px; }
-    .meta { color: #666; font-size: 0.85em; }
-    .error { color: #a00; }
-    .plot { width: 100%; }
-  </style>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
 </head>
 <body>
   <nav>
@@ -77,7 +49,7 @@
     <h2>Where the energy went (the lifetime counters; the bands from the 15-second power readings)
       <button class="help" aria-controls="note-sankey" aria-expanded="false" title="About this chart">i</button></h2>
     <div class="meta note" id="note-sankey" hidden>Loading…</div>
-    <canvas id="sankey" style="width: 100%; display: block"></canvas>
+    <canvas id="sankey"></canvas>
     {% for name, title in charts.items() %}
       <h2>{{ title }}
         <button class="help" aria-controls="note-{{ name }}" aria-expanded="false" title="About this chart">i</button></h2>

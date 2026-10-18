@@ -614,6 +614,30 @@ def sankey(e: DayEnergy) -> dict:
             "dropped": dropped, "cutoff": round(cutoff, 4)}
 
 
+# ---------- the all-time page's day-by-day line ----------
+@dataclass
+class DailyLine:
+    """A day-by-day series for a uPlot line on the all-time page: x = seconds since the epoch (local noon of each day),
+    y = the value (kWh). Plus the best day, for the caption."""
+    t: List[int]
+    kwh: List[float]
+    peak_day: str
+    peak_kwh: float
+
+
+def pv_history(conn, tz, column: str = "solar_kwh") -> Optional[DailyLine]:
+    """Each finished day's solar generation (daily_energy.`column`, kWh) as a uPlot series for the all-time page. None
+    with fewer than two days. Each day is stamped at local noon, so its date reads the same in any browser's zone."""
+    rows = [(d, float(v)) for d, v in conn.execute(
+        f"SELECT day, {column} FROM daily_energy WHERE {column} IS NOT NULL ORDER BY day").fetchall()]
+    if len(rows) < 2:
+        return None
+    noon = datetime.time(12)
+    t = [int(datetime.datetime.combine(d, noon, tz).timestamp()) for d, _ in rows]
+    peak_day, peak_kwh = max(rows, key=lambda r: r[1])
+    return DailyLine(t, [v for _, v in rows], peak_day.strftime("%b ") + str(peak_day.day), peak_kwh)
+
+
 # ---------- strips: rows of coloured bars under the string-power chart ----------
 @dataclass
 class Strip:

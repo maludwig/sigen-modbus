@@ -332,6 +332,16 @@ def page_env(client, path):
     return json.loads(re.search(r"LiveCharts\.start\((.*)\);", page).group(1))
 
 
+def test_dashboard_css_is_served():
+    client = dashboard.create_app(Config(database_url="postgresql://u:x@127.0.0.1:1/x", origin="t"),
+                                  launcher=None).test_client()
+    css = client.get("/static/dashboard.css")
+    assert css.status_code == 200 and "css" in css.mimetype
+    body = css.get_data(as_text=True)
+    assert "position: sticky" in body                                 # the window nav follows you down
+    assert ".u-legend .u-series:first-child" in body                  # the legend's "--" hidden on phones
+
+
 def test_the_page(hangs_up):
     client = dashboard.create_app(Config(database_url=f"postgresql://u:x@127.0.0.1:{hangs_up}/x", origin="t"),
                                   launcher=None).test_client()
@@ -355,8 +365,7 @@ def test_the_page(hangs_up):
     assert set(past["data"]) == set(dashboard.CHARTS) | {"string_power_strips", "sankey"}   # and the strips, Sankey
     assert past["data"]["sankey"] == "/data/sankey.json?day=2026-10-01" and "/static/my_sankey.js" in html
     assert html.index('id="sankey"') < html.index('id="plot-string_voltage"')   # at the top
-    assert "position: sticky" in html and '<span class="mouse-only">Drag across' in html   # the hint: not on phones
-    assert ".u-legend .u-series:first-child, .u-legend .u-value { display: none; }" in html   # nor the legend's "--"
+    assert "/static/dashboard.css" in html and '<span class="mouse-only">Drag across' in html   # the hint: not on phones
     assert (past["live"], past["keep"], past["today"]) == (False, None, False)   # a past day: never topped up
     six = page_env(client, "/?hours=6")
     assert (six["live"], six["keep"], six["today"]) == (True, 21600.0, False)   # a sliding window
@@ -735,6 +744,18 @@ def test_all_time_page(config, conn):
 
 def test_all_time_page_without_days(config):
     assert "No finished days yet" in app_for(config).get("/all-time").get_data(as_text=True)
+
+
+def test_pv_history(conn):
+    _insert_daily_energy(conn, datetime.date(2026, 10, 6), {"solar": 12.0, "load": 8.0}, _flows())
+    _insert_daily_energy(conn, datetime.date(2026, 10, 7), {"solar": 30.0, "load": 9.0}, _flows())
+    _insert_daily_energy(conn, datetime.date(2026, 10, 8), {"solar": 18.0, "load": 7.0}, _flows())
+    line = charts.pv_history(conn, TZ)
+    assert line.kwh == [12.0, 30.0, 18.0] and len(line.t) == 3
+    assert line.peak_kwh == 30.0 and line.peak_day == "Oct 7"
+    assert line.t[0] == int(datetime.datetime(2026, 10, 6, 12, tzinfo=TZ).timestamp())   # stamped at local noon
+    conn.execute("DELETE FROM daily_energy WHERE day > %s", (datetime.date(2026, 10, 6),))
+    assert charts.pv_history(conn, TZ) is None                                            # fewer than two days
 
 
 def test_measured_strip():
