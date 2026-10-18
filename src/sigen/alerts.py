@@ -30,11 +30,14 @@ import sys
 import threading
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+
+import psycopg
 
 from sigen import battery_watch as bw
-from sigen import db, glitches, ntfy
+from sigen import db, glitches, ntfy, weather
 from sigen.config import Alerts
+from sigen.poll import PollResult
 
 SPAN = datetime.timedelta(hours=6)  # history the detectors see (a plateau needs 2 h)
 COOLDOWN = datetime.timedelta(hours=1)  # per kind, between notifications
@@ -47,12 +50,15 @@ COLUMN_SET = frozenset(bw.COLUMNS)
 
 @dataclass(frozen=True)
 class Notice:
+    """How one kind of alert looks on the phone: its ntfy title, priority and
+    tags."""
+
     title: str
     priority: str  # ntfy: min, low, default, high, urgent (breaks through Do Not Disturb)
-    tags: Tuple[str, ...]  # ntfy shows emoji short codes as icons
+    tags: tuple[str, ...]  # ntfy shows emoji short codes as icons
 
 
-NOTICES: Dict[str, Notice] = {
+NOTICES: dict[str, Notice] = {
     "fault": Notice("The SigenStor reports a fault", "urgent", ("rotating_light",)),
     "unreachable": Notice("Lost contact with the SigenStor", "high", ("satellite",)),
     "alarm": Notice("SigenStor alarm", "high", ("warning",)),  # each alarm bit brings its own title
@@ -71,29 +77,33 @@ LOGGED_GLITCHES = {glitches.PV_ZERO}  # sure glitches logged in alert_log, never
 REACHABLE = Notice("In contact with the SigenStor again", "default", ("white_check_mark",))  # logged, never sent
 
 
-def stamp(t: datetime.datetime, tz) -> str:
+def stamp(t: datetime.datetime, tz: datetime.tzinfo) -> str:
     """ISO 8601 in local time, to the second, with the offset: 2026-10-12T19:49:30-06:00."""
     return t.astimezone(tz).isoformat(timespec="seconds")
 
 
 def now_utc() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+    """The current time, timezone-aware in UTC. Unused in this module."""
+    return datetime.datetime.now(datetime.UTC)
 
 
 class Buffer:
     """The last `span` of rows (time, {view column: value}) and air temperatures (time, °C), both ascending. Rows
     come from poll's thread; air from the weather thread, hence the lock."""
 
-    def __init__(self, span: datetime.timedelta = SPAN):
+    def __init__(self, span: datetime.timedelta = SPAN) -> None:
         self.span = span
-        self._rows: deque = deque()
-        self._air: deque = deque()
+        self._rows: deque[tuple[datetime.datetime, dict[str, float]]] = deque()
+        self._air: deque[tuple[datetime.datetime, float]] = deque()
         self._lock = threading.Lock()
 
     def __len__(self) -> int:
+        """How many polls (rows) the buffer holds."""
         return len(self._rows)
 
-    def add_row(self, t: datetime.datetime, values: Dict[str, float]) -> None:
+    def add_row(self, t: datetime.datetime, values: dict[str, float]) -> None:
+        """Append one poll's values, dropping rows older than `span` before
+        `t`; a `t` not after the newest row is ignored."""
         if self._rows and t <= self._rows[-1][0]:
             return  # keep times ascending (a Window insists)
         self._rows.append((t, values))
@@ -103,7 +113,9 @@ class Buffer:
             while len(self._air) > 1 and self._air[1][0] <= t - self.span:
                 self._air.popleft()
 
-    def add_air(self, t: datetime.datetime, value: Optional[float]) -> None:
+    def add_air(self, t: datetime.datetime, value: float | None) -> None:
+        """Add an outside air temperature (°C) for the 15-minute period at `t`;
+        None is ignored, an older `t` too. Safe from the weather thread."""
         if value is None:
             return
         with self._lock:
@@ -113,6 +125,8 @@ class Buffer:
                 self._air.append((t, float(value)))
 
     def window(self) -> bw.Window:
+        """The buffer as a battery_watch Window: every bw.COLUMNS column (None
+        where a row lacks it) plus bw.AIR, interpolated onto the row times."""
         rows = list(self._rows)
         with self._lock:
             air = list(self._air)
@@ -122,10 +136,12 @@ class Buffer:
         return bw.Window(times, columns)
 
 
-def poll_values(results, units: Dict[int, str]) -> Tuple[Optional[datetime.datetime], Dict[str, float]]:
+def poll_values(
+    results: dict[int, PollResult], units: dict[int, str]
+) -> tuple[datetime.datetime | None, dict[str, float]]:
     """One poll's results (poll.PollResult per unit) -> (the plant reading's start time, {view column: value after
     the gain}) for the columns the detectors read. (None, {}) if no unit gave values."""
-    values: Dict[str, float] = {}
+    values: dict[str, float] = {}
     plant = [r for u, r in results.items() if units.get(u) == "plant"]
     when = plant[0].started_at if plant else min((r.started_at for r in results.values()), default=None)
     for result in results.values():
@@ -145,19 +161,22 @@ class Sender:
     def __init__(
         self,
         alerts: Alerts,
-        store=None,
-        out=print,
-        err=lambda msg: print(msg, file=sys.stderr),
+        store: weather.Store | None = None,
+        out: Callable[[str], None] = print,
+        err: Callable[[str], None] = lambda msg: print(msg, file=sys.stderr),
         post: Callable[..., ntfy.Attempt] = ntfy.post,
-    ):
+    ) -> None:
         self.alerts, self._store, self._out, self._err, self._post = alerts, store, out, err, post
-        self._queue: queue.Queue = queue.Queue()
+        self._queue: queue.Queue[tuple[str, str, Notice, str] | None] = queue.Queue()
         self._thread = threading.Thread(target=self._loop, name="sigen-alerts", daemon=True)
 
     def start(self) -> None:
+        """Start the sender's daemon thread."""
         self._thread.start()
 
     def send(self, kind: str, notice: Notice, message: str) -> None:
+        """Queue it to be posted to ntfy and logged in alert_log; `kind` is
+        the kind or key it's logged under."""
         self._queue.put(("send", kind, notice, message))
 
     def suppress(self, kind: str, notice: Notice, message: str, why: str = "cooldown") -> None:
@@ -171,6 +190,8 @@ class Sender:
             self._thread.join(wait)
 
     def _loop(self) -> None:
+        """The thread: take queued alerts in order until stop's None, post or
+        suppress each and log it; a failure is a warning, never fatal."""
         while True:
             item = self._queue.get()
             if item is None:
@@ -207,27 +228,27 @@ class Watcher:
         cooldown: datetime.timedelta = COOLDOWN,
         recent: datetime.timedelta = RECENT,
         span: datetime.timedelta = SPAN,
-        detect: Optional[Callable[[bw.Window], List[bw.Event]]] = None,
-        tz=None,
+        detect: Callable[[bw.Window], list[bw.Event]] | None = None,
+        tz: datetime.tzinfo | None = None,
         unreachable_polls: int = UNREACHABLE_POLLS,
-        out=print,
-        err=lambda msg: print(msg, file=sys.stderr),
-    ):
+        out: Callable[[str], None] = print,
+        err: Callable[[str], None] = lambda msg: print(msg, file=sys.stderr),
+    ) -> None:
         self.buffer = Buffer(span)
         self._sender, self._cooldown, self._recent = sender, cooldown, recent
         self._detect = detect or bw.detect_all
         self.tz = tz or datetime.datetime.now().astimezone().tzinfo  # for the timestamps in messages
         self._unreachable_polls = unreachable_polls
         self._out, self._err = out, err
-        self.last_sent: Dict[Optional[str], datetime.datetime] = {}  # kind or key -> last notification
-        self._seen_until: Dict[str, datetime.datetime] = {}  # kind or key -> where its last event got to
-        self._warned: Dict[str, datetime.datetime] = {}
+        self.last_sent: dict[str | None, datetime.datetime] = {}  # kind or key -> last notification
+        self._seen_until: dict[str, datetime.datetime] = {}  # kind or key -> where its last event got to
+        self._warned: dict[str, datetime.datetime] = {}
         self.failed_polls = 0  # in a row, no unit giving a reading
-        self.outage_start: Optional[datetime.datetime] = None
+        self.outage_start: datetime.datetime | None = None
         self.outage_alerted = False  # this outage's "unreachable" was raised
 
     # ---------- start / stop ----------
-    def start(self, conn, units: Dict[int, str], now: datetime.datetime) -> None:
+    def start(self, conn: psycopg.Connection, units: dict[int, str], now: datetime.datetime) -> None:
         """Fill the buffer from the database and learn when each kind was last sent, and whether an outage is
         going on; then start the sender."""
         try:
@@ -242,7 +263,7 @@ class Watcher:
             self._warn(f"alerts start without history: {type(e).__name__}: {e}", now)
         self._sender.start()
 
-    def preload_outage(self, conn) -> None:
+    def preload_outage(self, conn: psycopg.Connection) -> None:
         """The polls in a row at the end of the readings table that got no reading at all, so a restart in the middle
         of an outage carries on counting, and doesn't alert twice: the outage was alerted if an "unreachable" was
         sent after its first failed poll."""
@@ -256,12 +277,18 @@ class Watcher:
         self.outage_alerted = bool(failed) and sent is not None and sent >= start
 
     def stop(self) -> None:
+        """Stop the sender, letting its queued alerts go out first."""
         self._sender.stop()
 
-    def preload(self, conn, units: Dict[int, str], now: datetime.datetime) -> None:
+    def preload(self, conn: psycopg.Connection, units: dict[int, str], now: datetime.datetime) -> None:
+        """Fill the buffer with the unflagged polls of the last `span` before
+        `now` (plant joined to inverter) and the 15-minute air temperatures
+        from an hour before that. `units` must name a "plant" unit."""
         from psycopg import sql
 
-        plant = next(u for u, d in units.items() if d == "plant")
+        plant = next((u for u, d in units.items() if d == "plant"), None)
+        if plant is None:
+            raise ValueError(f"no plant unit among {sorted(units)}")
         inverter = next((u for u, d in units.items() if d == "inverter"), -1)
         plant_cols = [c for c in bw.COLUMNS if c.startswith("plant_")]
         inverter_cols = [c for c in bw.COLUMNS if c.startswith("inverter_")]
@@ -291,11 +318,17 @@ class Watcher:
             self.buffer.add_row(t, {n: float(v) for n, v in zip(names, values) if v is not None})
 
     # ---------- every poll ----------
-    def add_air(self, t: datetime.datetime, value: Optional[float]) -> None:
+    def add_air(self, t: datetime.datetime, value: float | None) -> None:
+        """Called from the weather thread with each 15-minute Open-Meteo air
+        temperature (°C, or None); passed to the buffer."""
         self.buffer.add_air(t, value)
 
     def observe(
-        self, results, units: Dict[int, str], now: datetime.datetime, glitch: Optional[glitches.Verdict] = None
+        self,
+        results: dict[int, PollResult],
+        units: dict[int, str],
+        now: datetime.datetime,
+        glitch: glitches.Verdict | None = None,
     ) -> None:
         """After a poll is stored: add it to the buffer (or, if poll flagged it as a glitch, leave it out and, for a
         sure glitch, alert), count it towards an outage, and check. Never raises."""
@@ -321,7 +354,7 @@ class Watcher:
             return "logged"
         return self._raise(ident, NOTICES["glitch"], summary, start, now)
 
-    def reachability(self, results, now: datetime.datetime) -> Optional[str]:
+    def reachability(self, results: dict[int, PollResult], now: datetime.datetime) -> str | None:
         """Count polls in which no unit gave a reading. At unreachable_polls in a row, raise "unreachable" (once per
         outage); on the first reading after an alerted outage, log "reachable" without sending it. Returns
         "unreachable", "reachable" or None (for tests)."""
@@ -357,9 +390,9 @@ class Watcher:
         )
         return "unreachable"
 
-    def check(self, now: datetime.datetime) -> List[Tuple[str, bw.Event]]:
+    def check(self, now: datetime.datetime) -> list[tuple[str, bw.Event]]:
         """Run the detectors; returns [("sent" | "suppressed", event)] for the alerts raised (for tests)."""
-        raised = []
+        raised: list[tuple[str, bw.Event]] = []
         for e in sorted(self._detect(self.buffer.window()), key=lambda e: (e.start, e.kind)):
             if e.end < now - self._recent:
                 continue  # history
@@ -386,6 +419,8 @@ class Watcher:
         return "sent"
 
     def _warn(self, message: str, now: datetime.datetime) -> None:
+        """Print "warning: <message>" to err, the same message at most once
+        per WARN_EVERY (by `now`, not the wall clock)."""
         last = self._warned.get(message)
         if last is None or now - last >= WARN_EVERY:
             self._warned[message] = now

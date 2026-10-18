@@ -46,7 +46,7 @@ def test_parse_window():
     denver = ZoneInfo("America/Denver")  # (tzdata 2026 has Edmonton on UTC−6 all year from 2026: no change there)
     after_dst = datetime.datetime(2026, 11, 2, 10, 0, tzinfo=denver)  # daylight saving ended on 11-01, 02:00
     start, end, _, _ = dashboard.parse_window({"hours": "72"}, denver, after_dst)
-    utc = datetime.timezone.utc
+    utc = datetime.UTC
     assert end.astimezone(utc) - start.astimezone(utc) == datetime.timedelta(hours=72)  # real hours, not wall clock
     assert start == datetime.datetime(2026, 10, 30, 11, 0, tzinfo=denver)  # 11:00 MDT = 10:00 MST + 72 h
     for bad in (
@@ -608,7 +608,7 @@ def test_the_clear_sky_model_ends_now_or_half_an_hour_after_sunset():
     assert dashboard.model_end(small_hours, site) == yesterday + half  # the last sunset was yesterday's
     assert dashboard.model_end(sunset + datetime.timedelta(minutes=10), site) == sunset + datetime.timedelta(minutes=10)
     north = Site(80.0, 0.0, "UTC")  # the midnight sun: no sunset
-    assert dashboard.model_end(datetime.datetime(2026, 6, 21, 23, 0, tzinfo=datetime.timezone.utc), north).hour == 23
+    assert dashboard.model_end(datetime.datetime(2026, 6, 21, 23, 0, tzinfo=datetime.UTC), north).hour == 23
 
 
 def test_satellite_command_rounds_the_end_up():
@@ -625,6 +625,30 @@ def test_data_when_the_database_is_down(hangs_up):
     r = client.get("/data/load_energy.json")
     assert r.status_code == 503 and r.get_json()["error"].startswith("database:")  # the page shows it under the chart
     assert "s3cret" not in r.get_data(as_text=True)
+
+
+# ---------- /status: a health check ----------
+def test_status_reports_the_last_poll(seeded, config):
+    r = app_for(config).get("/status")
+    assert r.status_code == 200 and r.headers["Cache-Control"] == "no-store"
+    last = T0 + datetime.timedelta(minutes=40)  # the seeded failed reading is the newest: a poll all the same
+    assert r.get_json() == {"status": "ok", "db": "online", "last_poll": dashboard.iso_utc(last)}
+
+
+def test_status_before_the_first_poll(run, config):
+    run("db", "migrate", "--config", config)
+    r = app_for(config).get("/status")
+    assert r.status_code == 200 and r.get_json() == {"status": "ok", "db": "online", "last_poll": None}
+
+
+def test_status_when_the_database_is_down(hangs_up):
+    client = dashboard.create_app(
+        Config(database_url=f"postgresql://u:s3cret@127.0.0.1:{hangs_up}/x", origin="t"), launcher=None
+    ).test_client()
+    r = client.get("/status")
+    body = r.get_json()
+    assert r.status_code == 503 and body["status"] == "error" and body["db"] == "offline"
+    assert body["last_poll"] is None and "s3cret" not in r.get_data(as_text=True)
 
 
 def test_string_voltage_as_json(seeded, monkeypatch):
@@ -1018,6 +1042,31 @@ def test_pv_history(conn):
     assert charts.pv_history(conn, TZ) is None  # fewer than two days
 
 
+def test_pg_zone_gets_a_fixed_offset_the_right_way_round(conn):
+    """Postgres reads str(timezone(-6 h)), "UTC-06:00", as a POSIX zone: six hours EAST. The dashboard's fallback zone
+    (no site in the config) is such a fixed offset, so the all-time strips' days came out half a day off."""
+    fixed = datetime.timezone(datetime.timedelta(hours=-6))
+    instant = datetime.datetime(2026, 10, 7, 5, 0, tzinfo=datetime.UTC)  # 23:00 on the 6th at UTC-6
+    for tz in (TZ, fixed):
+        sql = "SELECT (%s::timestamptz AT TIME ZONE %s)::date"
+        assert conn.execute(sql, (instant, charts._pg_zone(tz))).fetchone()[0] == datetime.date(2026, 10, 6), tz
+
+
+def test_counters_leave_out_a_reading_without_the_house_register(run, config, conn):
+    run("db", "migrate", "--config", config)
+    house = BY_NAME[charts.HOUSE].address
+    picked = []
+    for k, house_kwh in enumerate([100.0, None, 101.5]):  # the middle reading predates the house register, say
+        t = T0 + datetime.timedelta(minutes=15 * k)
+        values = [v for v in plant_values(10.0 + k, 5.0, house_kwh or 0.0, 1.0, 0.2, 2.0) if house_kwh or v[0] != house]
+        rid = db.insert_reading(
+            conn, ip="127.0.0.1", unit_id=247, poll_id=db.next_poll_id(conn), started_at=t, ended_at=t, values=values
+        )
+        picked.append((rid, t))
+    counters = charts._counters_at(conn, NAMES, picked)  # was a KeyError
+    assert counters.ids == [picked[0][0], picked[2][0]] and counters.times == [picked[0][1], picked[2][1]]
+
+
 def test_all_time_strips(conn):
     for day, solar in [(datetime.date(2026, 10, 6), 10.0), (datetime.date(2026, 10, 7), 40.0)]:
         _insert_daily_energy(conn, day, {"solar": solar, "load": 8.0}, _flows())
@@ -1038,7 +1087,7 @@ def test_measured_strip():
     no reading (hatched), 1.5× (white→orange), and 3× (clamped to full orange)."""
     import pandas as pd
 
-    base = datetime.datetime(2026, 10, 5, 12, 0, tzinfo=datetime.timezone.utc)
+    base = datetime.datetime(2026, 10, 5, 12, 0, tzinfo=datetime.UTC)
     m = lambda mins: base + datetime.timedelta(minutes=mins)
     idx = pd.date_range(base, periods=75, freq="1min", tz="UTC")  # five 15-min blocks
     cols = list(charts.STRINGS)
@@ -1064,7 +1113,7 @@ def test_satellite_shade_round_trip(conn):
     """A ShadeSeries stored and read back: dedup (one good row per scan), NaN <-> NULL, an error row isn't a scan,
     and the result drives satellite_strips."""
     nan = float("nan")
-    t0 = datetime.datetime(2026, 10, 9, 20, 0, tzinfo=datetime.timezone.utc)
+    t0 = datetime.datetime(2026, 10, 9, 20, 0, tzinfo=datetime.UTC)
     t1 = t0 + datetime.timedelta(minutes=10)
     series = goes_shade.ShadeSeries(
         times=[t0, t1],

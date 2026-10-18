@@ -15,8 +15,6 @@ Tables (created by the numbered SQL files in sigen/migrations/):
     radar_frames       Environment Canada radar at the site, one good row per 6-minute frame
     alert_log          every notification raised (sigen.ntfy): sent or suppressed, and what ntfy answered
     schema_migrations  which migrations have been applied, with checksums
-
-psycopg is imported only inside this module's functions, so the rest of sigen works without it.
 """
 
 import datetime
@@ -25,11 +23,16 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import resources
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from collections.abc import Callable, Iterable, Iterator, Sequence
+
+import psycopg
 
 from sigen import __version__
 from sigen.errors import DatabaseError, SchemaNotReady
+from sigen.goes_shade import ShadeSeries
+from sigen.ntfy import Attempt
 from sigen.registers import ALL_REGISTERS, BY_NAME, Register, decode_int
+from sigen.weather import RadarRow, WeatherRow
 
 STORED_REGISTERS = [r for r in ALL_REGISTERS if r.stored]  # what register_meta describes
 BY_ADDRESS = {r.address: r for r in STORED_REGISTERS}
@@ -90,12 +93,8 @@ def redact(url: str) -> str:
     return re.sub(r"(password\s*=\s*)('[^']*'|[^&\s]+)", r"\1***", url)  # password=… / ?password=…
 
 
-def connect(url: str):
+def connect(url: str) -> psycopg.Connection:
     """An autocommit connection: every write below happens inside an explicit transaction."""
-    try:
-        import psycopg
-    except ImportError:
-        raise DatabaseError("psycopg isn't installed; run: pip install -e .")
     try:
         return psycopg.connect(url, autocommit=True, connect_timeout=10)
     except psycopg.Error as e:
@@ -103,6 +102,7 @@ def connect(url: str):
 
 
 def _message(e: Exception) -> str:
+    """The error's text on one line (psycopg's messages span several)."""
     return " ".join(str(e).split())
 
 
@@ -110,8 +110,6 @@ def _message(e: Exception) -> str:
 def errors_as(what: str) -> Iterator[None]:
     """Turn psycopg errors into DatabaseError (exit 10) with some context.
     OperationalError (connection lost, server shutting down) is marked transient."""
-    import psycopg
-
     try:
         yield
     except psycopg.Error as e:
@@ -119,7 +117,7 @@ def errors_as(what: str) -> Iterator[None]:
 
 
 # ---------- values ----------
-def stored_value(reg: Register, words: List[int]) -> int:
+def stored_value(reg: Register, words: list[int]) -> int:
     """The register's words decoded as its type, before the gain. u64 values with the top
     bit set (in practice only "not set", all ones) become the signed number with the same
     bits, so they fit in a BIGINT: all ones -> -1."""
@@ -129,7 +127,7 @@ def stored_value(reg: Register, words: List[int]) -> int:
     return n
 
 
-def values_for(readings: Dict[str, dict]) -> List[Tuple[int, int]]:
+def values_for(readings: dict[str, dict]) -> list[tuple[int, int]]:
     """Strict readings (every register read) -> [(address, stored value)], in address order.
     String registers (model, serial, firmware) are display only and aren't stored."""
     out = []
@@ -145,20 +143,24 @@ def values_for(readings: Dict[str, dict]) -> List[Tuple[int, int]]:
 # ---------- migrations ----------
 @dataclass(frozen=True)
 class Migration:
+    """One sigen/migrations/NNNN_name.sql: its number, name and SQL text."""
+
     version: int
     name: str
     sql: str
 
     @property
     def checksum(self) -> str:
+        """SHA-256 hex of the SQL, as stored in schema_migrations."""
         return hashlib.sha256(self.sql.encode("utf-8")).hexdigest()
 
     @property
     def label(self) -> str:
+        """The file name without .sql, e.g. '0004_wide_values'."""
         return f"{self.version:04d}_{self.name}"
 
 
-def load_migrations() -> List[Migration]:
+def load_migrations() -> list[Migration]:
     """Every sigen/migrations/NNNN_name.sql, in order. Line endings are normalised before
     checksumming, so a git checkout with CRLF doesn't look like an edit."""
     found = []
@@ -177,20 +179,22 @@ def load_migrations() -> List[Migration]:
     return found
 
 
-def _applied(conn) -> Optional[Dict[int, Tuple[str, str]]]:
+def _applied(conn: psycopg.Connection) -> dict[int, tuple[str, str]] | None:
     """version -> (name, checksum), or None if migrate has never run in this schema."""
     if conn.execute("SELECT to_regclass('schema_migrations')").fetchone()[0] is None:
         return None
     return {v: (n, c) for v, n, c in conn.execute("SELECT version, name, checksum FROM schema_migrations")}
 
 
-def applied_migrations(conn) -> Dict[int, str]:
+def applied_migrations(conn: psycopg.Connection) -> dict[int, str]:
     """{version: checksum} for the migrations applied in this schema ({} if migrate has never run). Public accessor
     for callers (e.g. sigen.sync) that only need the applied set."""
     return {v: c for v, (n, c) in (_applied(conn) or {}).items()}
 
 
-def _check_applied(applied: Dict[int, Tuple[str, str]], migrations: Sequence[Migration]) -> None:
+def _check_applied(applied: dict[int, tuple[str, str]], migrations: Sequence[Migration]) -> None:
+    """Raise SchemaNotReady if the database has a migration this code doesn't
+    know, or one whose file was edited after it was applied."""
     known = {m.version: m for m in migrations}
     for version, (name, checksum) in sorted(applied.items()):
         mig = known.get(version)
@@ -205,7 +209,11 @@ def _check_applied(applied: Dict[int, Tuple[str, str]], migrations: Sequence[Mig
             )
 
 
-def migrate(conn, migrations: Optional[Sequence[Migration]] = None, log=lambda msg: None) -> List[str]:
+def migrate(
+    conn: psycopg.Connection,
+    migrations: Sequence[Migration] | None = None,
+    log: Callable[[str], None] = lambda msg: None,
+) -> list[str]:
     """Apply pending migrations (each in its own transaction), then sync register_meta.
     Returns the labels of the migrations applied."""
     migrations = load_migrations() if migrations is None else list(migrations)
@@ -237,20 +245,28 @@ def migrate(conn, migrations: Optional[Sequence[Migration]] = None, log=lambda m
 # ---------- register_meta ----------
 @dataclass
 class MetaPlan:
-    inserts: List[Register]
-    updates: List[Register]
-    problems: List[str]  # type changes on addresses that already have values
+    """What syncing register_meta with the code would do: rows to add, rows
+    to rewrite, and type changes it refuses to make (see plan_meta_sync)."""
+
+    inserts: list[Register]
+    updates: list[Register]
+    problems: list[str]  # type changes on addresses that already have values
 
     @property
     def in_sync(self) -> bool:
+        """True when register_meta already matches the code."""
         return not (self.inserts or self.updates or self.problems)
 
 
-def _meta_row(reg: Register) -> tuple:
+def _meta_row(reg: Register) -> tuple[str, str, float, str | None, str]:
+    """The register's register_meta row after the address: (name, type, gain,
+    unit, device)."""
     return reg.name, reg.type, float(reg.gain), reg.unit, reg.device
 
 
-def plan_meta_sync(meta: Dict[int, tuple], has_values, registers: Sequence[Register] = STORED_REGISTERS) -> MetaPlan:
+def plan_meta_sync(
+    meta: dict[int, tuple], has_values: Callable[[int], bool], registers: Sequence[Register] = STORED_REGISTERS
+) -> MetaPlan:
     """Compare the code's register map with register_meta rows
     (address -> (name, type, gain, unit, device)).
     `has_values(address)` says whether any stored value depends on that address's type.
@@ -272,7 +288,7 @@ def plan_meta_sync(meta: Dict[int, tuple], has_values, registers: Sequence[Regis
     return plan
 
 
-def wide_layout(conn) -> bool:
+def wide_layout(conn: psycopg.Connection) -> bool:
     """Whether migration 0004 has switched over: register_values is then a view over the wide tables. (The wide
     tables alone don't say so: the backfill script creates them, and fills them, while register_values is still
     the table poll writes to.)"""
@@ -284,7 +300,7 @@ def wide_layout(conn) -> bool:
 _wide = wide_layout
 
 
-def has_glitch_column(conn) -> bool:
+def has_glitch_column(conn: psycopg.Connection) -> bool:
     """Whether readings has the glitch column (migration 0007)."""
     return conn.execute(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
@@ -292,7 +308,7 @@ def has_glitch_column(conn) -> bool:
     ).fetchone()[0]
 
 
-def _columns(conn) -> Dict[str, Dict[str, str]]:
+def _columns(conn: psycopg.Connection) -> dict[str, dict[str, str]]:
     """device -> {column: data type} of the wide value tables."""
     found = {d: {} for d in DEVICES}
     for table, column, data_type in conn.execute(
@@ -304,7 +320,9 @@ def _columns(conn) -> Dict[str, Dict[str, str]]:
     return found
 
 
-def _plan(conn) -> MetaPlan:
+def _plan(conn: psycopg.Connection) -> MetaPlan:
+    """plan_meta_sync against the database's register_meta, checking for stored
+    values in the long table before 0004 and the wide tables after."""
     from psycopg import sql
 
     meta = {
@@ -331,7 +349,7 @@ def _plan(conn) -> MetaPlan:
     return plan_meta_sync(meta, has_values)
 
 
-def missing_columns(conn) -> List[str]:
+def missing_columns(conn: psycopg.Connection) -> list[str]:
     """Stored registers without a column of the right type in their device's wide table (empty when ready)."""
     columns, problems = _columns(conn), []
     for reg in STORED_REGISTERS:
@@ -345,7 +363,7 @@ def missing_columns(conn) -> List[str]:
     return problems
 
 
-def sync_register_meta(conn, log=lambda msg: None) -> None:
+def sync_register_meta(conn: psycopg.Connection, log: Callable[[str], None] = lambda msg: None) -> None:
     """Bring register_meta in line with sigen.registers (call inside a transaction)."""
     plan = _plan(conn)
     if plan.problems:
@@ -367,7 +385,7 @@ def sync_register_meta(conn, log=lambda msg: None) -> None:
         log(f"register_meta: {len(plan.inserts)} added, {len(plan.updates)} updated")
 
 
-def check_ready(conn, migrations: Optional[Sequence[Migration]] = None) -> None:
+def check_ready(conn: psycopg.Connection, migrations: Sequence[Migration] | None = None) -> None:
     """Raise SchemaNotReady unless every migration is applied, unedited, and register_meta
     matches the code. `poll` calls this before reading anything."""
     migrations = load_migrations() if migrations is None else list(migrations)
@@ -396,7 +414,10 @@ def check_ready(conn, migrations: Optional[Sequence[Migration]] = None) -> None:
 
 
 # ---------- status ----------
-def status(conn, migrations: Optional[Sequence[Migration]] = None) -> dict:
+def status(conn: psycopg.Connection, migrations: Sequence[Migration] | None = None) -> dict:
+    """What `sigen db status` prints: migrations applied and pending, whether
+    the schema is ready, row counts and table sizes (only the migration keys
+    when migrate has never run; later keys only once their table exists)."""
     migrations = load_migrations() if migrations is None else list(migrations)
     with errors_as("reading status failed"):
         applied = _applied(conn)
@@ -477,15 +498,17 @@ ROW_TIMES = {
 
 @dataclass
 class TableSize:
+    """One table's disk use and row counts, for `sigen db status`."""
+
     name: str
     total_bytes: int  # data + indexes + TOAST
     rows: int  # exact, unless rows_exact is False (the planner's estimate)
     rows_exact: bool
-    time_column: Optional[str]
-    rows_last_day: Optional[int]  # rows whose time is in the last 24 h; None without a time column
+    time_column: str | None
+    rows_last_day: int | None  # rows whose time is in the last 24 h; None without a time column
 
     @property
-    def bytes_per_day(self) -> Optional[float]:
+    def bytes_per_day(self) -> float | None:
         """Growth over the last 24 h, estimated as the table's average bytes per row times the
         rows added in that time (indexes and TOAST included)."""
         if self.rows_last_day is None:
@@ -493,7 +516,7 @@ class TableSize:
         return self.total_bytes * self.rows_last_day / self.rows if self.rows else 0.0
 
 
-def table_sizes(conn) -> List[TableSize]:
+def table_sizes(conn: psycopg.Connection) -> list[TableSize]:
     """Every table in the current schema, biggest first."""
     tables = conn.execute(
         "SELECT c.relname, pg_total_relation_size(c.oid), greatest(c.reltuples, 0)::bigint "
@@ -522,13 +545,15 @@ def table_sizes(conn) -> List[TableSize]:
 # ---------- ad-hoc queries ----------
 @dataclass
 class QueryResult:
+    """One statement's outcome from `query`."""
+
     status: str  # PostgreSQL's command tag, e.g. "SELECT 10"
-    columns: Optional[List[str]]  # None: the statement returns no rows
-    rows: List[tuple]
+    columns: list[str] | None  # None: the statement returns no rows
+    rows: list[tuple]
     truncated: bool  # it returned more than max_rows rows
 
 
-def query(conn, sql_text: str, max_rows: Optional[int] = None) -> List[QueryResult]:
+def query(conn: psycopg.Connection, sql_text: str, max_rows: int | None = None) -> list[QueryResult]:
     """Run SQL typed by a person, read-only; one result per statement.
 
     The session defaults to read-only transactions and the text runs inside one that is
@@ -560,23 +585,23 @@ def query(conn, sql_text: str, max_rows: Optional[int] = None) -> List[QueryResu
 
 
 # ---------- storing readings ----------
-def next_poll_id(conn) -> int:
+def next_poll_id(conn: psycopg.Connection) -> int:
     """A new id shared by the readings (one per unit) that one poll takes."""
     with errors_as("allocating a poll id failed"):
         return conn.execute("SELECT nextval('poll_ids')").fetchone()[0]
 
 
 def insert_reading(
-    conn,
+    conn: psycopg.Connection,
     *,
     ip: str,
     unit_id: int,
     poll_id: int,
     started_at: datetime.datetime,
     ended_at: datetime.datetime,
-    values: Sequence[Tuple[int, int]] = (),
-    error: Optional[str] = None,
-    glitch: Optional[str] = None,
+    values: Sequence[tuple[int, int]] = (),
+    error: str | None = None,
+    glitch: str | None = None,
 ) -> int:
     """One unit's snapshot, in one transaction: a readings row plus, if it has values, one row in its device's
     wide table (raw_plant_register_values or raw_inverter_register_values), one column per register. `glitch`
@@ -622,7 +647,7 @@ def insert_reading(
 COLUMN_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
-def insert_open_meteo(conn, row) -> int:
+def insert_open_meteo(conn: psycopg.Connection, row: WeatherRow) -> int:
     """One sigen.weather.WeatherRow -> its open_meteo_weather id."""
     from psycopg import sql
 
@@ -639,7 +664,7 @@ def insert_open_meteo(conn, row) -> int:
         ).fetchone()[0]
 
 
-def stored_radar_frames(conn, since: datetime.datetime) -> set:
+def stored_radar_frames(conn: psycopg.Connection, since: datetime.datetime) -> set[datetime.datetime]:
     """Frame times from `since` on that already have a good row."""
     with errors_as("reading the stored radar frames failed"):
         return {
@@ -648,7 +673,7 @@ def stored_radar_frames(conn, since: datetime.datetime) -> set:
         }
 
 
-def insert_alert(conn, attempt) -> int:
+def insert_alert(conn: psycopg.Connection, attempt: Attempt) -> int:
     """One sigen.ntfy.Attempt (sent or suppressed) -> its alert_log id."""
     a = attempt
     with errors_as("storing the alert failed"):
@@ -672,7 +697,12 @@ def insert_alert(conn, attempt) -> int:
 
 
 def insert_battery_heater(
-    conn, *, polled_at: datetime.datetime, battery: int, heater_on: Optional[bool], error: Optional[str] = None
+    conn: psycopg.Connection,
+    *,
+    polled_at: datetime.datetime,
+    battery: int,
+    heater_on: bool | None,
+    error: str | None = None,
 ) -> int:
     """One cloud poll of a battery pack's heating status -> its battery_heater id. Exactly one of heater_on / error
     is set (the table's CHECK): heater_on on a reading, error on a grumpy poll (then heater_on stays NULL)."""
@@ -683,7 +713,7 @@ def insert_battery_heater(
         ).fetchone()[0]
 
 
-def last_alerts_sent(conn) -> Dict[Optional[str], datetime.datetime]:
+def last_alerts_sent(conn: psycopg.Connection) -> dict[str | None, datetime.datetime]:
     """{kind: when the last alert of that kind was sent} (suppressed ones don't count; failed sends do: they were
     tried). For keeping the per-kind cooldown across a restart of `poll`."""
     with errors_as("reading the alert log failed"):
@@ -694,7 +724,7 @@ def last_alerts_sent(conn) -> Dict[Optional[str], datetime.datetime]:
         )
 
 
-def insert_radar_rows(conn, rows) -> int:
+def insert_radar_rows(conn: psycopg.Connection, rows: Iterable[RadarRow]) -> int:
     """sigen.weather.RadarRow objects, in one transaction. A frame that already has a good row
     is skipped; error rows are always kept. Returns how many good rows were added."""
     added = 0
@@ -734,7 +764,12 @@ SATELLITE_SHADE_VALUES = [
 ]  # the strip values, DB column order
 
 
-def insert_satellite_shade(conn, fetched_at, series, error: Optional[str] = None) -> int:
+def insert_satellite_shade(
+    conn: psycopg.Connection,
+    fetched_at: datetime.datetime,
+    series: ShadeSeries | None,
+    error: str | None = None,
+) -> int:
     """Store a sigen.goes_shade.ShadeSeries, one row per scan (NaN -> NULL), one good row per scan (ON CONFLICT).
     With `error` set, store a single failed-run row (scan_at NULL) instead. Returns how many good rows were added."""
     import math

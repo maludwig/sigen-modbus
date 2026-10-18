@@ -38,13 +38,16 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, BinaryIO, Self
+from collections.abc import Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import h5py
 import numpy as np
+import numpy.typing as npt
 
 from sigen.errors import ConnectionFailed, PreconditionFailed, SigenError
+from sigen.weather import Response
 
 DEFAULT_SATELLITE = "18"  # GOES-West: western North America and the Pacific
 PRODUCTS = ("ACM", "COD", "ACHA")
@@ -60,10 +63,13 @@ SCAN_START = re.compile(r"_s(\d{4})(\d{3})(\d{2})(\d{2})(\d{2})")
 
 # ---------- the bucket ----------
 def bucket_url(satellite: str) -> str:
+    """The satellite's public S3 bucket, no trailing slash."""
     return f"https://noaa-goes{satellite}.s3.amazonaws.com"
 
 
-def list_keys(satellite: str, prefix: str, get=None) -> List[Tuple[str, int]]:
+def list_keys(
+    satellite: str, prefix: str, get: Callable[[str, Mapping[str, object]], Response] | None = None
+) -> list[tuple[str, int]]:
     """(key, size) of every object under `prefix` in the satellite's bucket."""
     from sigen.weather import http_get
 
@@ -76,11 +82,15 @@ def list_keys(satellite: str, prefix: str, get=None) -> List[Tuple[str, int]]:
             raise ConnectionFailed(
                 f"listing {prefix} in {bucket_url(satellite)} failed: {response.describe().splitlines()[0]}"
             )
-        root = ET.fromstring(response.text)
-        keys += [
-            (c.find("s3:Key", S3_NS).text, int(c.find("s3:Size", S3_NS).text))
-            for c in root.findall("s3:Contents", S3_NS)
-        ]
+        try:
+            root = ET.fromstring(response.text)
+            for c in root.findall("s3:Contents", S3_NS):
+                key, size = c.findtext("s3:Key", namespaces=S3_NS), c.findtext("s3:Size", namespaces=S3_NS)
+                if key is None or size is None:
+                    raise ValueError("an entry without a Key or a Size")
+                keys.append((key, int(size)))
+        except (ET.ParseError, ValueError) as e:
+            raise ConnectionFailed(f"listing {prefix} in {bucket_url(satellite)}: unexpected answer ({e})") from e
         if root.findtext("s3:IsTruncated", namespaces=S3_NS) != "true":
             return keys
         token = root.findtext("s3:NextContinuationToken", namespaces=S3_NS)
@@ -92,22 +102,26 @@ def scan_start(key: str) -> datetime.datetime:
     if m is None:
         raise ValueError(f"no scan start in {key!r}")
     year, doy, hh, mm, ss = map(int, m.groups())
-    return datetime.datetime(year, 1, 1, hh, mm, ss, tzinfo=datetime.timezone.utc) + datetime.timedelta(days=doy - 1)
+    return datetime.datetime(year, 1, 1, hh, mm, ss, tzinfo=datetime.UTC) + datetime.timedelta(days=doy - 1)
 
 
 def nanoseconds(t: datetime.datetime) -> int:
     """A UTC datetime as int64 nanoseconds since the epoch (the cubes' time axis)."""
-    delta = t - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    delta = t - datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC)
     return (delta.days * 86400 + delta.seconds) * 10**9 + delta.microseconds * 1000
 
 
 def keys_between(
-    satellite: str, product: str, start: datetime.datetime, end: datetime.datetime, lister: Optional[Callable] = None
-) -> List[Tuple[str, int]]:
+    satellite: str,
+    product: str,
+    start: datetime.datetime,
+    end: datetime.datetime,
+    lister: Callable[[str, str], list[tuple[str, int]]] | None = None,
+) -> list[tuple[str, int]]:
     """(key, size) of the `product` files (e.g. "ABI-L2-ACMF") whose scan starts in [start, end), by time."""
     lister = lister or list_keys
     found = []
-    hour = start.astimezone(datetime.timezone.utc).replace(minute=0, second=0, microsecond=0)
+    hour = start.astimezone(datetime.UTC).replace(minute=0, second=0, microsecond=0)
     while hour < end:
         prefix = f"{product}/{hour:%Y}/{hour.timetuple().tm_yday:03d}/{hour:%H}/"
         found += [(k, s) for k, s in lister(satellite, prefix) if start <= scan_start(k) < end]
@@ -119,7 +133,9 @@ def keys_between(
 class FixedGrid:
     """An ABI fixed grid (or a box of one): scan angles <-> latitude/longitude, and pixel lookup."""
 
-    def __init__(self, projection, x, y):
+    def __init__(self, projection: Mapping[str, Any], x: npt.ArrayLike, y: npt.ArrayLike) -> None:
+        """`projection`: the PROJECTION_ATTRS (metres, degrees; scalars or
+        1-element arrays). `x`, `y`: the grid's scan angles in radians."""
         self.r_eq = float(np.ravel(projection["semi_major_axis"])[0])
         self.r_pol = float(np.ravel(projection["semi_minor_axis"])[0])
         self.H = float(np.ravel(projection["perspective_point_height"])[0]) + self.r_eq
@@ -127,15 +143,15 @@ class FixedGrid:
         self.x, self.y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
 
     @classmethod
-    def from_netcdf(cls, f):
+    def from_netcdf(cls, f: h5py.File) -> Self:
         """The grid of a GOES NetCDF file opened with h5py."""
 
-        def axis(d):
+        def axis(d: h5py.Dataset) -> np.ndarray:
             return d[:] * float(d.attrs["scale_factor"][0]) + float(d.attrs["add_offset"][0])
 
         return cls(f["goes_imager_projection"].attrs, axis(f["x"]), axis(f["y"]))
 
-    def scan_angles(self, lat, lon, height_m=0.0):
+    def scan_angles(self, lat: float, lon: float, height_m: float = 0.0) -> tuple[float, float]:
         """Scan angles (x, y) in radians at which the satellite sees a point `height_m` above (lat, lon)."""
         phi, lam = np.radians(lat), np.radians(lon)
         phi_c = np.arctan((self.r_pol**2 / self.r_eq**2) * np.tan(phi))
@@ -146,7 +162,7 @@ class FixedGrid:
         s_z = r_c * np.sin(phi_c)
         return np.arcsin(-s_y / np.sqrt(s_x**2 + s_y**2 + s_z**2)), np.arctan(s_z / s_x)
 
-    def lat_lon(self, x, y):
+    def lat_lon(self, x: float, y: float) -> tuple[float, float]:
         """Ground (lat, lon) in degrees seen at scan angles x, y (radians)."""
         a = np.sin(x) ** 2 + np.cos(x) ** 2 * (np.cos(y) ** 2 + (self.r_eq**2 / self.r_pol**2) * np.sin(y) ** 2)
         b = -2 * self.H * np.cos(x) * np.cos(y)
@@ -156,7 +172,7 @@ class FixedGrid:
         lat = np.degrees(np.arctan((self.r_eq**2 / self.r_pol**2) * s_z / np.sqrt((self.H - s_x) ** 2 + s_y**2)))
         return lat, np.degrees(self.lon0 - np.arctan(s_y / (self.H - s_x)))
 
-    def pixel(self, lat, lon, height_m=0.0):
+    def pixel(self, lat: float, lon: float, height_m: float = 0.0) -> tuple[int, int] | None:
         """(row, col) of the pixel showing a point `height_m` above (lat, lon), or None if outside the grid."""
         x, y = self.scan_angles(lat, lon, height_m)
         step_x, step_y = abs(self.x[1] - self.x[0]), abs(self.y[1] - self.y[0])
@@ -168,7 +184,7 @@ class FixedGrid:
         return int(np.abs(self.y - y).argmin()), int(np.abs(self.x - x).argmin())
 
 
-def box_window(grid: FixedGrid, lat: float, lon: float, km: float) -> Tuple[slice, slice]:
+def box_window(grid: FixedGrid, lat: float, lon: float, km: float) -> tuple[slice, slice]:
     """(row slice, col slice) of `grid` covering the ground box ±km around (lat, lon), plus a 2-pixel margin."""
     d_lat, d_lon = km / 111.2, km / (111.2 * np.cos(np.radians(lat)))
     edge = np.linspace(-1, 1, 41)
@@ -182,7 +198,7 @@ def box_window(grid: FixedGrid, lat: float, lon: float, km: float) -> Tuple[slic
 
 
 # ---------- daylight ----------
-def sun_rise_set(day: datetime.date, lat: float, lon: float) -> Optional[Tuple[datetime.datetime, datetime.datetime]]:
+def sun_rise_set(day: datetime.date, lat: float, lon: float) -> tuple[datetime.datetime, datetime.datetime] | None:
     """Sunrise and sunset (UTC) on `day` at (lat, lon), NOAA's approximation (within ~2 minutes); None if the sun
     doesn't rise or doesn't set that day."""
     g = 2 * math.pi / 365 * (day.timetuple().tm_yday - 1 + 0.5)
@@ -207,7 +223,7 @@ def sun_rise_set(day: datetime.date, lat: float, lon: float) -> Optional[Tuple[d
     if not -1 <= cos_ha <= 1:
         return None
     ha = math.degrees(math.acos(cos_ha))
-    midnight = datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc)
+    midnight = datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.UTC)
     return (
         midnight + datetime.timedelta(minutes=720 - 4 * (lon + ha) - eqtime),
         midnight + datetime.timedelta(minutes=720 - 4 * (lon - ha) - eqtime),
@@ -232,11 +248,12 @@ class Box:
     cols: slice
     x: np.ndarray  # the box's scan angles
     y: np.ndarray
-    projection: dict
-    variables: dict  # name -> (raw array, attributes, dtype), in the file's order
+    projection: dict[str, Any]
+    # name -> (raw array, attributes, dtype), in the file's order
+    variables: dict[str, tuple[np.ndarray, dict[str, Any], np.dtype]]
 
 
-def cut_box(src, lat: float, lon: float, km: float, window=None) -> Box:
+def cut_box(src: h5py.File, lat: float, lon: float, km: float, window: tuple[slice, slice] | None = None) -> Box:
     """The box out of an open GOES file: `window` (rows, cols) if given (an existing cube's), else computed."""
     grid = FixedGrid.from_netcdf(src)
     rows, cols = window if window is not None else box_window(grid, lat, lon, km)
@@ -250,7 +267,14 @@ def cut_box(src, lat: float, lon: float, km: float, window=None) -> Box:
     return Box(rows, cols, grid.x[cols], grid.y[rows], projection, variables)
 
 
-def fetch_box(url: str, lat: float, lon: float, km: float, window=None, opener=None) -> Tuple[Box, int]:
+def fetch_box(
+    url: str,
+    lat: float,
+    lon: float,
+    km: float,
+    window: tuple[slice, slice] | None = None,
+    opener: Callable[[str], BinaryIO] | None = None,
+) -> tuple[Box, int]:
     """(Box, bytes fetched) for the file at `url`, reading only what the box needs. `opener(url)` returns a
     seekable binary file with a `.cache.total_requested_bytes` (default: fsspec over HTTP)."""
     if opener is None:
@@ -378,7 +402,7 @@ def process_alive(pid: int) -> bool:
     return True
 
 
-def claim_pid_file(cube_dir: Path, pid: Optional[int] = None) -> Path:
+def claim_pid_file(cube_dir: Path, pid: int | None = None) -> Path:
     """Write this process's ID to <cube dir>/satellite.pid, created exclusively. If the file exists and names a live
     process (and is under PID_STALE old), raise PreconditionFailed; a stale one is replaced."""
     pid = os.getpid() if pid is None else pid
@@ -406,7 +430,7 @@ def claim_pid_file(cube_dir: Path, pid: Optional[int] = None) -> Path:
     raise PreconditionFailed(f"couldn't claim {path}: another run keeps creating it")
 
 
-def release_pid_file(path: Path, pid: Optional[int] = None) -> None:
+def release_pid_file(path: Path, pid: int | None = None) -> None:
     """Remove the PID file if it's still ours."""
     pid = os.getpid() if pid is None else pid
     try:
@@ -416,7 +440,7 @@ def release_pid_file(path: Path, pid: Optional[int] = None) -> None:
         pass
 
 
-def _network_errors() -> tuple:
+def _network_errors() -> tuple[type[BaseException], ...]:
     """What a failed read raises: OSError (incl. timeouts and fsspec's FileNotFoundError for a 404), and
     aiohttp's own errors, which aren't all OSErrors."""
     try:
@@ -427,7 +451,7 @@ def _network_errors() -> tuple:
         return (OSError,)
 
 
-def _existing(path: Path):
+def _existing(path: Path) -> tuple[set[int], tuple[slice, slice] | None]:
     """(scan times already in the cube at `path`, its window) or (empty set, None)."""
     if not path.exists():
         return set(), None
@@ -440,12 +464,15 @@ def _existing(path: Path):
 
 @dataclass
 class ProductResult:
+    """What build_cubes did for one product ("ACMF"): scan counts, bytes
+    fetched, wall-clock seconds, and every cube those scans belong to."""
+
     product: str
     scans: int  # in the time window (after the daylight filter)
     added: int
     fetched_bytes: int
     seconds: float
-    cubes: List[Path]
+    cubes: list[Path]
 
 
 def build_cubes(
@@ -461,11 +488,11 @@ def build_cubes(
     satellite: str = DEFAULT_SATELLITE,
     sector: str = "F",
     workers: int = DEFAULT_WORKERS,
-    daylight_minutes: Optional[float] = DEFAULT_DAYLIGHT_MINUTES,
-    lister: Optional[Callable] = None,
-    opener=None,
-    log=lambda msg: None,
-) -> List[ProductResult]:
+    daylight_minutes: float | None = DEFAULT_DAYLIGHT_MINUTES,
+    lister: Callable[[str, str], list[tuple[str, int]]] | None = None,
+    opener: Callable[[str], BinaryIO] | None = None,
+    log: Callable[[str], None] = lambda msg: None,
+) -> list[ProductResult]:
     """Add every scan in [start, end) to its day's cube, per product; scans already there are skipped.
     With `daylight_minutes`, only scans within that many minutes of the site's sunrise..sunset.
     `lister` and `opener` are for tests (an opener runs everything in this process)."""

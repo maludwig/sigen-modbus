@@ -7,7 +7,7 @@ so callers get a meaningful exit code.
 
 import socket
 import struct
-from typing import List
+from typing import Any
 
 from sigen.errors import ConnectionFailed, ModbusError
 from sigen.registers import PLANT_UNIT_ID
@@ -25,12 +25,13 @@ class ModbusClient:
 
     def __init__(
         self, host: str, port: int = DEFAULT_PORT, unit: int = PLANT_UNIT_ID, timeout: float = DEFAULT_TIMEOUT
-    ):
+    ) -> None:
         self.host, self.port, self.unit, self.timeout = host, port, unit, timeout
-        self._sock = None
+        self._sock: socket.socket | None = None
         self._tid = 0
 
-    def __enter__(self):
+    def __enter__(self) -> "ModbusClient":
+        """Open the TCP connection (timeout in seconds); raises ConnectionFailed if it can't."""
         try:
             self._sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
             self._sock.settimeout(self.timeout)
@@ -38,13 +39,15 @@ class ModbusClient:
             raise ConnectionFailed(f"couldn't connect to {self.host}:{self.port}: {e}") from e
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc: Any) -> None:
+        """Close the socket; exceptions from the with-block propagate."""
         if self._sock:
             self._sock.close()
             self._sock = None
 
     # ---------- transport ----------
     def _recv_exact(self, n: int) -> bytes:
+        """Read exactly n bytes, looping over short reads; raises ConnectionFailed if the peer closes first."""
         buf = b""
         while len(buf) < n:
             chunk = self._sock.recv(n - len(buf))
@@ -54,6 +57,11 @@ class ModbusClient:
         return buf
 
     def _request(self, pdu: bytes, address: int) -> bytes:
+        """Send one PDU wrapped in an MBAP header and return the reply PDU (function code first).
+
+        address is only for the error message. A Modbus exception reply raises ModbusError; timeouts, socket errors
+        and mismatched framing raise ConnectionFailed.
+        """
         if self._sock is None:
             raise ConnectionFailed("not connected (use ModbusClient as a context manager)")
         self._tid = (self._tid + 1) & 0xFFFF
@@ -61,12 +69,14 @@ class ModbusClient:
             self._sock.sendall(struct.pack(">HHHB", self._tid, 0, len(pdu) + 1, self.unit) + pdu)
             tid, proto, length, _unit = struct.unpack(">HHHB", self._recv_exact(7))
             body = self._recv_exact(length - 1)
-        except socket.timeout as e:
+        except TimeoutError as e:
             raise ConnectionFailed(f"{self.host}:{self.port} timed out after {self.timeout}s") from e
         except OSError as e:
             raise ConnectionFailed(f"connection to {self.host}:{self.port} failed: {e}") from e
         if tid != self._tid or proto != 0:
             raise ConnectionFailed(f"unexpected reply framing (transaction {tid}, expected {self._tid})")
+        if len(body) < 2:  # every reply has at least a function code and one more byte
+            raise ConnectionFailed(f"short reply from {self.host}:{self.port}: {len(body)} byte(s)")
         if body[0] & 0x80:
             raise ModbusError(body[0] & 0x7F, body[1], address)
         if body[0] != pdu[0]:
@@ -74,7 +84,10 @@ class ModbusClient:
         return body
 
     # ---------- operations ----------
-    def read(self, table: str, address: int, count: int) -> List[int]:
+    def read(self, table: str, address: int, count: int) -> list[int]:
+        """Read count raw 16-bit words: table "input" uses function 04, "holding" 03; ValueError for any other."""
+        if table not in ("input", "holding"):
+            raise ValueError(f"unknown register table {table!r} (input or holding)")
         function = 4 if table == "input" else 3
         body = self._request(struct.pack(">BHH", function, address, count), address)
         nbytes = body[1]
@@ -82,8 +95,10 @@ class ModbusClient:
             raise ConnectionFailed(f"short reply reading {address}: {nbytes} bytes for {count} registers")
         return list(struct.unpack(f">{count}H", body[2 : 2 + nbytes]))
 
-    def write(self, address: int, words: List[int]) -> None:
-        """Write holding registers: function 06 for one word, 16 for several."""
+    def write(self, address: int, words: list[int]) -> None:
+        """Write holding registers: function 06 for one word, 16 for several; ValueError for none."""
+        if not words:
+            raise ValueError(f"nothing to write to {address}")
         if len(words) == 1:
             pdu = struct.pack(">BHH", 6, address, words[0])
             body = self._request(pdu, address)

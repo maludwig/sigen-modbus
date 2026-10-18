@@ -4,9 +4,7 @@ test schema's battery_heater table."""
 import datetime
 from pathlib import Path
 
-import pytest
 
-from sigen import db, heater
 from sigen.config import Cloud
 from sigen.errors import CloudError
 from sigen.heater import HeaterPoller, gate_values, heating_from
@@ -16,7 +14,7 @@ from test_db import conn, db_url  # noqa: F401  (pytest fixtures)
 
 STATION = "1234567890123456"
 BAT1, BAT2 = "110AXX1234000A", "110AXX1234000B"
-NOW = datetime.datetime(2026, 10, 17, 9, 0, tzinfo=datetime.timezone.utc)
+NOW = datetime.datetime(2026, 10, 17, 9, 0, tzinfo=datetime.UTC)
 
 
 def a_poll_result(values):

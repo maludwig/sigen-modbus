@@ -16,9 +16,10 @@ Only a read that starts on it is rejected. Check new registers one at a time.
 """
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Callable, Sequence
 
 from sigen.errors import ModbusError
+from sigen.modbus import ModbusClient
 from sigen.registers import PLANT_REGISTERS, Register
 
 MAX_WORDS = 125
@@ -28,17 +29,20 @@ TABLE_ORDER = ("input", "holding")
 
 @dataclass(frozen=True)
 class Block:
+    """One planned read: `count` words from `start` in `table`, covering `registers` (in address order)."""
+
     table: str
     start: int
     count: int
-    registers: Tuple[Register, ...]
+    registers: tuple[Register, ...]
 
     @property
     def end(self) -> int:
         """Last address in the block (inclusive)."""
         return self.start + self.count - 1
 
-    def words_for(self, words: List[int], reg: Register) -> List[int]:
+    def words_for(self, words: list[int], reg: Register) -> list[int]:
+        """`reg`'s slice of this block's read result: `words` must be the whole block, starting at `start`."""
         offset = reg.address - self.start
         return words[offset : offset + reg.words]
 
@@ -46,9 +50,7 @@ class Block:
         return f"{self.table} {self.start}-{self.end} ({self.count} words, {len(self.registers)} registers)"
 
 
-def plan_blocks(
-    registers: Sequence[Register], max_words: int = MAX_WORDS, max_gap: Optional[int] = None
-) -> List[Block]:
+def plan_blocks(registers: Sequence[Register], max_words: int = MAX_WORDS, max_gap: int | None = None) -> list[Block]:
     """The fewest reads that cover `registers`, input table first, then holding.
 
     Greedy: walk the registers in address order and extend the current block while the
@@ -59,10 +61,10 @@ def plan_blocks(
         raise ValueError("max_words must be at least 1 and max_gap at least 0")
     gap_limit = max_words if max_gap is None else max_gap
     tables = sorted({r.table for r in registers}, key=lambda t: TABLE_ORDER.index(t) if t in TABLE_ORDER else 99)
-    plan: List[Block] = []
+    plan: list[Block] = []
     for table in tables:
         regs = sorted((r for r in registers if r.table == table), key=lambda r: r.address)
-        current: List[Register] = []
+        current: list[Register] = []
         start = end = 0
         for reg in regs:
             if reg.words > max_words:
@@ -84,8 +86,10 @@ def plan_blocks(
     return plan
 
 
-def entry_for(reg: Register, words: Optional[List[int]] = None, error: Optional[str] = None) -> dict:
-    """One register's reading: what dumps, summaries and the database are built from."""
+def entry_for(reg: Register, words: list[int] | None = None, error: str | None = None) -> dict:
+    """One register's reading: what dumps, summaries and the database are built from. Needs `words` or `error`."""
+    if words is None and error is None:
+        raise ValueError(f"entry_for({reg.name}) needs the words read or the error")
     entry = {"table": reg.table, "address": reg.address, "type": reg.type, "gain": reg.gain}
     if reg.unit:
         entry["unit"] = reg.unit
@@ -120,16 +124,18 @@ class BlockReader:
         *,
         strict: bool = False,
         max_words: int = MAX_WORDS,
-        max_gap: Optional[int] = None,
-    ):
+        max_gap: int | None = None,
+    ) -> None:
         self.connector = connector
         self.registers = list(registers)
         self.strict = strict
         self.plan = plan_blocks(self.registers, max_words, max_gap)
 
-    def read_all(self) -> Dict[str, dict]:
-        words: Dict[str, List[int]] = {}
-        errors: Dict[str, str] = {}
+    def read_all(self) -> dict[str, dict]:
+        """One connection, one request per block: register name -> entry_for() dict, in the order given at
+        construction. Unreadable registers (strict=False only) get an 'error' entry instead of a value."""
+        words: dict[str, list[int]] = {}
+        errors: dict[str, str] = {}
         with self.connector() as client:
             for block in self.plan:
                 try:
@@ -144,7 +150,9 @@ class BlockReader:
         return {reg.name: entry_for(reg, words.get(reg.name), errors.get(reg.name)) for reg in self.registers}
 
     @staticmethod
-    def _one_by_one(client, block: Block, words: Dict[str, List[int]], errors: Dict[str, str]) -> None:
+    def _one_by_one(client: ModbusClient, block: Block, words: dict[str, list[int]], errors: dict[str, str]) -> None:
+        """Fallback for a rejected block: read each register alone, filling `words` or `errors` in place.
+        Any Modbus exception code is recorded, not raised; connection failures still raise."""
         for reg in block.registers:
             try:
                 words[reg.name] = client.read(reg.table, reg.address, reg.words)

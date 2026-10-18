@@ -22,22 +22,32 @@ Every data row is then checked (word count matches the type, permission is RO/RW
 row numbers consecutive). Problems go to stderr and the exit code is 1, but the CSV is
 still written so you can look at it. Notes about changes made go to stderr too.
 """
+
 import argparse
 import csv
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
 
 # Header fragment (after joining a column's pieces) -> CSV column name.
-COLUMNS = [("no", "no"), ("name", "name"), ("add", "address"), ("qt", "quantity"), ("per", "permission"),
-           ("data", "data_type"), ("gain", "gain"), ("unit", "unit"), ("hyb", "hybrid_inv"),
-           ("pv", "pv_inv"), ("comment", "comment")]
+COLUMNS = [
+    ("no", "no"),
+    ("name", "name"),
+    ("add", "address"),
+    ("qt", "quantity"),
+    ("per", "permission"),
+    ("data", "data_type"),
+    ("gain", "gain"),
+    ("unit", "unit"),
+    ("hyb", "hybrid_inv"),
+    ("pv", "pv_inv"),
+    ("comment", "comment"),
+]
 LOOKALIKES = str.maketrans("ΥΤΑΒΕΗΚΜΝΟΡΧТАВЕНКМОРСХауеорсх", "YTABEHKMNOPXTABEHKMOPCXayeopcx")
 TYPE_WORDS = {"U16": 1, "S16": 1, "U32": 2, "S32": 2, "U64": 4, "S64": 4}
 TICKS = {"√", "V", "v", "1", "Y"}
 SEPARATOR = re.compile(r"^:?-{2,}:?$")
-TEXT_COLUMNS = {"name", "comment"}                  # joined when continuation rows merge
+TEXT_COLUMNS = {"name", "comment"}  # joined when continuation rows merge
 LEADING_WORDS = re.compile(r"^([^\[\]]+?)\s+(\[.*)$")
 TAG_ONLY = re.compile(r"^\[[^\]]*\]$")
 
@@ -46,7 +56,7 @@ class MergeConflict(ValueError):
     """Two merged lines both have a value in the same non-text column."""
 
 
-def cells_of(line: str) -> Optional[List[str]]:
+def cells_of(line: str) -> list[str] | None:
     """'| a | b |' -> ['a', 'b'] (raw), or None if the line isn't a table row."""
     s = line.strip()
     if not (s.startswith("|") and s.endswith("|")):
@@ -60,7 +70,7 @@ def clean(text: str) -> str:
     return " ".join(text.split())
 
 
-def column_names(header_rows: List[List[str]], width: int) -> List[str]:
+def column_names(header_rows: list[list[str]], width: int) -> list[str]:
     """Join each column's header fragments ('QT' + 'Υ') and map them to CSV names."""
     names = []
     for i in range(width):
@@ -70,7 +80,7 @@ def column_names(header_rows: List[List[str]], width: int) -> List[str]:
     return names
 
 
-def fix_row(row: Dict[str, str]) -> None:
+def fix_row(row: dict[str, str]) -> None:
     perm = row.get("permission", "")
     m = re.fullmatch(r"(\d+)\s*(?:<br\s*/?>)?\s*(RO|RW|WO)", perm)
     if not row.get("quantity") and m:
@@ -86,7 +96,7 @@ def fix_row(row: Dict[str, str]) -> None:
             row[key] = "Y"
 
 
-def problems_in(row: Dict[str, str], expected_no: Optional[int]) -> List[str]:
+def problems_in(row: dict[str, str], expected_no: int | None) -> list[str]:
     found = []
     if not row.get("address", "").isdigit():
         found.append(f"address {row.get('address')!r} isn't a number")
@@ -108,7 +118,7 @@ def problems_in(row: Dict[str, str], expected_no: Optional[int]) -> List[str]:
     return found
 
 
-def fit(cells: List[str], width: int, number: int, problems: List[str]) -> List[str]:
+def fit(cells: list[str], width: int, number: int, problems: list[str]) -> list[str]:
     """Trim or pad a row to the header's width. Extra cells are fine if they're empty."""
     if len(cells) > width:
         extra = cells[width:]
@@ -121,7 +131,7 @@ def fit(cells: List[str], width: int, number: int, problems: List[str]) -> List[
     return cells
 
 
-def merge(group: list, number: int, cells: List[str], names: List[str]) -> None:
+def merge(group: list, number: int, cells: list[str], names: list[str]) -> None:
     """Fold a continuation row (empty "No") into its numbered row: [first line, cells, merged lines]."""
     first, target, merged = group
     for i, c in enumerate(cells):
@@ -132,28 +142,32 @@ def merge(group: list, number: int, cells: List[str], names: List[str]) -> None:
         elif not target[i]:
             target[i] = c
         else:
-            raise MergeConflict(f"line {number}: merging into No {target[0]} (line {first}) would combine "
-                                f"{names[i]} {target[i]!r} with {c!r}")
+            raise MergeConflict(
+                f"line {number}: merging into No {target[0]} (line {first}) would combine "
+                f"{names[i]} {target[i]!r} with {c!r}"
+            )
     merged.append(number)
 
 
-def move_leading_words(rows: List[Dict[str, str]], notes: List[str]) -> None:
+def move_leading_words(rows: list[dict[str, str]], notes: list[str]) -> None:
     """'[Smart load 1]' then 'Power [Smart load 2]': the 'Power' belongs to the row above."""
     for prev, row in zip(rows, rows[1:]):
         m = LEADING_WORDS.match(row.get("name", ""))
         if m and TAG_ONLY.match(prev.get("name", "")):
-            notes.append(f"line {row['source_line']}: moved {m.group(1)!r} from the start of No {row['no']}'s "
-                         f"name to the end of No {prev['no']}'s")
+            notes.append(
+                f"line {row['source_line']}: moved {m.group(1)!r} from the start of No {row['no']}'s "
+                f"name to the end of No {prev['no']}'s"
+            )
             prev["name"] = f"{prev['name']} {m.group(1)}"
             row["name"] = m.group(2)
 
 
-def extract(lines: List[str], first_line: int):
+def extract(lines: list[str], first_line: int):
     """lines: the selected file lines; first_line: the file line number of lines[0].
     Returns (column names, rows with 'source_line', problems, notes).
     Raises MergeConflict if continuation rows can't be merged cleanly."""
-    header_rows: List[List[str]] = []
-    body = []                                       # (line number, cells), from the first numbered row on
+    header_rows: list[list[str]] = []
+    body = []  # (line number, cells), from the first numbered row on
     for offset, line in enumerate(lines):
         cells = cells_of(line)
         if cells is None or all(SEPARATOR.match(c) or not c for c in cells):
@@ -164,9 +178,9 @@ def extract(lines: List[str], first_line: int):
             body.append((first_line + offset, cells))
     width = max((len(r) for r in header_rows), default=max((len(c) for _, c in body), default=0))
     names = column_names(header_rows, width)
-    problems: List[str] = []
-    notes: List[str] = []
-    groups = []                                     # [first line, cells, [merged line numbers]]
+    problems: list[str] = []
+    notes: list[str] = []
+    groups = []  # [first line, cells, [merged line numbers]]
     for number, cells in body:
         cells = fit(cells, width, number, problems)
         if cells[0].isdigit():
@@ -197,7 +211,7 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     if args.start_line < 1 or args.end_line < args.start_line:
         p.error("need 1 <= --start-line <= --end-line")
-    lines = args.file.read_text(encoding="utf-8").splitlines()[args.start_line - 1:args.end_line]
+    lines = args.file.read_text(encoding="utf-8").splitlines()[args.start_line - 1 : args.end_line]
     try:
         names, rows, problems, notes = extract(lines, args.start_line)
     except MergeConflict as e:

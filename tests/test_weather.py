@@ -12,7 +12,7 @@ from sigen.config import Site, load_config
 from sigen.errors import ConfigError, ExitCode
 from sigen.weather import COVERAGE_LAYER, OPEN_METEO_URL, OPEN_METEO_VARIABLES, Response
 
-UTC = datetime.timezone.utc
+UTC = datetime.UTC
 SITE = Site(51.0443, -114.0631, "America/Edmonton")
 NOW = datetime.datetime(2026, 10, 10, 14, 20, 30, tzinfo=UTC)
 
@@ -125,6 +125,12 @@ def test_no_response_is_an_error_row():
 def test_unexpected_body_is_an_error_row():
     row = weather.parse_open_meteo(Response(200, "<html>maintenance</html>"), 60, NOW)
     assert row.error.startswith("unexpected response") and "<html>maintenance</html>" in row.error
+
+
+def test_a_radar_answer_without_a_feature_says_so_plainly():
+    with pytest.raises(ValueError) as e:
+        weather.parse_feature(Response(200, json.dumps({"features": []})), "RADAR_1KM_RRAI")
+    assert str(e.value) == "no feature at the site"  # not re-wrapped as "unexpected response" with the body
 
 
 def test_no_period_before_now_is_an_error_row():
@@ -249,6 +255,7 @@ def test_config_site(tmp_path):
         ({"latitude": 50, "longitude": "west", "timezone": "UTC"}, "site.longitude"),
         ({"latitude": True, "longitude": -114, "timezone": "UTC"}, "site.latitude"),
         ({"latitude": 50, "longitude": -114, "timezone": "MST"}, "IANA name"),
+        ({"latitude": 50, "longitude": -114, "timezone": "America/Edmontn"}, "isn't a time zone this computer knows"),
     ],
 )
 def test_config_site_rejects(tmp_path, site, message):

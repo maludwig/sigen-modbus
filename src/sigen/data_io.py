@@ -25,7 +25,7 @@ holding_registers / errors layout:
 import datetime
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any
 
 from sigen import __version__
 from sigen.registers import PLANT_UNIT_ID, TYPE_WORDS, encode_int, encode_string
@@ -33,10 +33,10 @@ from sigen.registers import PLANT_UNIT_ID, TYPE_WORDS, encode_int, encode_string
 TABLE_KEYS = {"input": "input_registers", "holding": "holding_registers"}
 
 # (unit_id, table) -> {address: word}
-RegisterImage = Dict[Tuple[int, str], Dict[int, int]]
+RegisterImage = dict[tuple[int, str], dict[int, int]]
 
 
-def spec_to_words(spec: dict, where: str) -> List[int]:
+def spec_to_words(spec: dict, where: str) -> list[int]:
     """One register spec from a JSON file -> list of 16-bit words."""
     if "raw" in spec:
         words = [int(w) & 0xFFFF for w in spec["raw"]]
@@ -58,7 +58,7 @@ def spec_to_words(spec: dict, where: str) -> List[int]:
         raise ValueError(f"{where}: {e}")
 
 
-def read_json_file(path: Path):
+def read_json_file(path: Path) -> Any:
     """Parse a JSON file written as UTF-8 (with or without a BOM), or as UTF-16 with a BOM,
     which is what Windows PowerShell 5's `>` produces. Raises OSError or ValueError."""
     data = Path(path).read_bytes()
@@ -66,26 +66,31 @@ def read_json_file(path: Path):
     return json.loads(data.decode(encoding))
 
 
-def unit_sections(doc: dict) -> List[dict]:
+def unit_sections(doc: dict) -> list[dict]:
     """The document's per-unit sections: the top level (the plant), then each of other_units."""
     return [doc] + list(doc.get("other_units", []))
 
 
 def load_document(path: Path) -> RegisterImage:
+    """One dump or hand-written fake-data file -> its register image, every unit's input and holding tables (empty
+    ones included). Raises OSError, or ValueError naming the file, unit and address of a bad spec."""
     doc = read_json_file(path)
     image: RegisterImage = {}
-    for section in unit_sections(doc):
-        unit = int(section.get("unit_id", PLANT_UNIT_ID))
-        for table, key in TABLE_KEYS.items():
-            regs = image.setdefault((unit, table), {})
-            for addr_s, spec in section.get(key, {}).items():
-                where = f"{Path(path).name} unit {unit} {key}[{addr_s}]"
-                for i, word in enumerate(spec_to_words(spec, where)):
-                    regs[int(addr_s) + i] = word
+    try:
+        for section in unit_sections(doc):
+            unit = int(section.get("unit_id", PLANT_UNIT_ID))
+            for table, key in TABLE_KEYS.items():
+                regs = image.setdefault((unit, table), {})
+                for addr_s, spec in section.get(key, {}).items():
+                    where = f"{Path(path).name} unit {unit} {key}[{addr_s}]"
+                    for i, word in enumerate(spec_to_words(spec, where)):
+                        regs[int(addr_s) + i] = word
+    except (AttributeError, TypeError) as e:  # the wrong shape (a list, a string for an object)
+        raise ValueError(f"{Path(path).name}: not a register dump ({type(e).__name__}: {e})") from e
     return image
 
 
-def load_dir(data_dir: Path) -> Tuple[RegisterImage, List[Path]]:
+def load_dir(data_dir: Path) -> tuple[RegisterImage, list[Path]]:
     """Merge every *.json in a directory (name order; later files win)."""
     files = sorted(Path(data_dir).glob("*.json"))
     merged: RegisterImage = {}
@@ -95,7 +100,9 @@ def load_dir(data_dir: Path) -> Tuple[RegisterImage, List[Path]]:
     return merged, files
 
 
-def _section(readings: dict, unit: int) -> dict:
+def _section(readings: dict[str, dict], unit: int) -> dict:
+    """One unit's readings -> its unit_id / input_registers / holding_registers / errors section, keyed by address;
+    a reading with an 'error' goes in errors instead of its table."""
     section = {"unit_id": unit, "input_registers": {}, "holding_registers": {}, "errors": {}}
     for name, r in readings.items():
         if "error" in r:
@@ -108,7 +115,13 @@ def _section(readings: dict, unit: int) -> dict:
 
 
 def build_document(
-    readings: dict, *, ip: str, port: int, unit: int, derived: dict, other_units: Optional[Dict[int, dict]] = None
+    readings: dict[str, dict],
+    *,
+    ip: str,
+    port: int,
+    unit: int,
+    derived: dict,
+    other_units: dict[int, dict[str, dict]] | None = None,
 ) -> dict:
     """Readings (from BlockReader.read_all) -> a dump document. `readings` is the plant's;
     other_units maps further unit IDs (inverters) to their readings."""
@@ -119,7 +132,7 @@ def build_document(
             "ip": ip,
             "port": port,
             "tool": f"sigen-modbus {__version__}",
-            "read_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            "read_at": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
         },
         "unit_id": unit,
         "derived": derived,
@@ -134,7 +147,7 @@ def build_document(
 
 def capture_filename(doc: dict, prefix: str) -> str:
     """'my_system_2026-10-07_17-13-34Z.json', from the document's own UTC read time."""
-    read_at = datetime.datetime.fromisoformat(doc["source"]["read_at"]).astimezone(datetime.timezone.utc)
+    read_at = datetime.datetime.fromisoformat(doc["source"]["read_at"]).astimezone(datetime.UTC)
     return f"{prefix}_{read_at:%Y-%m-%d_%H-%M-%S}Z.json"
 
 

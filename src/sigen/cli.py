@@ -42,12 +42,13 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any
+from collections.abc import Callable
 
-from sigen import __version__, db, sync
+from sigen import __version__, alerts, db, sync, weather
 from sigen.cloud import CloudClient
-from sigen.config import CONFIG_ENV, CONFIG_NAME, Config, get_config
-from sigen.control import DEFAULT_JOURNAL, Journal, plan_undo, set_register
+from sigen.config import CONFIG_ENV, CONFIG_NAME, Cloud, Config, get_config
+from sigen.control import DEFAULT_JOURNAL, Journal, WriteResult, plan_undo, set_register
 from sigen.data_io import build_document, capture_filename, read_json_file, save_document
 from sigen.discovery import local_subnet, parse_ip_range, scan
 from sigen.errors import ExitCode, NotFound, PlatformNotSupported, SigenError
@@ -67,11 +68,15 @@ EXIT_CODE_HELP = "exit codes:\n" + "\n".join(f"  {c.value}  {c.name.lower().repl
 
 
 def err(msg: str) -> None:
+    """Print `msg` to stderr: errors, warnings and notes stay out of stdout,
+    so piped output (`read --json`, `scan --json`) stays clean."""
     print(msg, file=sys.stderr)
 
 
 # ---------- shared options ----------
 def _network_parent() -> argparse.ArgumentParser:
+    """The parent parser the device commands share: --port, --unit-id and
+    --timeout, in a "connection" group."""
     p = argparse.ArgumentParser(add_help=False)
     g = p.add_argument_group("connection")
     g.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Modbus TCP port (default: {DEFAULT_PORT})")
@@ -91,6 +96,8 @@ def _network_parent() -> argparse.ArgumentParser:
 
 
 def _scan_options(p: argparse.ArgumentParser, with_ip: bool) -> None:
+    """Add --ip-range and --scan-timeout to `p`, and with `with_ip` an --ip
+    that excludes --ip-range."""
     g = p.add_mutually_exclusive_group()
     if with_ip:
         g.add_argument("--ip", metavar="ADDRESS", help="SigenStor IP address; skips scanning")
@@ -107,6 +114,7 @@ def _scan_options(p: argparse.ArgumentParser, with_ip: bool) -> None:
 
 
 def _journal_option(p: argparse.ArgumentParser) -> None:
+    """Add --journal, the write log `set` appends to and `undo` reads."""
     p.add_argument(
         "--journal",
         type=Path,
@@ -116,6 +124,8 @@ def _journal_option(p: argparse.ArgumentParser) -> None:
 
 
 def _config_option(p: argparse.ArgumentParser, what: str) -> None:
+    """Add --config FILE / --no-config to `p`; `what` names, in the help,
+    the parts of the config this command uses."""
     g = p.add_mutually_exclusive_group()
     g.add_argument(
         "--config",
@@ -127,7 +137,9 @@ def _config_option(p: argparse.ArgumentParser, what: str) -> None:
     g.add_argument("--no-config", action="store_true", help="use no config file, even if one would be found")
 
 
-def _config(args) -> Config:
+def _config(args: argparse.Namespace) -> Config:
+    """The config the command line chose: an empty one for --no-config,
+    else --config FILE or the one get_config finds."""
     return Config(origin="--no-config") if args.no_config else get_config(args.config)
 
 
@@ -146,7 +158,9 @@ POLL_SETTINGS = [
 DASHBOARD_SETTINGS = [("host", "--host", "0.0.0.0"), ("port", "--port", 8050), ("reload", "--reload", False)]
 
 
-def _settings(args, config: Config, command: str, settings) -> List[tuple]:
+def _settings(
+    args: argparse.Namespace, config: Config, command: str, settings: list[tuple[str, str, Any]]
+) -> list[tuple[str, str, str]]:
     """Fill in each of `settings` the command line left out: from the config's section for `command`, else the
     built-in default. Returns [(option, value as text, where it came from)], one per setting."""
     section = config.commands.get(command, {})
@@ -171,7 +185,7 @@ def _settings(args, config: Config, command: str, settings) -> List[tuple]:
     return shown
 
 
-def _print_settings(config: Config, shown) -> None:
+def _print_settings(config: Config, shown: list[tuple[str, str, str]]) -> None:
     """One line per setting: the option, its value, and where it came from (to stderr, beside poll's other notes)."""
     err(f"Settings ({f'config: {config.path}' if config.path else config.origin}):")
     width = max(len(option) for option, _, _ in shown)
@@ -180,22 +194,28 @@ def _print_settings(config: Config, shown) -> None:
         err(f"  {option:<{width}}  {text:<{vwidth}}  {source}")
 
 
-def _connector(args, unit: Optional[int] = None):
+def _connector(args: argparse.Namespace, unit: int | None = None) -> Callable[[], ModbusClient]:
+    """A ModbusClient factory for --ip, --port and --timeout, talking to
+    `unit` (default: --unit-id); BlockReader and set_register call it."""
     return functools.partial(ModbusClient, args.ip, args.port, args.unit_id if unit is None else unit, args.timeout)
 
 
-def _inverter_units(config) -> tuple:
+def _inverter_units(config: Config) -> tuple[int, ...]:
+    """devices.inverter.units: the inverters' Modbus unit IDs; () without
+    an inverter entry."""
     inverter = config.devices.get("inverter")
     return inverter.units if inverter else ()
 
 
-def _find(args) -> List[str]:
+def _find(args: argparse.Namespace) -> list[str]:
+    """Scan --ip-range (default: this computer's /24) for SigenStors; the
+    IPs that answered."""
     ips = args.ip_range or [str(h) for h in local_subnet().hosts()]
     return scan(ips, port=args.port, unit=args.unit_id, timeout=args.timeout, scan_timeout=args.scan_timeout)
 
 
 # ---------- commands ----------
-def _read_device(args, config) -> tuple:
+def _read_device(args: argparse.Namespace, config: Config) -> tuple[dict[str, dict], dict[int, dict[str, dict]]]:
     """Read the plant, and each inverter unit in the config. Without --ip, uses
     devices.inverter.ip from the config, or else scans (sets args.ip).
     Returns (plant readings, {inverter unit: readings})."""
@@ -215,7 +235,9 @@ def _read_device(args, config) -> tuple:
     return plant, inverters
 
 
-def cmd_read(args) -> int:
+def cmd_read(args: argparse.Namespace) -> int:
+    """`sigen read`: read the plant and inverters once and print the
+    summary, or with --json every register as a dump document."""
     config = _config(args)
     readings, inverters = _read_device(args, config)
     if args.json:
@@ -228,7 +250,10 @@ def cmd_read(args) -> int:
     return ExitCode.OK
 
 
-def cmd_capture(args) -> int:
+def cmd_capture(args: argparse.Namespace) -> int:
+    """`sigen capture`: read like `read --json`, save it to a new
+    timestamped file in --out-dir, and print the summary. ERROR if the file
+    exists already or can't be written."""
     config = _config(args)
     readings, inverters = _read_device(args, config)
     doc = build_document(
@@ -250,7 +275,10 @@ def cmd_capture(args) -> int:
     return ExitCode.OK
 
 
-def cmd_read_json(args) -> int:
+def cmd_read_json(args: argparse.Namespace) -> int:
+    """`sigen read-json`: print a saved dump's summary (in local time) and,
+    unless --summary-only, a table per unit. NotFound if the file can't be
+    read, ERROR if it isn't JSON."""
     config = _config(args)
     path = Path(args.data_file)
     try:
@@ -290,7 +318,9 @@ def cmd_read_json(args) -> int:
     return ExitCode.OK
 
 
-def cmd_scan(args) -> int:
+def cmd_scan(args: argparse.Namespace) -> int:
+    """`sigen scan`: print the IP of each SigenStor found; NOT_FOUND if
+    none answered."""
     found = _find(args)
     if args.json:
         print(json.dumps({"found": found, "port": args.port, "unit_id": args.unit_id}))
@@ -306,7 +336,10 @@ def cmd_scan(args) -> int:
 SYMBOL = {"written": "✓", "unchanged": "✓", "dry_run": "…"}
 
 
-def _report(result, args, journal: Optional[Journal]) -> int:
+def _report(result: WriteResult, args: argparse.Namespace, journal: Journal | None) -> int:
+    """Finish `set` / `undo`: journal the result (with --apply; a journal
+    that can't be written is only a warning), print it as JSON or as
+    before/target/after lines, and return its exit code."""
     context = {"ip": args.ip, "port": args.port, "unit": args.unit_id, "command": args.command}
     entry = result.to_dict(**context)
     if journal is not None and args.apply:
@@ -326,7 +359,10 @@ def _report(result, args, journal: Optional[Journal]) -> int:
     return int(result.exit_code)
 
 
-def cmd_set(args) -> int:
+def cmd_set(args: argparse.Namespace) -> int:
+    """`sigen set`: write the one register option given, through
+    control.set_register (a dry run without --apply). REFUSED if the value
+    or --expect-current doesn't parse."""
     chosen = [(reg, getattr(args, reg.name)) for reg in WRITABLE if getattr(args, reg.name) is not None]
     reg, text = chosen[0]
     try:
@@ -339,7 +375,10 @@ def cmd_set(args) -> int:
     return _report(result, args, Journal(args.journal))
 
 
-def cmd_undo(args) -> int:
+def cmd_undo(args: argparse.Namespace) -> int:
+    """`sigen undo`: restore the value from before the last journaled write
+    to this --ip/--port/--unit-id, expecting the value that write left.
+    NotFound if there's nothing to undo."""
     journal = Journal(args.journal)
     plan = plan_undo(journal, args.ip, args.port, args.unit_id)
     if plan is None:
@@ -353,7 +392,8 @@ def cmd_undo(args) -> int:
     return _report(result, args, journal)
 
 
-def cmd_db_migrate(args) -> int:
+def cmd_db_migrate(args: argparse.Namespace) -> int:
+    """`sigen db migrate`: apply the pending migrations, printing each."""
     from sigen import db
 
     url = _config(args).require_database_url()
@@ -370,7 +410,10 @@ def cmd_db_migrate(args) -> int:
     return ExitCode.OK
 
 
-def cmd_db_status(args) -> int:
+def cmd_db_status(args: argparse.Namespace) -> int:
+    """`sigen db status`: the schema version, row counts, the latest of
+    each kind of row, and each table's size and growth. PRECONDITION if
+    migrations are pending or the schema isn't ready (`poll` would refuse)."""
     from sigen import db
 
     config = _config(args)
@@ -416,10 +459,10 @@ def cmd_db_status(args) -> int:
     if last:
         rid, started, ended, error = last
         print(
-            f"Last reading:  {rid} at {started.astimezone(datetime.timezone.utc):%Y-%m-%d %H:%M:%S.%f}Z"
+            f"Last reading:  {rid} at {started.astimezone(datetime.UTC):%Y-%m-%d %H:%M:%S.%f}Z"
             + (f"  FAILED: {error}" if error else "")
         )
-    utc = lambda t: f"{t.astimezone(datetime.timezone.utc):%Y-%m-%d %H:%M}Z"
+    utc = lambda t: f"{t.astimezone(datetime.UTC):%Y-%m-%d %H:%M}Z"
     if "open_meteo" in s:
         total, failed, hourly, quarter, last_valid, last_fetch = s["open_meteo"]
         print(
@@ -481,13 +524,15 @@ def _size(n: float) -> str:
     return f"{n:.0f} B"
 
 
-def _cell(value, max_width: int) -> str:
+def _cell(value: Any, max_width: int) -> str:
+    """One `db query` table cell: NULL for None, CR/LF/tab escaped, cut
+    with … past max_width (0 = never)."""
     text = "NULL" if value is None else str(value)
     text = text.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
     return text[: max_width - 1] + "…" if max_width and len(text) > max_width else text
 
 
-def format_query_table(columns: List[str], rows: List[tuple], max_width: int = 0) -> str:
+def format_query_table(columns: list[str], rows: list[tuple], max_width: int = 0) -> str:
     """psql-style: a header, a rule, one line per row; numbers right-aligned, NULL spelled out,
     line breaks shown as \\n, cells longer than max_width cut with … (0 = never)."""
     import decimal
@@ -512,14 +557,16 @@ def format_query_table(columns: List[str], rows: List[tuple], max_width: int = 0
     return "\n".join(lines)
 
 
-def _site_tz(config):
+def _site_tz(config: Config) -> datetime.tzinfo:
     """The config's site timezone, else this computer's."""
     from zoneinfo import ZoneInfo
 
     return ZoneInfo(config.site.timezone) if config.site else datetime.datetime.now().astimezone().tzinfo
 
 
-def cmd_db_daily(args) -> int:
+def cmd_db_daily(args: argparse.Namespace) -> int:
+    """`sigen db daily`: store each finished local day's energy in
+    daily_energy; with --from / --to, recompute every day in that range."""
     from sigen import daily, db
 
     config = _config(args)
@@ -542,7 +589,10 @@ def cmd_db_daily(args) -> int:
     return ExitCode.OK
 
 
-def cmd_db_query(args) -> int:
+def cmd_db_query(args: argparse.Namespace) -> int:
+    """`sigen db query`: run SQL read-only and print each statement's rows
+    as a table, or all of them as one JSON list; truncation noted on
+    stderr."""
     from sigen import db
 
     url = _config(args).require_database_url()
@@ -582,7 +632,11 @@ def cmd_db_query(args) -> int:
     return ExitCode.OK
 
 
-def cmd_poll(args) -> int:
+def cmd_poll(args: argparse.Namespace) -> int:
+    """`sigen poll`: settle the settings (command line, config, default),
+    check them, set up MAC following, the background jobs, alerts and the
+    cloud heater poller, then hand over to sigen.poll.run. USAGE for a bad
+    combination or an address that won't resolve."""
     import socket
     from sigen import db, netlookup, poll
 
@@ -611,7 +665,7 @@ def cmd_poll(args) -> int:
         else:
             mac = inverter.mac
 
-            def rediscover(current_ip):
+            def rediscover(current_ip: str) -> str | None:
                 if netlookup.mac_for_ip(current_ip) == mac:
                     return current_ip
                 return netlookup.find_ip_for_mac(mac, [str(h) for h in local_subnet().hosts()])
@@ -684,7 +738,9 @@ def cmd_poll(args) -> int:
                 s.close()
 
 
-def _background(args, config, url, watcher=None):
+def _background(
+    args: argparse.Namespace, config: Config, url: str, watcher: alerts.Watcher | None = None
+) -> tuple[weather.Background, weather.Store | None]:
     """poll's background jobs, one at a time in their own thread: (Background, Store or None).
     Always: storing each finished day in daily_energy (sigen.daily), checked every 10 minutes, with its own
     connection. With --weather / --radar: the fetches, sharing a Store; with a watcher (--alerts), each 15-minute
@@ -693,7 +749,7 @@ def _background(args, config, url, watcher=None):
 
     tz = _site_tz(config)
 
-    def daily_energy():
+    def daily_energy() -> None:
         conn = db.connect(url)
         try:
             daily.update(conn, tz, site=config.site, array=config.array, log=print)
@@ -708,7 +764,7 @@ def _background(args, config, url, watcher=None):
     if args.weather:
         for resolution in weather.RESOLUTIONS:
 
-            def fetch(resolution=resolution):
+            def fetch(resolution: int = resolution) -> None:
                 row, stored = weather.record_open_meteo(site, resolution, store, args.capture_open_meteo_weather)
                 print(
                     weather.summarize_open_meteo(row) + ("" if stored else "  (not stored)"),
@@ -720,7 +776,7 @@ def _background(args, config, url, watcher=None):
             jobs.append(weather.Job(f"Open-Meteo {resolution} min", resolution * 60, fetch))
     if args.radar:
 
-        def radar():
+        def radar() -> None:
             rows, added = weather.record_radar(site, store, args.capture_radar)
             print(weather.summarize_radar(rows, added), file=sys.stderr if any(r.error for r in rows) else sys.stdout)
 
@@ -728,7 +784,7 @@ def _background(args, config, url, watcher=None):
     return weather.Background(jobs, err), store
 
 
-def _weather_store(args, config):
+def _weather_store(args: argparse.Namespace, config: Config) -> weather.Store:
     """For `weather` / `radar --record-to-db`: a Store, after checking the schema is ready."""
     from sigen import db, weather
 
@@ -741,7 +797,10 @@ def _weather_store(args, config):
     return weather.Store(url, err)
 
 
-def cmd_weather(args) -> int:
+def cmd_weather(args: argparse.Namespace) -> int:
+    """`sigen weather`: fetch each --resolution from Open-Meteo once and
+    print it, storing it with --record-to-db. DATABASE if a row wasn't
+    stored, else CONNECTION if a fetch failed."""
     from sigen import weather
 
     config = _config(args)
@@ -764,7 +823,10 @@ def cmd_weather(args) -> int:
     return code
 
 
-def cmd_radar(args) -> int:
+def cmd_radar(args: argparse.Namespace) -> int:
+    """`sigen radar`: fetch the radar at the site once and print it; with
+    --record-to-db, store every frame not stored yet. DATABASE if nothing
+    could be stored, else CONNECTION if a fetch failed."""
     from sigen import weather
 
     config = _config(args)
@@ -787,15 +849,25 @@ def cmd_radar(args) -> int:
 
 
 def _local_time(text: str, timezone: str, what: str) -> datetime.datetime:
+    """`text` (ISO date or date and time) as wall-clock time in `timezone`,
+    an IANA name; a time written with its own offset keeps that instant.
+    ArgumentTypeError naming the option `what` if it won't parse."""
     from zoneinfo import ZoneInfo
 
     try:
-        return datetime.datetime.fromisoformat(text).replace(tzinfo=ZoneInfo(timezone))
+        when = datetime.datetime.fromisoformat(text)
+        if when.tzinfo is not None:
+            return when.astimezone(ZoneInfo(timezone))
+        return when.replace(tzinfo=ZoneInfo(timezone))
     except ValueError:
         raise argparse.ArgumentTypeError(f"{what} {text!r} isn't a date/time like 2026-10-10 or 2026-10-10 13:00")
 
 
-def cmd_satellite(args) -> int:
+def cmd_satellite(args: argparse.Namespace) -> int:
+    """`sigen satellite`: add the GOES scans of a local day (or --start to
+    --end) around the site to the per-day cubes; with --record-to-db, also
+    store each scan's shade over the site, or the run's failure (then
+    CONNECTION)."""
     from zoneinfo import ZoneInfo
     from sigen import db, goes, goes_shade
 
@@ -862,7 +934,7 @@ def cmd_satellite(args) -> int:
     finally:
         goes.release_pid_file(pid_file)
     if conn is not None:
-        added = db.insert_satellite_shade(conn, datetime.datetime.now(datetime.timezone.utc), series, error=error)
+        added = db.insert_satellite_shade(conn, datetime.datetime.now(datetime.UTC), series, error=error)
         conn.close()
         if error is not None:
             err(f"error: satellite run failed: {error}")
@@ -872,6 +944,8 @@ def cmd_satellite(args) -> int:
 
 
 def _ntfy_server(text: str) -> str:
+    """argparse type for --ntfy-server: an http(s) base URL, returned
+    without its trailing slash."""
     from sigen.config import NTFY_SERVER
 
     if not NTFY_SERVER.fullmatch(text):
@@ -879,7 +953,10 @@ def _ntfy_server(text: str) -> str:
     return text.rstrip("/")
 
 
-def cmd_ntfy_test(args) -> int:
+def cmd_ntfy_test(args: argparse.Namespace) -> int:
+    """`sigen ntfy-test`: post one message to the config's ntfy topic,
+    storing the attempt in alert_log with --record-to-db. CONNECTION if it
+    didn't get through."""
     import dataclasses
     from sigen import db, ntfy
 
@@ -906,7 +983,7 @@ def cmd_ntfy_test(args) -> int:
     return ExitCode.OK if attempt.ok else ExitCode.CONNECTION
 
 
-def _lan_address() -> Optional[str]:
+def _lan_address() -> str | None:
     """This computer's address on the local network (the route a packet would take; nothing is sent)."""
     import socket
 
@@ -918,7 +995,10 @@ def _lan_address() -> Optional[str]:
         return None
 
 
-def cmd_dashboard(args) -> int:
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """`sigen dashboard`: serve the Flask dashboard until Ctrl+C, settings
+    from the command line, else the config's dashboard section, else the
+    defaults."""
     from sigen import dashboard
 
     config = _config(args)
@@ -936,7 +1016,9 @@ def cmd_dashboard(args) -> int:
     return ExitCode.OK
 
 
-def cmd_mac_lookup(args) -> int:
+def cmd_mac_lookup(args: argparse.Namespace) -> int:
+    """`sigen mac-lookup`: print --ip's MAC, or the address in --ip-range
+    that has --mac. NotFound if nothing answered."""
     from sigen import netlookup
 
     if args.ip:
@@ -960,6 +1042,8 @@ def cmd_mac_lookup(args) -> int:
 
 
 def socket_ip(name: str) -> str:
+    """`name` (a host name or IPv4 address) resolved to an IPv4 address;
+    NotFound if it won't resolve."""
     import socket
 
     try:
@@ -968,8 +1052,11 @@ def socket_ip(name: str) -> str:
         raise NotFound(f"can't resolve {name}: {e}")
 
 
-def _positive(kind, minimum):
-    def parse(text):
+def _positive(kind: Callable[[str], float], minimum: float) -> Callable[[str], float]:
+    """An argparse type: `kind` (int or float) applied to the text,
+    refused below `minimum`."""
+
+    def parse(text: str) -> float:
         try:
             value = kind(text)
         except ValueError:
@@ -981,7 +1068,9 @@ def _positive(kind, minimum):
     return parse
 
 
-def cmd_registers(args) -> int:
+def cmd_registers(args: argparse.Namespace) -> int:
+    """`sigen registers`: list the register map (or only the writable
+    ones), one line each; writable ones show their option and range."""
     regs = WRITABLE if args.writable else ALL_REGISTERS
     for r in regs:
         flag = "W" if r.writable else " "
@@ -993,7 +1082,9 @@ def cmd_registers(args) -> int:
     return ExitCode.OK
 
 
-def cmd_fake_server(args) -> int:
+def cmd_fake_server(args: argparse.Namespace) -> int:
+    """`sigen fake-server`: serve the registers in --fake-data-dir's JSON
+    files as a fake SigenStor until Ctrl+C."""
     from sigen.fake_server import FakeSigenServer
 
     logging.basicConfig(
@@ -1022,7 +1113,9 @@ def cmd_fake_server(args) -> int:
     return ExitCode.OK
 
 
-def _cloud_client(args) -> tuple:
+def _cloud_client(args: argparse.Namespace) -> tuple[CloudClient, Cloud]:
+    """A CloudClient for the config's cloud section, and the section;
+    ConfigError if the config has none."""
     cloud = _config(args).require_cloud()
     return (
         CloudClient(
@@ -1036,7 +1129,10 @@ def _cloud_client(args) -> tuple:
     )
 
 
-def cmd_cloud_login(args) -> int:
+def cmd_cloud_login(args: argparse.Namespace) -> int:
+    """`sigen cloud login`: prompt for the username, password and any
+    emailed code, log in once (no retries), and save the tokens to
+    cloud.token_file."""
     import getpass
 
     client, cloud = _cloud_client(args)
@@ -1046,7 +1142,7 @@ def cmd_cloud_login(args) -> int:
         err("Need both a username and a password; nothing sent.")
         return ExitCode.USAGE
 
-    def mfa(body):
+    def mfa(body: dict) -> str:
         print(f"The cloud wants a security code (code {body.get('code')}: {body.get('msg')}).")
         return input("Security code from the email: ").strip()
 
@@ -1058,14 +1154,19 @@ def cmd_cloud_login(args) -> int:
     return ExitCode.OK
 
 
-def cmd_cloud_refresh(args) -> int:
+def cmd_cloud_refresh(args: argparse.Namespace) -> int:
+    """`sigen cloud refresh`: trade the saved single-use refresh token for
+    fresh tokens (no password)."""
     client, cloud = _cloud_client(args)
     tokens = client.refresh()
     print(f"Refreshed {cloud.token_file}. Access token good for ~{tokens.seconds_left() / 3600:.1f} h.")
     return ExitCode.OK
 
 
-def cmd_cloud_query(args) -> int:
+def cmd_cloud_query(args: argparse.Namespace) -> int:
+    """`sigen cloud query`: GET --path and print the JSON, or each
+    battery's (or --sn's) real-time info as key/value lines or JSON. USAGE
+    without a station ID or a battery to ask about."""
     client, cloud = _cloud_client(args)
     if args.path:
         print(json.dumps(client.get(args.path), indent=1))
@@ -1091,7 +1192,10 @@ def cmd_cloud_query(args) -> int:
     return ExitCode.OK
 
 
-def cmd_sync(args) -> int:
+def cmd_sync(args: argparse.Namespace) -> int:
+    """`sigen sync`: copy the rows in [--start-at, --end-at) that are
+    missing here from the peer dashboard at --url, then recompute the
+    window's daily totals if readings came in."""
     from sigen import daily
 
     config = _config(args)
@@ -1117,7 +1221,15 @@ def cmd_sync(args) -> int:
         if readings_imported and not args.dry_run:  # fresh readings -> the affected days' totals are stale
             tz = _site_tz(config)
             print("Recomputing daily totals for the imported days...")
-            daily.update(conn, tz, start.astimezone(tz).date(), end.astimezone(tz).date(), log=print)
+            daily.update(
+                conn,
+                tz,
+                start.astimezone(tz).date(),
+                end.astimezone(tz).date(),
+                site=config.site,
+                array=config.array,
+                log=print,
+            )
     finally:
         conn.close()
     print(
@@ -1129,6 +1241,8 @@ def cmd_sync(args) -> int:
 
 # ---------- parser ----------
 def build_parser() -> argparse.ArgumentParser:
+    """The `sigen` parser: every command and its options, with its cmd_*
+    function as the `func` default."""
     net = _network_parent()
     fmt = argparse.RawDescriptionHelpFormatter
     p = argparse.ArgumentParser(
@@ -1767,7 +1881,10 @@ def _utf8_output() -> None:
             pass  # not a reconfigurable text stream (e.g. replaced by a test harness)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
+    """The `sigen` entry point: run the command and return its exit code. A
+    SigenError prints `error: …` (with --json, also a JSON object on
+    stdout) and returns its code; Ctrl+C returns 130."""
     _utf8_output()
     args = build_parser().parse_args(argv)
     try:

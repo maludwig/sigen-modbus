@@ -10,7 +10,7 @@ import pytest
 
 from sigen import cloud
 from sigen.cloud import CloudClient, Tokens
-from sigen.config import Cloud, load_config
+from sigen.config import load_config
 from sigen.errors import CloudError, ConfigError, ExitCode
 
 STATION = "1234567890123456"

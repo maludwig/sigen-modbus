@@ -1,7 +1,7 @@
 """Turning readings into useful numbers and summaries. (Reading itself: sigen.block_reader.)"""
 
 import datetime
-from typing import Dict, List, Optional
+from typing import Any
 
 from sigen.config import SMART_LOAD_SLOTS, Config
 from sigen.registers import ALL_ONES_16, BY_ADDRESS, BY_NAME, flag_names
@@ -17,13 +17,13 @@ ALARM_GROUPS = {
 }
 
 
-def readings_from_document(doc: dict) -> Dict[str, dict]:
+def readings_from_document(doc: dict) -> dict[str, dict]:
     """A saved dump -> readings, as if just read from the device.
 
     Registers with raw words are re-decoded with the current register map, so dumps
     made by older versions display correctly. Unknown addresses keep their stored values.
     """
-    readings: Dict[str, dict] = {}
+    readings: dict[str, dict] = {}
     for table, key in TABLE_KEYS.items():
         for addr_s, spec in sorted(doc.get(key, {}).items(), key=lambda kv: int(kv[0])):
             addr = int(addr_s)
@@ -54,12 +54,12 @@ def readings_from_document(doc: dict) -> Dict[str, dict]:
     return readings
 
 
-def other_unit_readings(doc: dict) -> Dict[int, Dict[str, dict]]:
+def other_unit_readings(doc: dict) -> dict[int, dict[str, dict]]:
     """A saved dump's other units (inverters) -> {unit ID: readings}."""
     return {int(s["unit_id"]): readings_from_document(s) for s in doc.get("other_units", [])}
 
 
-def format_table(readings: Dict[str, dict], config: Config = Config(), title: str = "") -> str:
+def format_table(readings: dict[str, dict], config: Config = Config(), title: str = "") -> str:
     """Every register, grouped into live status and settings, aligned for a terminal."""
     rows = {"input": [], "holding": []}
     for name, r in readings.items():
@@ -95,13 +95,18 @@ def format_table(readings: Dict[str, dict], config: Config = Config(), title: st
     return "\n".join(out)
 
 
-def value(readings: dict, name: str, default=None):
+def value(readings: dict[str, dict], name: str, default: Any = None) -> Any:
+    """A register's value from readings (a number, or text for string registers); default when it wasn't read, failed,
+    or holds the "not set" sentinel."""
     v = readings.get(name, {}).get("value")
     return default if v is None else v
 
 
-def derive(readings: dict, now: Optional[datetime.datetime] = None) -> dict:
-    now = now or datetime.datetime.now(datetime.timezone.utc)
+def derive(readings: dict[str, dict], now: datetime.datetime | None = None) -> dict:
+    """Figures worked out from the readings: house load and flow directions (kW), battery energy (kWh), active alarms by
+    group, and the device clock. A key is left out when its registers weren't read. `now` (default: the current time)
+    is only used for the clock skew; read-json passes the dump's read time. Saved as "derived" in JSON dumps."""
+    now = now or datetime.datetime.now(datetime.UTC)
     out = {}
     pv, grid, ess = (
         value(readings, n) for n in ("plant_photovoltaic_power", "plant_grid_sensor_active_power", "plant_ess_power")
@@ -142,14 +147,12 @@ def derive(readings: dict, now: Optional[datetime.datetime] = None) -> dict:
     t = value(readings, "plant_system_time")
     if t:
         # The SigenStor stores local wall-clock time in this "epoch" register, not UTC.
-        out["device_clock_local"] = datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%S"
-        )
+        out["device_clock_local"] = datetime.datetime.fromtimestamp(t, datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S")
         out["device_clock_skew_hours_vs_utc"] = round((t - now.timestamp()) / 3600, 2)
     return out
 
 
-def format_smart_loads(readings: dict, config: Config) -> List[str]:
+def format_smart_loads(readings: dict[str, dict], config: Config) -> list[str]:
     """Named slots, plus any unnamed slot that has ever drawn power. Empty if none apply."""
     rows = []
     for slot in SMART_LOAD_SLOTS:
@@ -171,13 +174,14 @@ INVERTER_ALARMS = {
 }
 
 
-def format_inverter(unit: int, readings: dict) -> List[str]:
+def format_inverter(unit: int, readings: dict[str, dict]) -> list[str]:
     """Summary lines for one inverter unit; lines whose registers weren't read are left out."""
     v = lambda n: value(readings, n)
     label = lambda n: readings.get(n, {}).get("label")
+    num = lambda n, spec: "?" if v(n) is None else format(v(n), spec)  # one unread register in a line: "?"
     head = f"  Inverter (unit {unit}):"
     if v("inverter_model_type"):
-        head += f" {v('inverter_model_type')}, firmware {v('inverter_firmware_version')}"
+        head += f" {v('inverter_model_type')}, firmware {v('inverter_firmware_version') or '?'}"
     lines = [head]
     if label("inverter_running_state"):
         temp = v("inverter_pcs_internal_temperature")
@@ -199,14 +203,15 @@ def format_inverter(unit: int, readings: dict) -> List[str]:
         )
     if v("inverter_phase_a_voltage") is not None:
         lines.append(
-            f"    Grid:            {v('inverter_phase_a_voltage'):.1f} V / {v('inverter_phase_b_voltage'):.1f} V "
-            f"({v('inverter_ab_line_voltage'):.1f} V), {v('inverter_grid_frequency'):.2f} Hz"
+            f"    Grid:            {num('inverter_phase_a_voltage', '.1f')} V / "
+            f"{num('inverter_phase_b_voltage', '.1f')} V "
+            f"({num('inverter_ab_line_voltage', '.1f')} V), {num('inverter_grid_frequency', '.2f')} Hz"
         )
     if v("inverter_ess_min_cluster_temperature") is not None:
         lines.append(
-            f"    Battery cells:   {v('inverter_ess_min_cluster_temperature'):.1f}–"
-            f"{v('inverter_ess_max_cluster_temperature'):.1f} °C, "
-            f"average {v('inverter_ess_average_cell_voltage'):.3f} V"
+            f"    Battery cells:   {num('inverter_ess_min_cluster_temperature', '.1f')}–"
+            f"{num('inverter_ess_max_cluster_temperature', '.1f')} °C, "
+            f"average {num('inverter_ess_average_cell_voltage', '.3f')} V"
         )
     alarms, readable = [], False
     for name, group in INVERTER_ALARMS.items():
@@ -224,12 +229,15 @@ def format_inverter(unit: int, readings: dict) -> List[str]:
 
 def format_summary(
     ip: str,
-    readings: dict,
-    now: Optional[datetime.datetime] = None,
-    title: Optional[str] = None,
+    readings: dict[str, dict],
+    now: datetime.datetime | None = None,
+    title: str | None = None,
     config: Config = Config(),
-    inverters: Optional[Dict[int, dict]] = None,
+    inverters: dict[int, dict[str, dict]] | None = None,
 ) -> str:
+    """The plant summary read, capture and read-json print: modes, alarms, battery, power flows, smart loads and lifetime
+    grid totals, then a section per inverter (unit ID -> readings). Unread modes show "(not readable)"; unread power
+    and energy registers show as 0."""
     d = derive(readings, now)
     v = lambda n, default=0: value(readings, n, default)
     label = lambda n: readings.get(n, {}).get("label", "(not readable)")

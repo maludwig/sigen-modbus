@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, Dict, Iterable, Optional, Tuple
+from collections.abc import Callable, Iterable
 
 from sigen.errors import PlatformNotSupported
 
@@ -57,7 +57,9 @@ def require_supported() -> None:
 
 
 # ---------- Linux ----------
-def neighbours(run: Callable = subprocess.run) -> Dict[str, Tuple[str, Optional[str]]]:
+def neighbours(
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> dict[str, tuple[str, str | None]]:
     """{ip: (state, mac or None)} for the kernel's IPv4 neighbours, from `ip -4 -j neigh show`. A state is
     e.g. "REACHABLE", "STALE", "FAILED" (several flags are joined with "/")."""
     try:
@@ -74,6 +76,8 @@ def neighbours(run: Callable = subprocess.run) -> Dict[str, Tuple[str, Optional[
 
 
 def _confirmed(state: str) -> bool:
+    """True if any of the "/"-joined flags in a neighbour state (from
+    neighbours()) means the MAC is trusted: REACHABLE, PERMANENT or NOARP."""
     return any(s in CONFIRMED for s in state.split("/"))
 
 
@@ -92,11 +96,15 @@ def _poke(ips: Iterable[str]) -> None:
 def _linux_mac_for_ip(
     ip: str,
     timeout: float = LINUX_TIMEOUT,
-    neigh: Callable = neighbours,
-    poke: Callable = _poke,
-    sleep=time.sleep,
-    monotonic=time.monotonic,
-) -> Optional[str]:
+    neigh: Callable[[], dict[str, tuple[str, str | None]]] = neighbours,
+    poke: Callable[[Iterable[str]], None] = _poke,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> str | None:
+    """mac_for_ip() on Linux: pokes `ip`, then polls the neighbour table
+    every 0.1 s until its MAC is confirmed (REACHABLE). None once the
+    resolution the poke started FAILED, or after `timeout` seconds. The
+    keyword arguments after `timeout` are stand-ins for tests."""
     poke([ip])
     deadline, resolving = monotonic() + timeout, False
     while True:
@@ -116,11 +124,11 @@ def _linux_find(
     mac: str,
     ips: Iterable[str],
     timeout: float = LINUX_TIMEOUT,
-    neigh: Callable = neighbours,
-    poke: Callable = _poke,
-    sleep=time.sleep,
-    monotonic=time.monotonic,
-) -> Optional[str]:
+    neigh: Callable[[], dict[str, tuple[str, str | None]]] = neighbours,
+    poke: Callable[[Iterable[str]], None] = _poke,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> str | None:
     """The first of `ips` confirmed (REACHABLE) to have `mac`; a STALE match only counts once the kernel has
     re-checked it."""
     ips = list(ips)
@@ -140,7 +148,9 @@ def _linux_find(
 
 
 # ---------- Windows ----------
-def _windows_mac_for_ip(ip: str) -> Optional[str]:
+def _windows_mac_for_ip(ip: str) -> str | None:
+    """mac_for_ip() on Windows: one SendARP call, blocking ~10 ms on an
+    answer and up to ~3 s without one. None if nothing answered."""
     send_arp = ctypes.WinDLL("iphlpapi").SendARP
     send_arp.argtypes = [ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
     dest = struct.unpack("<I", socket.inet_aton(ip))[0]  # same bytes as network order
@@ -151,14 +161,19 @@ def _windows_mac_for_ip(ip: str) -> Optional[str]:
     return ":".join(f"{b:02x}" for b in buf[:6])
 
 
-def _parallel_find(
-    target: str, ips: Iterable[str], lookup: Callable[[str], Optional[str]], workers: int
-) -> Optional[str]:
+def _parallel_find(target: str, ips: Iterable[str], lookup: Callable[[str], str | None], workers: int) -> str | None:
+    """Runs `lookup` (ip -> MAC) on every one of `ips` across `workers`
+    threads; the first to answer `target` wins, without waiting for the
+    rest. `target` must already be normalized."""
     pool = ThreadPoolExecutor(max_workers=workers)
     try:
         futures = {pool.submit(lookup, ip): ip for ip in ips}
         for future in as_completed(futures):
-            if future.result() == target:
+            try:
+                mac = future.result()
+            except Exception:  # noqa: BLE001 -- one address that fails is "no answer", not the end of the sweep
+                continue
+            if mac == target:
                 return futures[future]
         return None
     finally:
@@ -166,15 +181,15 @@ def _parallel_find(
 
 
 # ---------- the interface ----------
-def mac_for_ip(ip: str) -> Optional[str]:
+def mac_for_ip(ip: str) -> str | None:
     """The MAC of `ip` (an IPv4 address on this computer's network), or None if nothing answered."""
     require_supported()
     return _windows_mac_for_ip(ip) if sys.platform == "win32" else _linux_mac_for_ip(ip)
 
 
 def find_ip_for_mac(
-    mac: str, ips: Iterable[str], workers: int = 64, lookup: Optional[Callable[[str], Optional[str]]] = None
-) -> Optional[str]:
+    mac: str, ips: Iterable[str], workers: int = 64, lookup: Callable[[str], str | None] | None = None
+) -> str | None:
     """The first of `ips` whose MAC is `mac`; None if none of them. `lookup` (ip -> MAC) replaces the
     platform's own (for tests): it's then asked for every address in parallel."""
     target = normalize_mac(mac)

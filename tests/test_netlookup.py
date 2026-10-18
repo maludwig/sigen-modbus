@@ -37,6 +37,16 @@ def test_lookups_refuse_elsewhere(unsupported):
         netlookup.find_ip_for_mac(INVERTER_MAC, ["192.168.1.100"])
 
 
+def test_one_failing_lookup_doesnt_end_the_sweep():
+    def lookup(ip):
+        if ip == "192.0.2.1":
+            raise OSError("SendARP failed")
+        return "02:ab:cd:ef:00:01" if ip == "192.0.2.3" else None
+
+    found = netlookup._parallel_find("02:ab:cd:ef:00:01", ["192.0.2.1", "192.0.2.2", "192.0.2.3"], lookup, workers=3)
+    assert found == "192.0.2.3"
+
+
 def test_linux_needs_the_ip_command(monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(shutil, "which", lambda name: None)

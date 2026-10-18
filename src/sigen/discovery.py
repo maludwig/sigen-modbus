@@ -5,7 +5,7 @@ import concurrent.futures
 import ipaddress
 import socket
 import sys
-from typing import List, Optional
+from collections.abc import Callable
 
 from sigen.errors import SigenError
 from sigen.modbus import ModbusClient
@@ -23,12 +23,15 @@ def local_subnet() -> ipaddress.IPv4Network:
     return ipaddress.ip_network(f"{ip}/24", strict=False)
 
 
-def parse_ip_range(text: str) -> List[str]:
+def parse_ip_range(text: str) -> list[str]:
     """'192.168.1.170-192.168.1.180', '192.168.1.170-180', '192.168.1.0/24' or one IP -> list."""
     text = text.strip()
     try:
         if "/" in text:
-            return [str(ip) for ip in ipaddress.ip_network(text, strict=False).hosts()]
+            network = ipaddress.IPv4Network(text, strict=False)
+            if network.num_addresses > 65536:
+                raise ValueError("range is too large (max 65,536 addresses)")
+            return [str(ip) for ip in network.hosts()]
         if "-" in text:
             start_s, end_s = (p.strip() for p in text.split("-", 1))
             start = ipaddress.IPv4Address(start_s)
@@ -45,7 +48,8 @@ def parse_ip_range(text: str) -> List[str]:
         raise argparse.ArgumentTypeError(f"invalid range '{text}': {e}")
 
 
-def _port_open(ip: str, port: int, timeout: float) -> Optional[str]:
+def _port_open(ip: str, port: int, timeout: float) -> str | None:
+    """ip if a TCP connection to ip:port succeeds within timeout seconds, else None (shaped for filtering ex.map)."""
     try:
         with socket.create_connection((ip, port), timeout=timeout):
             return ip
@@ -54,6 +58,7 @@ def _port_open(ip: str, port: int, timeout: float) -> Optional[str]:
 
 
 def looks_like_sigen(ip: str, port: int, unit: int, timeout: float) -> bool:
+    """True if ip:port answers a Modbus read of plant_ems_work_mode with a known EMS mode; any SigenError means no."""
     reg = BY_NAME["plant_ems_work_mode"]
     try:
         with ModbusClient(ip, port, unit, timeout) as c:
@@ -63,14 +68,14 @@ def looks_like_sigen(ip: str, port: int, unit: int, timeout: float) -> bool:
 
 
 def scan(
-    ips: List[str],
+    ips: list[str],
     *,
     port: int,
     unit: int,
     timeout: float,
     scan_timeout: float,
-    log=lambda msg: print(msg, file=sys.stderr),
-) -> List[str]:
+    log: Callable[[str], None] = lambda msg: print(msg, file=sys.stderr),
+) -> list[str]:
     """Return every address in `ips` that answers like a SigenStor."""
     label = f"{ips[0]} – {ips[-1]}" if len(ips) > 1 else ips[0]
     log(f"Scanning {label} ({len(ips)} address{'es' if len(ips) != 1 else ''}) for Modbus TCP on port {port}…")

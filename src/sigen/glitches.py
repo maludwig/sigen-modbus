@@ -18,7 +18,7 @@ at dusk, PV 0 is the truth).
 """
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional, Tuple
+from collections.abc import Iterable
 
 from sigen.registers import BY_NAME
 
@@ -34,12 +34,15 @@ _BY_ADDRESS = {r.address: r for r in BY_NAME.values() if r.type != "string"}
 
 @dataclass(frozen=True)
 class Verdict:
+    """judge()'s finding on a poll it thinks the device got wrong: sigen.poll stores the rule, alerts reports the
+    why."""
+
     rule: str  # one of RULES: what goes in readings.glitch
     why: str  # in plain words, with the numbers
     sure: bool  # False for a suspect: flagged only if a retry replaces it
 
 
-def _values(values: Iterable[Tuple[int, int]]) -> Dict[str, float]:
+def _values(values: Iterable[tuple[int, int]]) -> dict[str, float]:
     """[(address, value before the gain)] -> {register name: value after the gain}."""
     out = {}
     for address, raw in values:
@@ -49,7 +52,7 @@ def _values(values: Iterable[Tuple[int, int]]) -> Dict[str, float]:
     return out
 
 
-def strings_kw(inverter: Dict[str, float]) -> Optional[float]:
+def strings_kw(inverter: dict[str, float]) -> float | None:
     """The inverter's strings' voltage × current, added up (kW); None without them."""
     if not any(f"inverter_pv{n}_voltage" in inverter for n in STRINGS):
         return None
@@ -61,7 +64,7 @@ def strings_kw(inverter: Dict[str, float]) -> Optional[float]:
     )
 
 
-def judge(readings: Dict[str, Iterable[Tuple[int, int]]]) -> Optional[Verdict]:
+def judge(readings: dict[str, Iterable[tuple[int, int]]]) -> Verdict | None:
     """The verdict on one poll: `readings` maps "plant" / "inverter" to that unit's stored values ([(address, value
     before the gain)], as sigen.poll stores them; a unit that failed is left out). None if it looks right."""
     plant = _values(readings.get("plant", ()))
@@ -87,6 +90,7 @@ def judge(readings: Dict[str, Iterable[Tuple[int, int]]]) -> Optional[Verdict]:
 
 
 def describe(rule: str) -> str:
+    """A rule (one of RULES) in plain words, without a poll's numbers; KeyError for anything else."""
     return {
         TOTAL_LOAD_ZERO: "total load 0 while Running",
         PV_ZERO: f"PV power 0 while the strings make over {PV_ZERO_KW:g} kW",

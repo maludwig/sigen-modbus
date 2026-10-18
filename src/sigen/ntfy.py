@@ -11,7 +11,8 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Optional, Sequence, Tuple
+from typing import Any
+from collections.abc import Sequence
 
 from sigen.config import Alerts
 from sigen.errors import ConnectionFailed
@@ -31,6 +32,7 @@ def masked(topic: str) -> str:
 
 
 def where(alerts: Alerts) -> str:
+    """'<server>/<masked topic>': where alerts go, safe to print or put in an error message."""
     return f"{alerts.ntfy_server}/{masked(alerts.ntfy_topic)}"
 
 
@@ -40,22 +42,24 @@ class Attempt:
 
     alerted_at: datetime.datetime
     message: str
-    title: Optional[str] = None
-    priority: Optional[str] = None
-    tags: Tuple[str, ...] = ()
-    click: Optional[str] = None
-    kind: Optional[str] = None  # what raised it: a battery_watch event kind, or "test"
+    title: str | None = None
+    priority: str | None = None
+    tags: tuple[str, ...] = ()
+    click: str | None = None
+    kind: str | None = None  # what raised it: a battery_watch event kind, or "test"
     was_suppressed: bool = False  # raised but not sent (cooldown): no HTTP fields
-    http_code: Optional[int] = None  # None: nothing answered (or suppressed)
-    ntfy_id: Optional[str] = None
-    error: Optional[str] = None  # None: accepted; else the 4xx/5xx body, or what went wrong
+    http_code: int | None = None  # None: nothing answered (or suppressed)
+    ntfy_id: str | None = None
+    error: str | None = None  # None: accepted; else the 4xx/5xx body, or what went wrong
     where: str = field(default="", compare=False)  # server and masked topic, for messages
 
     @property
     def ok(self) -> bool:
+        """True if ntfy accepted it, or it was suppressed (nothing tried, so nothing failed)."""
         return self.error is None
 
     def problem(self) -> str:
+        """One line saying why a failed attempt failed (unreachable vs refused), topic masked; only for `not ok`."""
         if self.http_code is None:
             return f"couldn't reach ntfy at {self.where}: {self.error}"
         return f"ntfy at {self.where} refused the message: HTTP {self.http_code} {self.error[:300]}"
@@ -64,15 +68,15 @@ class Attempt:
 def suppressed(
     message: str,
     *,
-    title: Optional[str] = None,
-    priority: Optional[str] = None,
+    title: str | None = None,
+    priority: str | None = None,
     tags: Sequence[str] = (),
-    click: Optional[str] = None,
-    kind: Optional[str] = None,
+    click: str | None = None,
+    kind: str | None = None,
 ) -> Attempt:
     """An alert that was raised but deliberately not sent (its kind is in cooldown), for the alert_log."""
     return Attempt(
-        alerted_at=datetime.datetime.now(datetime.timezone.utc),
+        alerted_at=datetime.datetime.now(datetime.UTC),
         message=message,
         title=title,
         priority=priority,
@@ -87,11 +91,11 @@ def post(
     alerts: Alerts,
     message: str,
     *,
-    title: Optional[str] = None,
-    priority: Optional[str] = None,
+    title: str | None = None,
+    priority: str | None = None,
     tags: Sequence[str] = (),
-    click: Optional[str] = None,
-    kind: Optional[str] = None,
+    click: str | None = None,
+    kind: str | None = None,
     timeout: float = TIMEOUT,
 ) -> Attempt:
     """Post `message` to the topic and say how it went; never raises for a network or HTTP failure (that's in the
@@ -100,7 +104,7 @@ def post(
     if priority is not None and priority not in PRIORITIES:
         raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
     sent = dict(
-        alerted_at=datetime.datetime.now(datetime.timezone.utc),
+        alerted_at=datetime.datetime.now(datetime.UTC),
         message=message,
         title=title,
         priority=priority,
@@ -136,7 +140,7 @@ def post(
     return Attempt(**sent, http_code=code, ntfy_id=ntfy_id)
 
 
-def send(alerts: Alerts, message: str, **kw) -> Attempt:
+def send(alerts: Alerts, message: str, **kw: Any) -> Attempt:
     """post(), raising ConnectionFailed (exit 3) if it didn't get through."""
     attempt = post(alerts, message, **kw)
     if not attempt.ok:

@@ -25,9 +25,11 @@ import datetime
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
 
-from sigen import db, glitches
+import psycopg
+
+from sigen import db, glitches, weather
 from sigen.block_reader import BlockReader
 from sigen.errors import ConnectionFailed, DatabaseError, ExitCode, ModbusError
 from sigen.registers import REGISTERS_BY_DEVICE
@@ -40,15 +42,21 @@ GLITCH_RETRY_DELAY = (
 
 
 def now_utc() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+    """The current time, timezone-aware in UTC: the stamp on every reading."""
+    return datetime.datetime.now(datetime.UTC)
 
 
 @dataclass
 class PollResult:
+    """One unit's reading in a poll: `values` as [(address, stored value)]
+    (empty on failure), or `error`. `fatal`: a Modbus exception that should
+    stop polling; `connection_failed`: the connection failed, dropped or timed
+    out (counts towards rediscovery)."""
+
     started_at: datetime.datetime
     ended_at: datetime.datetime
-    values: List[Tuple[int, int]] = field(default_factory=list)
-    error: Optional[str] = None
+    values: list[tuple[int, int]] = field(default_factory=list)
+    error: str | None = None
     fatal: bool = False
     connection_failed: bool = False
 
@@ -66,7 +74,7 @@ def poll_once(reader: BlockReader) -> PollResult:
         return PollResult(started, now_utc(), error=str(e), fatal=e.code not in TRANSIENT_MODBUS_CODES)
 
 
-def poll_verdict(results: Dict[int, "PollResult"], units: Dict[int, str]) -> Optional[glitches.Verdict]:
+def poll_verdict(results: dict[int, "PollResult"], units: dict[int, str]) -> glitches.Verdict | None:
     """sigen.glitches' verdict on this poll, from its units' readings (failed ones left out); None if it looks right."""
     readings = {}
     for unit, result in results.items():
@@ -86,23 +94,23 @@ def run(
     *,
     connector_for: Callable[[str, int], Callable],
     ip: str,
-    units: Dict[int, str],
+    units: dict[int, str],
     db_url: str,
     interval: float,
-    count: Optional[int] = None,
+    count: int | None = None,
     offset: float = 0.0,
-    rediscover: Optional[Callable[[str], Optional[str]]] = None,
+    rediscover: Callable[[str], str | None] | None = None,
     rediscover_after: int = 3,
-    background=None,
-    watcher=None,
-    cloud_heater=None,
+    background: weather.Background | None = None,
+    watcher: "sigen.alerts.Watcher | None" = None,
+    cloud_heater: "sigen.heater.HeaterPoller | None" = None,
     glitch_retries: int = GLITCH_RETRIES,
     glitch_retry_delay: float = GLITCH_RETRY_DELAY,
-    out=print,
-    err=lambda msg: print(msg, file=sys.stderr),
-    monotonic=time.monotonic,
-    sleep=time.sleep,
-    wall=time.time,
+    out: Callable[[str], None] = print,
+    err: Callable[[str], None] = lambda msg: print(msg, file=sys.stderr),
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    wall: Callable[[], float] = time.time,
 ) -> int:
     """Poll until Ctrl+C, or `count` polls. The first poll is immediate; later ones line up
     with the wall clock (on the minute for --interval 60), `offset` seconds after it: a second poller
@@ -128,7 +136,7 @@ def run(
     stored in readings.glitch when it's sure, or when a retry follows (a suspect the retry
     replaces); the watcher is told, and leaves flagged polls out."""
 
-    def readers_for(address):
+    def readers_for(address: str) -> dict[int, BlockReader]:
         return {
             unit: BlockReader(connector_for(address, unit), REGISTERS_BY_DEVICE[device], strict=True)
             for unit, device in units.items()
@@ -147,7 +155,7 @@ def run(
         if cloud_heater is not None:
             cloud_heater.start()
         deadline = monotonic()  # the next scheduled poll
-        retry_at: Optional[float] = None  # a glitch retry, sooner than that
+        retry_at: float | None = None  # a glitch retry, sooner than that
         retries = 0  # glitch retries in a row so far
         while count is None or polls < count:
             retrying = retry_at is not None
@@ -239,7 +247,10 @@ def run(
     return ExitCode.OK
 
 
-def _rediscover(rediscover, ip: str, err) -> Optional[str]:
+def _rediscover(rediscover: Callable[[str], str | None], ip: str, err: Callable[[str], None]) -> str | None:
+    """Ask `rediscover` where the device is now, after repeated connection
+    failures at `ip`, and say what it found. Returns its answer: the new IP,
+    the same one, or None if it's not on the network."""
     err(f"{ip} keeps failing to connect; looking the device up by its MAC…")
     new_ip = rediscover(ip)
     if new_ip is None:
@@ -251,7 +262,14 @@ def _rediscover(rediscover, ip: str, err) -> Optional[str]:
     return new_ip
 
 
-def _store(conn, db_url: str, ip: str, results: Dict[int, PollResult], err, glitch: Optional[str] = None):
+def _store(
+    conn: psycopg.Connection | None,
+    db_url: str,
+    ip: str,
+    results: dict[int, PollResult],
+    err: Callable[[str], None],
+    glitch: str | None = None,
+) -> tuple[psycopg.Connection | None, dict[int, int]]:
     """Store one poll: a reading per unit, sharing a new poll_id (and `glitch`, if any). Returns (connection to use
     next time, {unit: reading id} for the readings stored).
     An unreachable database is survivable; a rejected insert is re-raised (a bug)."""
@@ -261,7 +279,7 @@ def _store(conn, db_url: str, ip: str, results: Dict[int, PollResult], err, glit
         except DatabaseError as e:
             err(f"warning: database unavailable, this poll isn't stored: {e}")
             return None, {}
-    reading_ids: Dict[int, int] = {}
+    reading_ids: dict[int, int] = {}
     try:
         poll_id = db.next_poll_id(conn)
         for unit, result in results.items():

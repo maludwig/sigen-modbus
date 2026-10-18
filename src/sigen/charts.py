@@ -21,8 +21,10 @@ import datetime
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
 
+import psycopg
+
+from sigen.config import Array, Site
 from sigen.db import SATELLITE_SHADE_VALUES, has_glitch_column, values_table, wide_layout
 from sigen.registers import BY_NAME
 
@@ -38,14 +40,19 @@ STRINGS = (1, 2, 3, 4)
 
 
 def _slot(name: str) -> int:
+    """The slot number (1-24) in a smart-load register's name."""
     return int(name.split("_")[3])  # plant_smart_load_<slot>_…
 
 
-def slot_label(slot: int, names: Dict[int, str]) -> str:
+def slot_label(slot: int, names: dict[int, str]) -> str:
+    """A slot's series label: "<config name> (<slot>)", or "slot N" when the
+    config doesn't name it (`names`: slot -> name)."""
     return f"{names[slot]} ({slot})" if slot in names else f"slot {slot}"
 
 
-def _between(start, end, column="started_at"):
+def _between(
+    start: datetime.datetime | None, end: datetime.datetime | None, column: str = "started_at"
+) -> tuple[str, list[datetime.datetime]]:
     """SQL condition and parameters for an optional [start, end) window."""
     parts, params = [], []
     if start is not None:
@@ -57,13 +64,20 @@ def _between(start, end, column="started_at"):
     return "".join(f" AND {p}" for p in parts), params
 
 
-def _good(conn, alias: str = "readings") -> str:
+def _good(conn: psycopg.Connection, alias: str = "readings") -> str:
     """SQL condition for a query over readings: not in a glitched poll. Nothing on a database from before migration
     0007 (no glitch column)."""
     return f" AND {alias}.glitch IS NULL" if has_glitch_column(conn) else ""
 
 
-def reading_values(conn, unit: int, names: List[str], start=None, end=None, ids=None):
+def reading_values(
+    conn: psycopg.Connection,
+    unit: int,
+    names: list[str],
+    start: datetime.datetime | None = None,
+    end: datetime.datetime | None = None,
+    ids: list[int] | None = None,
+) -> dict[int, tuple[datetime.datetime, dict[str, float]]]:
     """{reading id: (started_at, {register name: value after the gain})} for the successful readings of `unit` in
     the window (or with these ids), for the registers `names`; a register without a value is left out. The one
     place to fetch registers over a time window from. Readings of glitched polls are left out.
@@ -120,11 +134,16 @@ def reading_values(conn, unit: int, names: List[str], start=None, end=None, ids=
 # ---------- strings ----------
 @dataclass
 class StringData:
-    times: List[datetime.datetime] = field(default_factory=list)
-    volts: Dict[int, List[float]] = field(default_factory=dict)
-    amps: Dict[int, List[float]] = field(default_factory=dict)
+    """The inverter's readings with every string's voltage (V) and current
+    (A), keyed by PV input number (STRINGS), one value per time
+    (string_readings)."""
 
-    def kw(self, n: int) -> List[float]:
+    times: list[datetime.datetime] = field(default_factory=list)
+    volts: dict[int, list[float]] = field(default_factory=dict)
+    amps: dict[int, list[float]] = field(default_factory=dict)
+
+    def kw(self, n: int) -> list[float]:
+        """String `n`'s power (kW, V × I) at each reading."""
         return [v * a / 1000 for v, a in zip(self.volts[n], self.amps[n])]
 
     def kwh(self) -> float:
@@ -136,12 +155,14 @@ class StringData:
         )
 
 
-def _hours_per_row(frame) -> float:
+def _hours_per_row(frame: "pandas.DataFrame") -> float:
     """The spacing of a regular time index, in hours (to turn a sum of kW rows into kWh)."""
     return (frame.index[1] - frame.index[0]).total_seconds() / 3600
 
 
-def string_readings(conn, start=None, end=None) -> StringData:
+def string_readings(
+    conn: psycopg.Connection, start: datetime.datetime | None = None, end: datetime.datetime | None = None
+) -> StringData:
     """Every successful inverter reading in the window: voltage and current per string."""
     by_reading = reading_values(
         conn, INVERTER, [f"inverter_pv{n}_{q}" for n in STRINGS for q in ("voltage", "current")], start, end
@@ -161,7 +182,9 @@ def string_readings(conn, start=None, end=None) -> StringData:
 LIVE_VOLTS = 10.0
 
 
-def clear_sky_strings(conn, site, array, start: datetime.datetime, end: datetime.datetime):
+def clear_sky_strings(
+    conn: psycopg.Connection, site: Site, array: Array, start: datetime.datetime, end: datetime.datetime
+) -> "pandas.DataFrame":
     """Each string's clear-sky power (kW; a pandas DataFrame, columns = PV input numbers) from `start` to `end`, every
     minute (every 5 minutes for windows over 3 days), with the air temperature and wind from Open-Meteo's
     15-minute rows where the database has them (the model's 12 °C / 2 m/s elsewhere). Needs pvlib. The times are UTC,
@@ -169,7 +192,7 @@ def clear_sky_strings(conn, site, array, start: datetime.datetime, end: datetime
     import pandas as pd
     from sigen import pvmodel
 
-    start, end = start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc)
+    start, end = start.astimezone(datetime.UTC), end.astimezone(datetime.UTC)
     step = "1min" if end - start <= datetime.timedelta(days=3) else "5min"
     times = pd.date_range(pd.Timestamp(start).ceil(step), end, freq=step, inclusive="left")
     weather = conn.execute(
@@ -193,7 +216,9 @@ def clear_sky_strings(conn, site, array, start: datetime.datetime, end: datetime
     return pvmodel.Model(site, array).strings_clear_sky(times, temp, wind)
 
 
-def day_clear_sky_kwh(conn, site, array, start: datetime.datetime, end: datetime.datetime) -> float:
+def day_clear_sky_kwh(
+    conn: psycopg.Connection, site: Site, array: Array, start: datetime.datetime, end: datetime.datetime
+) -> float:
     """The whole array's clear-sky model energy over [start, end), kWh (clear_sky_strings summed; 1-minute steps)."""
     df = clear_sky_strings(conn, site, array, start, end)
     step_hours = (df.index[1] - df.index[0]).total_seconds() / 3600 if len(df.index) > 1 else 1 / 60
@@ -202,10 +227,14 @@ def day_clear_sky_kwh(conn, site, array, start: datetime.datetime, end: datetime
 
 # ---------- smart loads ----------
 def window_of(t: datetime.datetime) -> datetime.datetime:
+    """The start of the clock-aligned 15-minute window `t` falls in, in `t`'s
+    own zone."""
     return t.replace(minute=t.minute - t.minute % 15, second=0, microsecond=0)
 
 
-def picked_readings(conn, start=None, end=None) -> List[Tuple[int, datetime.datetime]]:
+def picked_readings(
+    conn: psycopg.Connection, start: datetime.datetime | None = None, end: datetime.datetime | None = None
+) -> list[tuple[int, datetime.datetime]]:
     """The earliest successful plant reading (by time) of each clock-aligned 15-minute window, in time order:
     [(id, started_at)]. Picked and ordered by started_at, not id -- a backfilled reading has the newest id but an
     old time."""
@@ -225,23 +254,31 @@ def picked_readings(conn, start=None, end=None) -> List[Tuple[int, datetime.date
 
 @dataclass
 class LoadCounters:
-    times: List[datetime.datetime]
-    ids: List[int]
-    series: Dict[str, List[float]]  # label -> lifetime kWh at each picked reading; Other last
-    idle: List[int]  # slots that never moved (and aren't named)
+    """The lifetime kWh counters at some plant readings, one series per slot
+    shown plus Other (smart_load_counters, smart_load_energy)."""
 
-    def since_start(self) -> Dict[str, List[float]]:
+    times: list[datetime.datetime]
+    ids: list[int]
+    series: dict[str, list[float]]  # label -> lifetime kWh at each picked reading; Other last
+    idle: list[int]  # slots that never moved (and aren't named)
+
+    def since_start(self) -> dict[str, list[float]]:
         """Each series minus its own first value: the energy used since the window's first picked reading (0 there;
         for "today", the kWh used so far today)."""
         return {label: [kwh - values[0] for kwh in values] for label, values in self.series.items()}
 
-    def average_kw(self, label: str) -> List[float]:
+    def average_kw(self, label: str) -> list[float]:
         """Average power over each interval between consecutive picked readings (one fewer than times)."""
         kwh, t = self.series[label], self.times
         return [(kwh[k + 1] - kwh[k]) / ((t[k + 1] - t[k]).total_seconds() / 3600) for k in range(len(t) - 1)]
 
 
-def smart_load_counters(conn, names: Dict[int, str], start=None, end=None) -> Optional[LoadCounters]:
+def smart_load_counters(
+    conn: psycopg.Connection,
+    names: dict[int, str],
+    start: datetime.datetime | None = None,
+    end: datetime.datetime | None = None,
+) -> LoadCounters | None:
     """The counters at each picked reading, for the slots that are named or moved, plus Other. None if fewer
     than two readings."""
     return _counters_at(conn, names, picked_readings(conn, start, end))
@@ -251,8 +288,13 @@ MAX_ENERGY_POINTS = 6000  # a day of 15-second readings; longer windows are thin
 
 
 def smart_load_energy(
-    conn, names: Dict[int, str], start=None, end=None, max_points: int = MAX_ENERGY_POINTS, fewest: int = 2
-) -> Optional[LoadCounters]:
+    conn: psycopg.Connection,
+    names: dict[int, str],
+    start: datetime.datetime | None = None,
+    end: datetime.datetime | None = None,
+    max_points: int = MAX_ENERGY_POINTS,
+    fewest: int = 2,
+) -> LoadCounters | None:
     """The counters at every successful plant reading in the window (for the dashboard's energy chart), or at every
     k-th one when there are more than `max_points` (always keeping the last). None if fewer than `fewest` readings
     (a page topping up its chart wants even one)."""
@@ -270,8 +312,12 @@ def smart_load_energy(
 
 
 def _counters_at(
-    conn, names: Dict[int, str], picked: List[Tuple[int, datetime.datetime]], fewest: int = 2
-) -> Optional[LoadCounters]:
+    conn: psycopg.Connection, names: dict[int, str], picked: list[tuple[int, datetime.datetime]], fewest: int = 2
+) -> LoadCounters | None:
+    """The smart-load and house counters at the `picked` (id, started_at)
+    readings, as LoadCounters: slots shown if named or moved between the first
+    and last, Other = house - all 24. None if fewer than `fewest` readings
+    (at least 1)."""
     if len(picked) < max(fewest, 1):
         return None
     ids = [i for i, _ in picked]
@@ -282,6 +328,13 @@ def _counters_at(
                 house[reading_id] = kwh
             else:
                 counters[_slot(name)][reading_id] = kwh
+    # A reading without the house register or one of the counters the others have (a register mapped later) can't be
+    # compared with them: left out, as load_power_snapshots leaves its readings out.
+    complete = [i for i in ids if i in house and all(i in counters[s] for s in counters)]
+    if len(complete) < len(ids):
+        picked, ids = [p for p in picked if p[0] in complete], complete
+        if len(ids) < max(fewest, 1):
+            return None
     used = [s for s in sorted(counters) if s in names or counters[s][ids[-1]] > counters[s][ids[0]]]
     series = {slot_label(s, names): [counters[s][i] for i in ids] for s in used}
     series[OTHER] = [house[i] - sum(counters[s][i] for s in counters) for i in ids]
@@ -290,18 +343,27 @@ def _counters_at(
 
 @dataclass
 class LoadEnergy:
-    first: Tuple[int, datetime.datetime]
-    last: Tuple[int, datetime.datetime]
+    """Each smart load's energy (kWh) between two plant readings, given as
+    (id, started_at), with the whole house's (energy_by_load)."""
+
+    first: tuple[int, datetime.datetime]
+    last: tuple[int, datetime.datetime]
     house: float  # kWh, 30094's difference
     check: float  # 30228's difference (excludes EV chargers)
-    bars: Dict[str, float]  # label -> kWh, smart loads in slot order, then "Other"
+    bars: dict[str, float]  # label -> kWh, smart loads in slot order, then "Other"
 
     @property
     def hours(self) -> float:
+        """The time between the first and last reading, in hours."""
         return (self.last[1] - self.first[1]).total_seconds() / 3600
 
 
-def energy_by_load(conn, names: Dict[int, str], start=None, end=None) -> Optional[LoadEnergy]:
+def energy_by_load(
+    conn: psycopg.Connection,
+    names: dict[int, str],
+    start: datetime.datetime | None = None,
+    end: datetime.datetime | None = None,
+) -> LoadEnergy | None:
     """Latest minus earliest counter over the window's plant readings. None if fewer than two readings."""
     where, params = _between(start, end)
     ends = (
@@ -330,11 +392,19 @@ def energy_by_load(conn, names: Dict[int, str], start=None, end=None) -> Optiona
 
 @dataclass
 class LoadSnapshots:
-    times: List[datetime.datetime]
-    series: Dict[str, List[float]]  # label -> kW at each reading; Other last
+    """Every plant reading's instantaneous power per slot shown, plus Other
+    (load_power_snapshots)."""
+
+    times: list[datetime.datetime]
+    series: dict[str, list[float]]  # label -> kW at each reading; Other last
 
 
-def load_power_snapshots(conn, names: Dict[int, str], start=None, end=None) -> LoadSnapshots:
+def load_power_snapshots(
+    conn: psycopg.Connection,
+    names: dict[int, str],
+    start: datetime.datetime | None = None,
+    end: datetime.datetime | None = None,
+) -> LoadSnapshots:
     """Every plant reading's instantaneous power per slot (named or ever above 0), and Other."""
     by_reading = reading_values(conn, PLANT, [*POWERS, TOTAL_POWER], start, end)
     times, slots, total = [], defaultdict(list), []
@@ -354,12 +424,20 @@ def load_power_snapshots(conn, names: Dict[int, str], start=None, end=None) -> L
 
 @dataclass
 class LoadPower:
+    """One plant reading's power per smart load, plus Other
+    (latest_load_power)."""
+
     at: datetime.datetime  # the reading's time
     house: float  # kW, the total load power (30284)
-    bars: Dict[str, float]  # label -> kW: smart loads in slot order, then "Other"
+    bars: dict[str, float]  # label -> kW: smart loads in slot order, then "Other"
 
 
-def latest_load_power(conn, names: Dict[int, str], start=None, end=None) -> Optional[LoadPower]:
+def latest_load_power(
+    conn: psycopg.Connection,
+    names: dict[int, str],
+    start: datetime.datetime | None = None,
+    end: datetime.datetime | None = None,
+) -> LoadPower | None:
     """The newest successful plant reading in the window: each smart load's power (named, or drawing any then; labelled
     as energy_by_load's bars) and Other = total load power − all 24 slots. None if there's no reading. Reads that one
     reading only, so it's cheap to ask for every few seconds."""
@@ -398,11 +476,20 @@ SOC_LIMITS = {"plant_backup_soc": "backup reserve", "plant_charge_cut_off_soc": 
 
 @dataclass
 class Series:
-    times: List[datetime.datetime]
-    values: Dict[str, List[float]]  # register name -> value after the gain, per time
+    """The readings of one Modbus unit that had every register asked for
+    (unit_series)."""
+
+    times: list[datetime.datetime]
+    values: dict[str, list[float]]  # register name -> value after the gain, per time
 
 
-def unit_series(conn, unit: int, names: List[str], start=None, end=None) -> Series:
+def unit_series(
+    conn: psycopg.Connection,
+    unit: int,
+    names: list[str],
+    start: datetime.datetime | None = None,
+    end: datetime.datetime | None = None,
+) -> Series:
     """Every reading of Modbus unit `unit` in the window that has all of `names`."""
     data = Series([], {n: [] for n in names})
     for t, values in reading_values(conn, unit, names, start, end).values():
@@ -413,12 +500,19 @@ def unit_series(conn, unit: int, names: List[str], start=None, end=None) -> Seri
     return data
 
 
-def inverter_series(conn, names: List[str], start=None, end=None) -> Series:
+def inverter_series(
+    conn: psycopg.Connection,
+    names: list[str],
+    start: datetime.datetime | None = None,
+    end: datetime.datetime | None = None,
+) -> Series:
     """Every inverter reading in the window that has all of `names`."""
     return unit_series(conn, INVERTER, names, start, end)
 
 
-def air_temperatures(conn, start=None, end=None) -> List[Tuple[datetime.datetime, float]]:
+def air_temperatures(
+    conn: psycopg.Connection, start: datetime.datetime | None = None, end: datetime.datetime | None = None
+) -> list[tuple[datetime.datetime, float]]:
     """Open-Meteo's 15-minute temperature_2m in the window (the newest fetch of each period): a model's outside air
     at the site, for context."""
     where, params = _between(start, end, "valid_at")
@@ -478,23 +572,26 @@ def wet_bulb(temp_c: float, rh_pct: float) -> float:
 def _period_end(t: datetime.datetime) -> datetime.datetime:
     """The end of the 15-minute period (end − 15 min, end] that `t` falls in, in UTC: Open-Meteo stamps a period
     with its end."""
-    t = t.astimezone(datetime.timezone.utc)
+    t = t.astimezone(datetime.UTC)
     start = t.replace(minute=t.minute - t.minute % 15, second=0, microsecond=0)
     return start if start == t else start + WINDOW
 
 
-def _lerp(a, b, w):
+def _lerp(a: float | None, b: float | None, w: float) -> float | None:
+    """`a` + (`b` − `a`) × `w`; None if either end is missing."""
     return None if a is None or b is None else a + (b - a) * w
 
 
-def precipitation_kinds(conn, start: datetime.datetime, end: datetime.datetime) -> Dict[datetime.datetime, str]:
+def precipitation_kinds(
+    conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime
+) -> dict[datetime.datetime, str]:
     """{period end (UTC): "rain" or "snow"} from Open-Meteo's 15-minute rows (the newest fetch of each): its weather
     code where that says rain or snow, otherwise the wet-bulb temperature from its air temperature and humidity.
     A missing period between two stored ones is filled in: temperature and humidity interpolated linearly in time,
     the code kept if both neighbours agree. A period with neither a code saying rain or snow nor a temperature and
     humidity has no kind."""
     rows = [
-        (t.astimezone(datetime.timezone.utc), code, temp, rh)
+        (t.astimezone(datetime.UTC), code, temp, rh)
         for t, code, temp, rh in conn.execute(
             "SELECT DISTINCT ON (valid_at) valid_at, weather_code, temperature_2m, relative_humidity_2m "
             "FROM open_meteo_weather WHERE resolution_minutes = 15 AND error IS NULL AND valid_at >= %s AND valid_at <= %s "
@@ -532,25 +629,25 @@ class Precipitation:
     Open-Meteo (precipitation_kinds), and each kind's darkest-colour rate. Drawn as one kind: the one most frames
     have."""
 
-    times: List[datetime.datetime] = field(default_factory=list)
-    rain_mm_h: List[float] = field(default_factory=list)
-    snow_cm_h: List[float] = field(default_factory=list)
-    kinds: List[Optional[str]] = field(default_factory=list)
-    top: Dict[str, float] = field(default_factory=lambda: {k: PRECIP_DEFAULT_TOP for k in PRECIP_COLOURS})
+    times: list[datetime.datetime] = field(default_factory=list)
+    rain_mm_h: list[float] = field(default_factory=list)
+    snow_cm_h: list[float] = field(default_factory=list)
+    kinds: list[str | None] = field(default_factory=list)
+    top: dict[str, float] = field(default_factory=lambda: {k: PRECIP_DEFAULT_TOP for k in PRECIP_COLOURS})
 
     @property
     def kind(self) -> str:
         """ "snow" if more frames are snow than rain, else "rain" (also with no frames: a clear summer day)."""
         return "snow" if self.kinds.count("snow") > self.kinds.count("rain") else "rain"
 
-    def shares(self) -> List[float]:
+    def shares(self) -> list[float]:
         """Per frame, 0 (white) to 1 (the darkest colour): its rate in the strip's kind ÷ that kind's top, eased
         with ln(1 + k·f) / ln(1 + k), k = PRECIP_EASING_K."""
         values, top = (self.snow_cm_h if self.kind == "snow" else self.rain_mm_h), self.top[self.kind]
         return [math.log1p(PRECIP_EASING_K * min(max(v / top, 0.0), 1.0)) / math.log1p(PRECIP_EASING_K) for v in values]
 
 
-def precipitation(conn, start: datetime.datetime, end: datetime.datetime) -> Precipitation:
+def precipitation(conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime) -> Precipitation:
     """Every good radar frame in [start, end), each with its Open-Meteo kind; the tops are the radar's most in the 7
     days to `end` (or the whole window, if longer), PRECIP_DEFAULT_TOP if that's 0 or there are no frames."""
     data = Precipitation()
@@ -608,14 +705,14 @@ class DayEnergy:
     """One local day's energy, kWh. `totals` (keys of DAY_TOTALS; one is missing if its registers weren't read that
     day) are the counters; `flows` ((source, sink) -> kWh, FLOWS) split them up, from the power readings."""
 
-    totals: Dict[str, float]
-    flows: Dict[Tuple[str, str], float]
+    totals: dict[str, float]
+    flows: dict[tuple[str, str], float]
     first: datetime.datetime  # the day's first and last plant readings
     last: datetime.datetime
     covered_hours: float = 0.0  # the time the flows cover (gaps over MAX_FLOW_GAP left out)
 
 
-def _split(flows: Dict[Tuple[str, str], float], v: Dict[str, float], hours: float) -> None:
+def _split(flows: dict[tuple[str, str], float], v: dict[str, float], hours: float) -> None:
     """Add one interval's energy to `flows`, from the powers at its start: solar serves the load first, then the
     battery, then the grid; the battery serves the load, then the grid; the grid serves the load, then the battery.
     What's left over (the inverter's losses, the sensors' disagreements) goes nowhere."""
@@ -642,7 +739,7 @@ def _split(flows: Dict[Tuple[str, str], float], v: Dict[str, float], hours: floa
         flows[source, sink] += kw * hours
 
 
-def day_energy(conn, start: datetime.datetime, end: datetime.datetime) -> Optional[DayEnergy]:
+def day_energy(conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime) -> DayEnergy | None:
     """The energy of the local day [start, end) (end = now, for today so far); None without plant readings.
 
     Every total is a lifetime counter's difference between this server's readings, by this server's clock: its value
@@ -712,7 +809,7 @@ def sankey(e: DayEnergy) -> dict:
     sources = [name for name, _ in SANKEY_SOURCES if any(s == name for s, _, _ in kept)]
     sinks = [name for name, _ in SANKEY_SINKS if any(d == name for _, d, _ in kept)]
 
-    def nodes(names, kwh):
+    def nodes(names: list[str], kwh: dict[str, float]) -> list[dict]:
         return [{"name": n, "kwh": round(max(kwh[n], 0.0), 4), "colour": SANKEY_COLOURS[n]} for n in names]
 
     return {
@@ -731,15 +828,15 @@ class DailyLine:
     y = the value (kWh); x_min / x_max = the first day's local midnight and the midnight after the last (the x range,
     so each day's strip bar shows whole). Plus the best day, for the caption."""
 
-    t: List[int]
-    kwh: List[float]
+    t: list[int]
+    kwh: list[float]
     peak_day: str
     peak_kwh: float
     x_min: int
     x_max: int
 
 
-def pv_history(conn, tz, column: str = "solar_kwh") -> Optional[DailyLine]:
+def pv_history(conn: psycopg.Connection, tz: datetime.tzinfo, column: str = "solar_kwh") -> DailyLine | None:
     """Each finished day's solar generation (daily_energy.`column`, kWh) as a uPlot series for the all-time page. None
     with fewer than two days. Each day is stamped at local noon, so its date reads the same in any browser's zone."""
     rows = [
@@ -762,7 +859,18 @@ def pv_history(conn, tz, column: str = "solar_kwh") -> Optional[DailyLine]:
     )
 
 
-def all_time_strips(conn, tz) -> Tuple[List["Strip"], List[str]]:
+def _pg_zone(tz: datetime.tzinfo) -> str:
+    """`tz` for Postgres's AT TIME ZONE: a ZoneInfo's name, or a fixed offset in POSIX form. Not str(tz): a fixed
+    offset's "UTC-06:00" is POSIX to Postgres, where + is WEST, so it read six hours east. (An interval won't do:
+    Python's -6 h is "-1 day +18:00", which Postgres refuses as a zone.)"""
+    key = getattr(tz, "key", None)
+    if key:
+        return key
+    west = -round(datetime.datetime.now(tz).utcoffset().total_seconds() / 60)  # minutes west of Greenwich
+    return f"UTC{'+' if west >= 0 else '-'}{abs(west) // 60:02d}:{abs(west) % 60:02d}"
+
+
+def all_time_strips(conn: psycopg.Connection, tz: datetime.tzinfo) -> tuple[list["Strip"], list[str]]:
     """The all-time page's per-day strips, one bar per local day (midnight to midnight) over the daily_energy range,
     painted under its solar line by static/strips.js like the string-power chart's: PV (measured solar / the clear-sky
     model), Rain (the radar at the site), Sun (NOAA's share of sun through the cloud over the house). A strip with no
@@ -786,7 +894,7 @@ def all_time_strips(conn, tz) -> Tuple[List["Strip"], List[str]]:
         for d, mm in conn.execute(
             "SELECT (frame_at AT TIME ZONE %s)::date, sum(rain_mm_h) * (%s / 3600.0) FROM radar_frames "
             "WHERE error IS NULL AND frame_at >= %s AND frame_at < %s GROUP BY 1",
-            (str(tz), RADAR_FRAME.total_seconds(), win_start, win_end),
+            (_pg_zone(tz), RADAR_FRAME.total_seconds(), win_start, win_end),
         )
     }
     sun = {
@@ -794,7 +902,7 @@ def all_time_strips(conn, tz) -> Tuple[List["Strip"], List[str]]:
         for d, t in conn.execute(
             "SELECT (scan_at AT TIME ZONE %s)::date, avg(trans_0km) FROM satellite_shade WHERE error IS NULL "
             "AND sun_elevation_deg > %s AND trans_0km IS NOT NULL AND scan_at >= %s AND scan_at < %s GROUP BY 1",
-            (str(tz), SATELLITE_LOW_SUN, win_start, win_end),
+            (_pg_zone(tz), SATELLITE_LOW_SUN, win_start, win_end),
         )
     }
 
@@ -840,22 +948,22 @@ class Strip:
     (static/live_charts.js)."""
 
     label: str
-    starts: List[datetime.datetime]
+    starts: list[datetime.datetime]
     length: datetime.timedelta
-    colours: List[Optional[str]]
+    colours: list[str | None]
 
 
-def _hex(rgb: Tuple[float, float, float]) -> str:
+def _hex(rgb: tuple[float, float, float]) -> str:
     """(r, g, b), each 0 to 1, as "#rrggbb"."""
     return "#" + "".join(f"{round(min(max(c, 0.0), 1.0) * 255):02x}" for c in rgb)
 
 
-def _rgb(colour: str) -> Tuple[float, float, float]:
+def _rgb(colour: str) -> tuple[float, float, float]:
     """ "#rrggbb" as (r, g, b), each 0 to 1."""
     return tuple(int(colour[k : k + 2], 16) / 255 for k in (1, 3, 5))
 
 
-def precipitation_strip(p: Precipitation) -> Tuple[Strip, str]:
+def precipitation_strip(p: Precipitation) -> tuple[Strip, str]:
     """`p` as a strip: a bar per radar frame, from white (nothing falling) to the kind's colour at its top rate
     (Precipitation.shares); labelled "Rain" or "Snow". With the note saying how to read it."""
     white, dark = (1.0, 1.0, 1.0), _rgb(PRECIP_COLOURS[p.kind])
@@ -872,7 +980,9 @@ def precipitation_strip(p: Precipitation) -> Tuple[Strip, str]:
     )
 
 
-def satellite_shade_series(conn, start=None, end=None):
+def satellite_shade_series(
+    conn: psycopg.Connection, start: datetime.datetime | None = None, end: datetime.datetime | None = None
+) -> "goes_shade.ShadeSeries":
     """The stored GOES shade (satellite_shade) for the window as a goes_shade.ShadeSeries, for satellite_strips: good
     scans in time order, NULL columns as NaN (what ShadeSeries uses for "nothing to measure"). sun_azimuth isn't
     stored (the strips don't use it), so it comes back NaN."""
@@ -906,7 +1016,7 @@ SATELLITE_LOW_SUN = 10  # degrees: below this the sun-through-cloud estimate is 
 LOW_SUN_COLOUR = "#cfe2f3"
 
 
-def satellite_strips(s) -> Tuple[List[Strip], str]:
+def satellite_strips(s: "goes_shade.ShadeSeries") -> tuple[list[Strip], str]:
     """One strip per SATELLITE_STRIPS from a goes_shade.ShadeSeries: a bar per scan, white = clear, black = no sun
     (grey in between), pale blue = sun too low for the estimate, none (hatched) = no scan or no value. With the note
     saying how to read them."""
@@ -949,8 +1059,11 @@ def _ratio_colour(ratio: float) -> str:
 
 
 def measured_strip(
-    measured: StringData, clear_sky, block: datetime.timedelta = STRIP_BLOCK, low_sun_kw: float = STRIP_LOW_SUN_KW
-) -> Tuple[Strip, str]:
+    measured: StringData,
+    clear_sky: "pandas.DataFrame",
+    block: datetime.timedelta = STRIP_BLOCK,
+    low_sun_kw: float = STRIP_LOW_SUN_KW,
+) -> tuple[Strip, str]:
     """The array's measured PV power as a share of its clear-sky model, per `block`, as a strip: black = nothing,
     white = at the model (a clear-sky day), orange = twice it (cloud edges reflecting extra light onto the sunlit
     panels); pale blue where the model is under `low_sun_kw` (the sun's too low to judge the array), hatched (no bar)
@@ -966,7 +1079,7 @@ def measured_strip(
         meas = pd.Series(total, index=pd.DatetimeIndex(measured.times)).resample(rule).mean().reindex(model.index)
     else:
         meas = pd.Series(index=model.index, dtype=float)
-    colours: List[Optional[str]] = []
+    colours: list[str | None] = []
     for m, c in zip(meas.to_numpy(), model.to_numpy()):
         if math.isnan(c):
             colours.append(None)  # no model: nothing to compare against

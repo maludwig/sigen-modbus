@@ -10,14 +10,124 @@
    The arithmetic (rollingMean, resample, append, dropBefore) is plain functions, tested in Node
    (tests/js/live_charts.test.js). In a browser this file sets the global LiveCharts; in Node, require() returns the
    same object. */
+
+/**
+ * Readings as the page keeps them: a time column, and a column of values
+ * per label, each as long as t.
+ * @typedef {Object} Table
+ * @property {number[]} t  Unix seconds, ascending
+ * @property {Object<string, (number|null)[]>} cols  label -> values
+ */
+
+/**
+ * A Table as the server sends it, its times still ISO 8601 UTC strings to
+ * the microsecond ("2026-10-14T03:01:30.997599Z"): append() takes it.
+ * @typedef {Object} SentTable
+ * @property {string[]} t
+ * @property {Object<string, (number|null)[]>} cols  label -> values
+ */
+
+/**
+ * What a column takes in a row a top-up left it out of (append's fill):
+ * hold or zero, given the column so far.
+ * @typedef {function((number|null)[]): (number|null)} Fill
+ */
+
+/**
+ * The page's settings, from the server (dashboard.py's render_page, its
+ * env), for start().
+ * @typedef {Object} Env
+ * @property {Object<string, string>} data  chart name -> its data URL
+ * @property {boolean} live  the window reaches now: top the charts up
+ * @property {number} every  seconds between the charts' top-ups
+ * @property {number} strips_every  seconds between fetches of the strips
+ * @property {number} sankey_every  seconds between fetches of the Sankey
+ * @property {?number} keep  a sliding window's length, seconds; null: not
+ *   a sliding window
+ * @property {boolean} today  "today": load the page again after midnight
+ * @property {?number} sunrise  today's, Unix seconds; null: not "today",
+ *   or no site
+ * @property {number} live_volts  V: a string at or above this is lit
+ */
+
+/**
+ * One response's rows, as a spec's tables() picks them out of it.
+ * @typedef {Object} Rows
+ * @property {SentTable} main  the chart's own readings
+ * @property {Object<string, SentTable>} [aux]  readings on other clocks,
+ *   by name (air, soc, sky)
+ * @property {Object} [meta]  anything else to keep (string_power's faces)
+ */
+
+/**
+ * A chart's numbers as liveChart keeps them from fetch to fetch: main, aux,
+ * meta and side for a topped-up chart; raw (and span) for a whole one.
+ * @typedef {Object} Store
+ * @property {Table} [main]
+ * @property {Object<string, Table>} [aux]  by the names in Rows.aux
+ * @property {Object} [meta]  Rows.meta, the latest of each
+ * @property {?{strips: Strip[], notes: string[]}} [side]  the spec.side
+ *   endpoint's response, its strips' starts turned into Unix seconds
+ * @property {?Object} [raw]  a whole chart's latest response
+ * @property {?number[]} [span]  load_power_now's [bottom, top], kept for
+ *   growingSpan
+ */
+
+/**
+ * What a spec's build() returns: uPlot's options and data, less the time
+ * column, its axis and its legend entry, which liveChart's draw() adds.
+ * @typedef {Object} Built
+ * @property {(number|null)[][]} data  a column per series, each as long as
+ *   the times (or x)
+ * @property {Object[]} series  uPlot's series options, one per column
+ * @property {Object[]} [axes]  the y axes
+ * @property {Object} [scales]  uPlot's scales
+ * @property {Object} [hooks]  uPlot's hooks
+ * @property {number[]} [hidden]  uPlot series indexes kept out of the
+ *   legend (0 is time)
+ * @property {Object<number, number>} [pairs]  a series' index -> the index
+ *   of the one that shows and hides with it
+ * @property {string} [note]  for the line under the chart
+ * @property {Strip[]} [strips]  rows of coloured bars under the plot
+ * @property {number[]} [x]  not a time axis: these x values instead
+ * @property {Object} [xaxis]  the x axis's options
+ * @property {Object} [legend]  uPlot's legend options
+ * @property {Object} [cursor]  uPlot's cursor options
+ */
+
+/**
+ * A chart in CHARTS: how to keep its numbers and build it (see the comment
+ * over CHARTS).
+ * @typedef {Object} ChartSpec
+ * @property {number} [aspect]  height ÷ width
+ * @property {function(Store): number} [height]  a fixed height, CSS px
+ * @property {boolean} [night]  "today" before sunrise: a night sky
+ * @property {string} [side]  the Env.data name of its strips
+ * @property {boolean} [whole]  the whole window every time, no ?since=
+ * @property {function(Object): Rows} [tables]  a data response's rows
+ * @property {Fill} [fill]  for main's labels a top-up leaves out
+ * @property {function(Store, Env): Built} build
+ * @property {function(Array[], number, number, Env): number[]} [xrange]
+ *   the [min, max] shown when not zoomed in, from the data and its ends
+ */
 (function (root) {
   "use strict";
 
   // ---------- arithmetic ----------
 
-  // A trailing mean over each reading's last `window` seconds (readings in (t − window, t]): null (a gap in the line)
-  // unless those readings span at least coverage × window with no gap over maxGap between them, i.e. at the start and
-  // after a stop in the polling, rather than a mean of a few readings.
+  /**
+   * A trailing mean over each reading's last `window` seconds (readings in
+   * (t − window, t]): null (a gap in the line) unless those readings span at
+   * least coverage × window with no gap over maxGap between them, i.e. at
+   * the start and after a stop in the polling, rather than a mean of a few
+   * readings.
+   * @param {number[]} ts  Unix seconds, ascending
+   * @param {number[]} vs  a value per time
+   * @param {number} window  seconds
+   * @param {number} [coverage]  the share of the window to span, 0–1
+   * @param {number} [maxGap]  seconds
+   * @returns {(number|null)[]}  a mean per time
+   */
   function rollingMean(ts, vs, window, coverage = 0.9, maxGap = 120) {
     const out = [];
     let total = 0, lo = 0, lastGap = null;                // lastGap: the index after the latest gap over maxGap
@@ -32,9 +142,19 @@
     return out;
   }
 
-  // `values` (at the ascending times `from`) at each of the ascending times `ts`. "linear": between the neighbours
-  // either side, null before the first, after the last, or between two more than maxGap apart. "hold": the last one at
-  // or before, null if none or it's more than maxGap old.
+  /**
+   * `values` (at the ascending times `from`) at each of the ascending times
+   * `ts`. "linear": between the neighbours either side, null before the
+   * first, after the last, between two more than maxGap apart, or next to
+   * a null (a gap, not a 0). "hold": the last one at or before, null if none
+   * or it's more than maxGap old.
+   * @param {number[]} ts  Unix seconds
+   * @param {number[]} from  Unix seconds
+   * @param {(number|null)[]} values  one per `from`
+   * @param {"linear"|"hold"} [how]
+   * @param {number} [maxGap]  seconds
+   * @returns {(number|null)[]}  one per `ts`
+   */
   function resample(ts, from, values, how = "linear", maxGap = Infinity) {
     const out = [];
     let j = 0;                                            // from[j - 1] <= t < from[j]
@@ -45,23 +165,46 @@
       else if (how === "hold") out.push(t - from[a] <= maxGap ? values[a] : null);
       else if (from[a] === t) out.push(values[a]);
       else if (j === from.length || from[j] - from[a] > maxGap) out.push(null);
+      else if (values[a] === null || values[j] === null) out.push(null);
       else out.push(values[a] + (t - from[a]) / (from[j] - from[a]) * (values[j] - values[a]));
     }
     return out;
   }
 
-  // A table: {t: [unix seconds], cols: {label: [values]}}, the columns as long as t.
+  /**
+   * A table: {t: [unix seconds], cols: {label: [values]}}, the columns as
+   * long as t.
+   * @returns {Table}  an empty one
+   */
   const emptyTable = () => ({t: [], cols: {}});
 
   // The value a column takes in rows that left it out: its last (a counter that didn't move), or 0 (a power that
   // stayed at 0).
+  /**
+   * A counter's fill: its last value (null if it has none).
+   * @param {(number|null)[]} column
+   * @returns {(number|null)}
+   */
   const hold = (column) => (column.length ? column[column.length - 1] : null);
+  /**
+   * A power's fill: 0.
+   * @returns {number}
+   */
   const zero = () => 0;
 
-  // Appends the rows {t: [ISO 8601], cols: {label: [values]}} to `table`, those newer than its last row only (some
-  // endpoints send their last few again). A label the rows leave out gets fill(its column) in each new row. A label
-  // the table doesn't have yet: false, and the table is unchanged, unless the table is empty (the caller fetches the
-  // whole window again: the label's earlier values were never sent).
+  /**
+   * Appends the rows {t: [ISO 8601], cols: {label: [values]}} to `table`,
+   * those newer than its last row only (some endpoints send their last few
+   * again). A label the rows leave out gets fill(its column) in each new
+   * row. A label the table doesn't have yet: false, and the table is
+   * unchanged, unless the table is empty (the caller fetches the whole
+   * window again: the label's earlier values were never sent).
+   * @param {Table} table  changed in place
+   * @param {string[]} t  the rows' times, ISO 8601 (SentTable.t)
+   * @param {Object<string, (number|null)[]>} cols  label -> a value per row
+   * @param {Fill} [fill]
+   * @returns {boolean}
+   */
   function append(table, t, cols, fill = hold) {
     const ts = t.map((iso) => Date.parse(iso) / 1000);
     const newest = table.t.length ? table.t[table.t.length - 1] : -Infinity;
@@ -79,7 +222,12 @@
     return true;
   }
 
-  // Drops the rows before `cut` (unix seconds); returns how many.
+  /**
+   * Drops the rows before `cut` (unix seconds); returns how many.
+   * @param {Table} table  changed in place
+   * @param {number} cut  Unix seconds
+   * @returns {number}
+   */
   function dropBefore(table, cut) {
     let k = 0;
     while (k < table.t.length && table.t[k] < cut) k++;
@@ -99,29 +247,70 @@
   const MEAN = 5 * 60;                                    // seconds: the 5-minute means
   const AXIS = 60;                                        // px: the battery charts' axes, so their time axes line up
   const BAR_ROW = 34;                                     // px per bar of the energy-by-load chart
-  const labelWidth = (labels) => {                        // px: the widest label in uPlot's axis font
+  /**
+   * px: the widest label in uPlot's axis font. (100 without a document:
+   * in Node.)
+   * @param {string[]} labels
+   * @returns {number}
+   */
+  const labelWidth = (labels) => {
     if (!root.document) return 100;
     const ctx = root.document.createElement("canvas").getContext("2d");
     ctx.font = "12px system-ui, -apple-system, sans-serif";
     return Math.ceil(Math.max(0, ...labels.map((l) => ctx.measureText(l).width)));
   };
 
+  /**
+   * A colour, see-through: "#rrggbb" as rgba() at opacity `alpha`.
+   * @param {string} hex  "#rrggbb"
+   * @param {number} [alpha]  0–1
+   * @returns {string}
+   */
   const faint = (hex, alpha = 0.2) => {
     const n = parseInt(hex.slice(1), 16);
     return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
   };
+  /**
+   * At least two digits, 0-padded: 7 -> "07".
+   * @param {number} n
+   * @returns {string}
+   */
   const pad2 = (n) => String(n).padStart(2, "0");
   // Times in this device's zone, 24-hour: ymd "2026-10-14", hm "18:05", when "2026-10-14 18:05:30".
+  /**
+   * The local date: "2026-10-14".
+   * @param {Date} d
+   * @returns {string}
+   */
   const ymd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  /**
+   * The local time to the minute, 24-hour: "18:05".
+   * @param {Date} d
+   * @returns {string}
+   */
   const hm = (d) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  /**
+   * The local date and time to the second: "2026-10-14 18:05:30".
+   * @param {number} seconds  Unix seconds
+   * @returns {string}
+   */
   const when = (seconds) => {
     const d = new Date(seconds * 1000);
     return `${ymd(d)} ${hm(d)}:${pad2(d.getSeconds())}`;
   };
 
-  // The time axis's tick labels (uPlot's axis `values`): 24-hour times, with seconds once the ticks are under a minute
-  // apart, and the date under the first tick and wherever a new day starts; just the date for ticks a day or more
-  // apart.
+  /**
+   * The time axis's tick labels (uPlot's axis `values`): 24-hour times,
+   * with seconds once the ticks are under a minute apart, and the date under
+   * the first tick and wherever a new day starts; just the date for ticks a
+   * day or more apart.
+   * @param {uPlot} u  (unused)
+   * @param {number[]} splits  the ticks, Unix seconds
+   * @param {number} axisIdx  (unused)
+   * @param {number} space  (unused)
+   * @param {number} incr  seconds between ticks
+   * @returns {string[]}  a label per tick, "\n" before a date under a time
+   */
   function timeTicks(u, splits, axisIdx, space, incr) {
     let day = null;
     return splits.map((s) => {
@@ -133,16 +322,46 @@
       return label;
     });
   }
+  /**
+   * A series' legend value (uPlot's series `value`): `digits` places and
+   * the unit, "-" where there's none.
+   * @param {number} digits
+   * @param {string} unit
+   * @returns {function(uPlot, ?number): string}
+   */
   const shown = (digits, unit) => (u, v) => (v == null ? "-" : `${v.toFixed(digits)} ${unit}`);
-  const padded = (lo, hi) => {                            // 5 % either side, as matplotlib's margins
+  /**
+   * 5 % either side, as matplotlib's margins.
+   * @param {number} lo
+   * @param {number} hi
+   * @returns {number[]}  [lo, hi] widened; 1 either side if lo == hi
+   */
+  const padded = (lo, hi) => {
     const m = (hi - lo) * 0.05 || 1;
     return [lo - m, hi + m];
   };
+  /**
+   * A y scale's range (uPlot's `range`) with 0 in it, padded; [0, 1] with
+   * no data.
+   * @param {uPlot} u  (unused)
+   * @param {?number} min  the data's, null with none
+   * @param {?number} max
+   * @returns {number[]}  [bottom, top]
+   */
   const withZero = (u, min, max) => (min == null ? [0, 1] : padded(Math.min(min, 0), Math.max(max, 0)));
-  const loadColours = (labels) =>                         // C0, C1, … in order, Other grey
+  /**
+   * C0, C1, … in order, Other grey.
+   * @param {string[]} labels  the loads
+   * @returns {string[]}  a colour per label
+   */
+  const loadColours = (labels) =>
     labels.map((label, i) => (label.startsWith("Other") ? GREY : TAB10[i % TAB10.length]));
 
-  // A thin black line at 0 on `scale` (matplotlib's axhline(0)).
+  /**
+   * A thin black line at 0 on `scale` (matplotlib's axhline(0)).
+   * @param {string} scale  a uPlot scale's key
+   * @returns {function(uPlot): void}  a draw hook
+   */
   const zeroLine = (scale) => (u) => {
     const y = Math.round(u.valToPos(0, scale, true)), {left, top, width, height} = u.bbox;
     if (y < top || y > top + height) return;
@@ -161,7 +380,12 @@
 
   // ---------- the night: what the string charts show for "today" before sunrise ----------
 
-  function mulberry32(seed) {                             // a small seeded random generator: the same sky all night
+  /**
+   * a small seeded random generator: the same sky all night
+   * @param {number} seed  an integer
+   * @returns {function(): number}  the next number in [0, 1) at each call
+   */
+  function mulberry32(seed) {
     return () => {
       seed = (seed + 0x6d2b79f5) | 0;
       let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
@@ -170,7 +394,14 @@
     };
   }
 
-  // A five-pointed star's points around (x, y): outer radius r, inner 0.45 r, a point straight up.
+  /**
+   * A five-pointed star's points around (x, y): outer radius r, inner
+   * 0.45 r, a point straight up.
+   * @param {number} x  px
+   * @param {number} y  px
+   * @param {number} r  px
+   * @returns {string}  an SVG polygon's `points`: ten "x,y" pairs
+   */
   function starPoints(x, y, r) {
     const out = [];
     for (let k = 0; k < 10; k++) {
@@ -180,9 +411,20 @@
     return out.join(" ");
   }
 
-  // An SVG night sky, width × height px: a dark blue gradient, a cartoon crescent moon (sleepy eye, rosy cheek, a
-  // soft glow) and `stars` five-pointed stars, some twinkling, kept off the moon. `label` along the bottom. `id`
-  // prefixes its gradients' and mask's ids: two of these on one page mustn't share them.
+  /**
+   * An SVG night sky, width × height px: a dark blue gradient, a cartoon
+   * crescent moon (sleepy eye, rosy cheek, a soft glow) and `stars`
+   * five-pointed stars, some twinkling, kept off the moon. `label` along the
+   * bottom. `id` prefixes its gradients' and mask's ids: two of these on one
+   * page mustn't share them.
+   * @param {number} width  px
+   * @param {number} height  px
+   * @param {number} seed  for mulberry32: the same seed, the same sky
+   * @param {string} label  put in as it is (SVG markup, not escaped)
+   * @param {string} [id]
+   * @param {number} [stars]
+   * @returns {string}  the <svg> element's markup
+   */
   function nightSvg(width, height, seed, label, id = "night", stars = 30) {
     const rand = mulberry32(seed), r = Math.min(height * 0.2, 64);
     const mx = width * 0.78, my = height * 0.34;          // the moon's centre
@@ -218,17 +460,38 @@
 
   // ---------- the battery temperatures' two axes, their ticks on the same lines ----------
 
-  // The battery axis: from N = min(0, floor(min / 10) × 10) up in 10 °C steps, at least 40 °C tall and up to the
-  // next 10 above max: usually 0–40, −10–30 on a cold night, 0–50 on a hot day.
+  /**
+   * The battery axis: from N = min(0, floor(min / 10) × 10) up in 10 °C
+   * steps, at least 40 °C tall and up to the next 10 above max: usually
+   * 0–40, −10–30 on a cold night, 0–50 on a hot day.
+   * @param {?number} min  °C; null: no data, 0–40
+   * @param {?number} max  °C
+   * @returns {number[]}  [bottom, top], °C
+   */
   function tempRange(min, max) {
     if (min == null || max == null) return [0, 40];
     const lo = Math.min(0, Math.floor(min / 10) * 10);
     return [lo, Math.max(lo + 40, Math.ceil(max / 10) * 10)];
   }
-  const intervals = (lo, hi) => Math.max(1, Math.round((hi - lo) / 10));   // the battery axis's 10 °C steps
+  /**
+   * the battery axis's 10 °C steps
+   * @param {number} lo  °C
+   * @param {number} hi  °C
+   * @returns {number}  how many, at least 1
+   */
+  const intervals = (lo, hi) => Math.max(1, Math.round((hi - lo) / 10));
 
-  // A second axis with the same number of intervals `k`: the first step of `steps` that fits [min, max] in k of them,
-  // starting from a multiple of it at or below min. So each of its ticks lies on one of the first axis's.
+  /**
+   * A second axis with the same number of intervals `k`: the first step of
+   * `steps` that fits [min, max] in k of them, starting from a multiple of
+   * it at or below min. So each of its ticks lies on one of the first
+   * axis's.
+   * @param {?number} min  null: no data, [0, k × steps[0]]
+   * @param {?number} max
+   * @param {number} k
+   * @param {number[]} [steps]  ascending; past the last, whatever fits
+   * @returns {number[]}  [bottom, top]
+   */
   function alignedRange(min, max, k, steps = [10, 20, 25, 50, 100]) {
     if (min == null || max == null) return [0, k * steps[0]];
     for (const step of steps) {
@@ -239,10 +502,22 @@
     return [lo, lo + k * step];
   }
 
-  // k + 1 ticks, evenly from lo to hi.
+  /**
+   * k + 1 ticks, evenly from lo to hi.
+   * @param {number} lo
+   * @param {number} hi
+   * @param {number} k
+   * @returns {number[]}
+   */
   const evenSplits = (lo, hi, k) => Array.from({length: k + 1}, (_, i) => lo + (hi - lo) * i / k);
 
-  // The lowest and highest value of series `idxs` within the x range shown ([null, null] if none).
+  /**
+   * The lowest and highest value of series `idxs` within the x range shown
+   * ([null, null] if none).
+   * @param {uPlot} u
+   * @param {number[]} idxs  uPlot series indexes
+   * @returns {(number|null)[]}  [lowest, highest]
+   */
   function visibleExtent(u, idxs) {
     const x = u.data[0], from = u.scales.x.min, to = u.scales.x.max;
     let lo = Infinity, hi = -Infinity;
@@ -260,22 +535,45 @@
 
   // ---------- a bar per load, turned on its side (energy by load, power by load now) ----------
 
+  /**
+   * A bar chart's height, CSS px: BAR_ROW per bar (at least one's), and 60
+   * for the axis.
+   * @param {Object<string, number>} bars  load -> value
+   * @returns {number}
+   */
   const barsHeight = (bars) => Math.max(Object.keys(bars).length, 1) * BAR_ROW + 60;
 
-  // An axis span that only ever grows, so bars that change every few seconds don't all rescale whenever the biggest
-  // one moves: at first the values' span × ROOM; after that, an end moves out (to that value × ROOM again, for room
-  // to wiggle) only when a value passes it.
   const ROOM = 1.3;
+  /**
+   * An axis span that only ever grows, so bars that change every few seconds
+   * don't all rescale whenever the biggest one moves: at first the values'
+   * span × ROOM; after that, an end moves out (to that value × ROOM again,
+   * for room to wiggle) only when a value passes it.
+   * @param {?number[]} span  [bottom, top] so far; null at first
+   * @param {number[]} values
+   * @returns {number[]}  [bottom, top]
+   */
   function growingSpan(span, values) {
     const hi = Math.max(...values, 0.01), lo = Math.min(...values, 0);
     const [bottom, top] = span || [0, 0];
     return [lo < bottom ? lo * ROOM : bottom, hi > top ? hi * ROOM : top];
   }
 
-  // {load: value}, `total` the house's (for each bar's share): horizontal bars in the loads' colours, the loads' names
-  // down the left, each bar's value and share written past its end (or inside it, in white, where there's no room). A
-  // bar can be negative (Other, when the loads were read a moment apart from the total): it runs left of 0.
-  function loadBars(bars, total, unit, axisLabel, note, span = null) {    // span: [bottom, top], else fitted
+  /**
+   * {load: value}, `total` the house's (for each bar's share): horizontal
+   * bars in the loads' colours, the loads' names down the left, each bar's
+   * value and share written past its end (or inside it, in white, where
+   * there's no room). A bar can be negative (Other, when the loads were read
+   * a moment apart from the total): it runs left of 0.
+   * @param {Object<string, number>} bars  load -> value, in `unit`
+   * @param {?number} total  in `unit`; null or 0: no shares written
+   * @param {string} unit  "kWh" or "kW"
+   * @param {string} axisLabel  under the values' axis
+   * @param {string} note  for the line under the chart
+   * @param {?number[]} [span]  span: [bottom, top], else fitted
+   * @returns {Built}  with x (the bars' indexes) for a not-time axis
+   */
+  function loadBars(bars, total, unit, axisLabel, note, span = null) {
     const labels = Object.keys(bars), values = labels.map((l) => bars[l]), n = labels.length;
     const colours = loadColours(labels), xs = labels.map((_, i) => i);
     const [bottom, top] = span || [Math.min(...values, 0) * 1.05, Math.max(...values, 0.01) * 1.05];
@@ -320,8 +618,21 @@
     };
   }
 
-  // Series of every reading, faint, behind each one's 5-minute mean: [faint…, means…]; the faint ones are left out of
-  // the legend, and hiding a mean hides its readings too.
+  /**
+   * Series of every reading, faint, behind each one's 5-minute mean:
+   * [faint…, means…]; the faint ones are left out of the legend, and hiding
+   * a mean hides its readings too.
+   * @param {number[]} t  Unix seconds
+   * @param {string[]} labels  the faint series' legend names, as
+   *   "<label>, every reading"
+   * @param {number[][]} columns  a value per time, one per label
+   * @param {string[]} colours  "#rrggbb", one per label
+   * @param {string} unit
+   * @param {number} digits  places in the legend
+   * @param {number} [width]  the means' line width, px
+   * @param {string[]} [names]  the means' legend names
+   * @returns {Built}  data, series, hidden and pairs only
+   */
   function meansOverReadings(t, labels, columns, colours, unit, digits, width = 1.3, names = labels) {
     const n = labels.length;
     return {
@@ -342,6 +653,7 @@
 
   const STRINGS = ["1", "2", "3", "4"];
 
+  /** @type {Object<string, ChartSpec>} */
   const CHARTS = {
     string_voltage: {
       aspect: 4.2 / 11,
@@ -541,10 +853,22 @@
 
   // A chart's note is tucked away behind the ⓘ button by its title (the page toggles data-open); an error shows anyway,
   // so a broken chart isn't silently empty.
+  /**
+   * The note's text, shown only if the page has it open.
+   * @param {HTMLElement} note
+   * @param {string} text
+   * @returns {void}
+   */
   function setNote(note, text) {
     note.textContent = text;
     note.hidden = note.dataset.open !== "1";
   }
+  /**
+   * The note's text as an error (class "error"), shown open or not.
+   * @param {HTMLElement} note
+   * @param {string} text
+   * @returns {void}
+   */
   function setError(note, text) {
     note.innerHTML = "";
     const span = root.document.createElement("span");
@@ -554,12 +878,29 @@
     note.hidden = false;
   }
 
+  /**
+   * A data endpoint's JSON; one with an "error" (the server's bad window or
+   * database failure) throws it as an Error.
+   * @param {string} url
+   * @returns {Promise<Object>}
+   */
   async function getJSON(url) {
     const d = await (await root.fetch(url)).json();
     if (d.error) throw new Error(d.error);
     return d;
   }
 
+  /**
+   * One chart: its #plot-<name> element and #note-<name> line, fetched from
+   * env.data[name] and drawn now, then topped up every env.every seconds
+   * while live (and its spec.side strips every env.strips_every).
+   * @param {string} name  a CHARTS key
+   * @param {ChartSpec} spec  CHARTS[name]
+   * @param {Env} env
+   * @param {Array<function(): void>} resizers  run on a window resize:
+   *   this adds its own
+   * @returns {void}
+   */
   function liveChart(name, spec, env, resizers) {
     const el = root.document.getElementById(`plot-${name}`), note = root.document.getElementById(`note-${name}`);
     const url = env.data[name];
@@ -580,7 +921,12 @@
       return auto && spec.xrange ? spec.xrange(data, min, max, env) : [min, max];
     };
 
-    function take(d) {                                    // false: start again with the whole window
+    /**
+     * false: start again with the whole window
+     * @param {Object} d  a response from the chart's data URL
+     * @returns {boolean}
+     */
+    function take(d) {
       if (spec.whole) {
         store.raw = d;
         return true;
@@ -596,6 +942,11 @@
       return true;
     }
 
+    /**
+     * Build the chart from the store and draw it: setData when only the
+     * numbers changed, else a new uPlot in place of the old.
+     * @returns {Built}
+     */
     function draw() {
       const b = spec.build(store, env);
       data = [b.x || store.main.t, ...b.data];
@@ -635,6 +986,11 @@
     // it); the first check after sunrise draws the chart.
     const night = () => spec.night && env.sunrise != null && Date.now() / 1000 < env.sunrise;
     const hhmm = (seconds) => { const d = new Date(seconds * 1000); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+    /**
+     * The night sky in the chart's place, at its size (made again only when
+     * that changed); the chart, if any, hidden behind it.
+     * @returns {void}
+     */
     function showNight() {
       const w = el.clientWidth, h = size().height - extra;
       if (scene && scene.dataset.size === `${w}x${h}`) return;
@@ -648,6 +1004,10 @@
       el.appendChild(scene);
       if (plot) plot.root.style.display = "none";
     }
+    /**
+     * The night sky gone, if it was there, and the chart shown again.
+     * @returns {void}
+     */
     function hideNight() {
       if (scene) scene.remove();
       scene = null;
@@ -655,7 +1015,11 @@
     }
     resizers.push(() => scene && showNight());
 
-    function render() {                                   // the chart, and the line under it
+    /**
+     * the chart, and the line under it
+     * @returns {void}
+     */
+    function render() {
       if (night()) {
         showNight();
         setNote(note, `Before sunrise (${hhmm(env.sunrise)}).` + status + sideStatus);
@@ -672,7 +1036,11 @@
       setNote(note, text + status + sideStatus);
     }
 
-    async function updateSide() {                         // the whole window's strips, now and then
+    /**
+     * the whole window's strips, now and then
+     * @returns {Promise<void>}  a failure goes in the note, not thrown
+     */
+    async function updateSide() {
       try {
         const d = await getJSON(env.data[spec.side]);
         store.side = {...d, strips: d.strips.map((s) => ({...s, starts: s.starts.map((iso) => Date.parse(iso) / 1000)}))};
@@ -683,6 +1051,12 @@
       if (loaded) render();
     }
 
+    /**
+     * One check: what's new since `last` (or the whole window, at first and
+     * when a load the chart hasn't got turns up), less what's slid out of a
+     * sliding window, then render. Skipped while the last is out.
+     * @returns {Promise<void>}  a failure goes in the note, not thrown
+     */
     async function update() {
       if (busy) return;                                   // the last check hasn't come back yet
       busy = true;
@@ -721,8 +1095,15 @@
     }
   }
 
-  // The Sankey diagram at the top (static/my_sankey.js draws it): the whole window's, fetched again every
-  // env.sankey_every seconds while the window reaches now.
+  /**
+   * The Sankey diagram at the top (static/my_sankey.js draws it): the whole
+   * window's, fetched again every env.sankey_every seconds while the window
+   * reaches now.
+   * @param {Env} env
+   * @param {Array<function(): void>} resizers  run on a window resize:
+   *   this adds its own
+   * @returns {void}
+   */
   function sankeyChart(env, resizers) {
     const canvas = root.document.getElementById("sankey"), note = root.document.getElementById("note-sankey");
     let data = null;
@@ -732,6 +1113,11 @@
       if (s && s.sources.length) root.MySankey.draw(canvas, s);
     };
     resizers.push(draw);
+    /**
+     * Fetch the diagram ({first, last, sankey: charts.sankey's, or null with
+     * no readings}), draw it and write its note.
+     * @returns {Promise<void>}  a failure goes in the note, not thrown
+     */
     async function update() {
       const checked = Date.now() / 1000;
       try {
@@ -754,7 +1140,12 @@
     if (env.live) root.setInterval(update, env.sankey_every * 1000);
   }
 
-  // The page: the Sankey diagram, and a live chart in each .plot element, by its id (plot-<name>).
+  /**
+   * The page: the Sankey diagram, and a live chart in each .plot element, by
+   * its id (plot-<name>).
+   * @param {Env} env
+   * @returns {void}
+   */
   function start(env) {
     const resizers = [];
     root.addEventListener("resize", () => resizers.forEach((resize) => resize()));

@@ -13,7 +13,8 @@ import json
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any
+from collections.abc import Callable
 
 from sigen.errors import ConnectionFailed, ExitCode, ModbusError, SigenError
 from sigen.modbus import ModbusClient
@@ -37,33 +38,40 @@ OUTCOME_EXIT = {
 
 @dataclass
 class WriteResult:
+    """What one set_register() call did: the outcome (a key of OUTCOME_EXIT), a message for people, and the
+    register's raw words before, targeted and after (None where they weren't read)."""
+
     register: Register
     outcome: str
     message: str
-    target_words: Optional[List[int]] = None
-    before_words: Optional[List[int]] = None
-    after_words: Optional[List[int]] = None
+    target_words: list[int] | None = None
+    before_words: list[int] | None = None
+    after_words: list[int] | None = None
     write_sent: bool = False
-    undo_of: Optional[str] = None
+    undo_of: str | None = None
     id: str = field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ-")
-        + secrets.token_hex(3)
+        default_factory=lambda: datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ-") + secrets.token_hex(3)
     )
 
     @property
     def exit_code(self) -> ExitCode:
+        """The process exit code for the outcome; a first read refused with a Modbus exception is MODBUS, not
+        CONNECTION."""
         if self.outcome == "read_failed" and "Modbus exception" in self.message:
             return ExitCode.MODBUS
         return OUTCOME_EXIT[self.outcome]
 
-    def _show(self, words):
+    def _show(self, words: list[int] | None) -> str | None:
+        """The words as text (Register.describe), or None if they weren't read."""
         return self.register.describe(words) if words is not None else None
 
-    def to_dict(self, **context) -> dict:
+    def to_dict(self, **context: Any) -> dict:
+        """The journal entry, also printed by `--json`: id and time, then `context` (cli passes ip, port, unit,
+        command), then the register, its words decoded and raw, and the outcome."""
         r = self.register
         return {
             "id": self.id,
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            "ts": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
             **context,
             "register": r.name,
             "table": r.table,
@@ -83,15 +91,19 @@ class WriteResult:
 
 
 class Journal:
+    """The write journal: one JSON object per line, one line per `--apply` attempt; `sigen undo` reads it back."""
+
     def __init__(self, path: Path = DEFAULT_JOURNAL):
         self.path = Path(path)
 
     def append(self, entry: dict) -> None:
+        """Add one entry as a line, creating the journal's folder if needed."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    def entries(self) -> List[dict]:
+    def entries(self) -> list[dict]:
+        """Every entry, oldest first; [] without a journal file. Damaged lines are skipped."""
         if not self.path.exists():
             return []
         out = []
@@ -104,7 +116,7 @@ class Journal:
                     continue  # never let one damaged line block undo of the others
         return out
 
-    def last_undoable(self, ip: str, port: int, unit: int) -> Optional[dict]:
+    def last_undoable(self, ip: str, port: int, unit: int) -> dict | None:
         """Most recent successful write to this device that hasn't been undone yet."""
         entries = [e for e in self.entries() if e.get("ip") == ip and e.get("port") == port and e.get("unit") == unit]
         undone = {e["undo_of"] for e in entries if e.get("undo_of") and e.get("outcome") in ("written", "unchanged")}
@@ -120,12 +132,12 @@ def set_register(
     value: float,
     *,
     apply: bool,
-    expect_words: Optional[List[int]] = None,
-    undo_of: Optional[str] = None,
+    expect_words: list[int] | None = None,
+    undo_of: str | None = None,
 ) -> WriteResult:
     """Read → write → read back. Never raises for device problems; returns the outcome."""
 
-    def result(outcome, message, **kw):
+    def result(outcome: str, message: str, **kw: Any) -> WriteResult:
         return WriteResult(reg, outcome, message, undo_of=undo_of, **kw)
 
     # 1. Allowlist
@@ -215,7 +227,7 @@ def set_register(
     return result("written", "written and verified", write_sent=True, after_words=after, **seen)
 
 
-def _try_read(client: Optional[ModbusClient], connect, reg: Register) -> Optional[List[int]]:
+def _try_read(client: ModbusClient | None, connect: Callable[[], ModbusClient], reg: Register) -> list[int] | None:
     """Read back on the current connection, falling back to a fresh one. None if both fail."""
     if client is not None:
         try:
@@ -229,7 +241,7 @@ def _try_read(client: Optional[ModbusClient], connect, reg: Register) -> Optiona
         return None
 
 
-def plan_undo(journal: Journal, ip: str, port: int, unit: int):
+def plan_undo(journal: Journal, ip: str, port: int, unit: int) -> tuple[dict, Register, float | None, list[int]] | None:
     """Find the write to undo. Returns (entry, register, value_to_restore, expect_words) or None."""
     entry = journal.last_undoable(ip, port, unit)
     if entry is None:

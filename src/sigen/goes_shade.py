@@ -24,7 +24,8 @@ import io
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any
+from collections.abc import Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import h5py
@@ -38,10 +39,10 @@ ASYMMETRY = 0.85  # cloud droplets scatter mostly forward; ice cloud is a little
 FIRST_GUESS_KM = 8.0  # starting cloud height for the cloud-top search
 SETTLED_KM = 0.25  # stop when the height changes less than this
 HEIGHTS_KM = (0, 2, 5, 10)
-EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC)
 
 
-def decode(raw, attrs):
+def decode(raw: np.ndarray, attrs: Mapping[str, Any]) -> np.ndarray:
     """Stored integers -> floats: unsigned fix-up, fill values to NaN, scale and offset (NetCDF conventions)."""
     if attrs.get("_Unsigned", b"") in (b"true", "true") and raw.dtype.kind == "i":
         raw = raw.view(raw.dtype.str.replace("i", "u"))
@@ -54,7 +55,7 @@ def decode(raw, attrs):
     return values
 
 
-def cloud_transmission(tau, mu0, g=ASYMMETRY):
+def cloud_transmission(tau: float | np.ndarray, mu0: float, g: float = ASYMMETRY) -> float | np.ndarray:
     """Share of sunlight (direct + diffuse) through a non-absorbing cloud of optical depth tau, sun at cos(zenith) mu0.
 
     Eddington two-stream reflectance R = (a + (1/2 - 3/4 mu0)(1 - exp(-tau/mu0))) / (1 + a), a = 3/4 (1-g) tau;
@@ -64,20 +65,21 @@ def cloud_transmission(tau, mu0, g=ASYMMETRY):
     return np.clip(1 - reflectance, 0, 1)
 
 
-def toward_sun(lat, lon, azimuth_deg, distance_km):
+def toward_sun(lat: float, lon: float, azimuth_deg: float, distance_km: float) -> tuple[float, float]:
     """The point `distance_km` from (lat, lon) toward compass bearing `azimuth_deg` (flat-earth, fine to ~200 km)."""
     d_lat = distance_km * np.cos(np.radians(azimuth_deg)) / 111.2
     d_lon = distance_km * np.sin(np.radians(azimuth_deg)) / (111.2 * np.cos(np.radians(lat)))
     return lat + d_lat, lon + d_lon
 
 
-def _mean(values):
+def _mean(values: np.ndarray) -> float:
     """Mean of the non-NaN values, NaN if there are none (without numpy's empty-slice warning)."""
     valid = values[~np.isnan(values)]
     return float(valid.mean()) if valid.size else math.nan
 
 
-def _median(values):
+def _median(values: np.ndarray) -> float:
+    """Median of the non-NaN values, NaN if there are none."""
     valid = values[~np.isnan(values)]
     return float(np.median(valid)) if valid.size else math.nan
 
@@ -86,14 +88,16 @@ class Cube:
     """One product's cube for one local day, read whole into memory: its scan starts (UTC), its grid, and decoded
     3×3 blocks of any scan."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path) -> None:
         self.f = h5py.File(io.BytesIO(Path(path).read_bytes()), "r")  # the file itself is closed again at once
         self.grid = FixedGrid(dict(self.f.attrs), self.f["x"][:], self.f["y"][:])
         self.times = [EPOCH + datetime.timedelta(seconds=int(ns) // 10**9) for ns in self.f["time"][:]]
         self.index = {t: i for i, t in enumerate(self.times)}
-        self._frames = {}
+        self._frames: dict[tuple[str, int], np.ndarray] = {}
 
-    def block(self, var: str, i: int, row: int, col: int, half: int = 1):
+    def block(self, var: str, i: int, row: int, col: int, half: int = 1) -> np.ndarray:
+        """Scan i's (2*half+1)² block of `var` around (row, col), decoded
+        (smaller at the grid's edge); each frame is decoded once, then kept."""
         if (var, i) not in self._frames:
             self._frames[var, i] = decode(self.f[var][i], self.f[var].attrs)
         return self._frames[var, i][max(row - half, 0) : row + half + 1, max(col - half, 0) : col + half + 1]
@@ -104,12 +108,14 @@ class ShadeSeries:
     """One row per scan, in time order: when it was sampled (UTC), the sun, and the cloud columns (see the module's
     docstring; NaN where there was nothing to measure)."""
 
-    times: List[datetime.datetime] = field(default_factory=list)  # scan start + SAMPLE_DELAY, UTC
-    sun_elevation: List[float] = field(default_factory=list)
-    sun_azimuth: List[float] = field(default_factory=list)
-    columns: Dict[str, List[float]] = field(default_factory=dict)
+    times: list[datetime.datetime] = field(default_factory=list)  # scan start + SAMPLE_DELAY, UTC
+    sun_elevation: list[float] = field(default_factory=list)
+    sun_azimuth: list[float] = field(default_factory=list)
+    columns: dict[str, list[float]] = field(default_factory=dict)
 
-    def column(self, name: str) -> List[float]:
+    def column(self, name: str) -> list[float]:
+        """The named column, or all NaN if no scan had it (the stored list
+        itself, not a copy)."""
         return self.columns.get(name, [math.nan] * len(self.times))
 
 
@@ -126,7 +132,7 @@ def shade_day(
     import pandas as pd
     import pvlib
 
-    def open_cube(short):
+    def open_cube(short: str) -> Cube | None:
         path = cube_path(cube_dir, satellite, f"{short}{sector}", day)
         return Cube(path) if path.exists() else None
 
@@ -137,7 +143,9 @@ def shade_day(
     samples = [t + SAMPLE_DELAY for t in starts]
     sun = pvlib.solarposition.get_solarposition(pd.DatetimeIndex(samples), lat, lon)
 
-    def sample_cod(row, i, at_lat, at_lon, height_m, tag, mu0):
+    def sample_cod(
+        row: dict[str, float], i: int, at_lat: float, at_lon: float, height_m: float, tag: str, mu0: float
+    ) -> None:
         pixel = cod.grid.pixel(at_lat, at_lon, height_m)
         if pixel is not None:
             tau = cod.block("COD", i, *pixel)

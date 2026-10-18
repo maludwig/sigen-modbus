@@ -28,7 +28,7 @@ PROJECTION = {
 STEP = 56e-6  # radians, ~2 km at the sub-satellite point
 NY, NX = 80, 120
 KM = 50
-UTC = datetime.timezone.utc
+UTC = datetime.UTC
 
 
 def site_angles():
@@ -147,6 +147,19 @@ def test_list_keys_follows_pages_and_fails_cleanly():
     assert asked == [None, "T"]
     with pytest.raises(ConnectionFailed, match="HTTP 503"):
         goes.list_keys("18", "x/", lambda url, params: Response(503, "Slow Down"))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<html>maintenance</html",  # not XML at all
+        '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Contents><Key>a.nc</Key></Contents>'
+        "<IsTruncated>false</IsTruncated></ListBucketResult>",  # an entry without its Size
+    ],
+)
+def test_a_garbled_listing_is_connection_failed(body):
+    with pytest.raises(ConnectionFailed, match="unexpected answer"):
+        goes.list_keys("18", "x/", lambda url, params: Response(200, body))
 
 
 # ---------- geometry and daylight ----------

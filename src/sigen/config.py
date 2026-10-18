@@ -44,7 +44,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sigen.data_io import read_json_file
 from sigen.errors import ConfigError, NotFound
@@ -53,7 +54,7 @@ from sigen.netlookup import normalize_mac
 SMART_LOAD_SLOTS = range(1, 25)
 # Each command's settings: name -> kind ("bool"; "number", low, high; "integer", low, high; "text"; "dir": a
 # directory, relative to the config file's folder). The names are the command's options without the dashes.
-COMMAND_SETTINGS: Dict[str, Dict[str, tuple]] = {
+COMMAND_SETTINGS: dict[str, dict[str, tuple]] = {
     "poll": {
         "interval": ("number", 1, 86400),
         "offset": ("number", 0, 86400),
@@ -70,21 +71,29 @@ COMMAND_SETTINGS: Dict[str, Dict[str, tuple]] = {
 
 @dataclass(frozen=True)
 class Device:
-    ip: Optional[str] = None
-    mac: Optional[str] = None  # normalised, e.g. "02:ab:cd:ef:00:01"
-    units: Tuple[int, ...] = ()  # inverter Modbus unit IDs behind this IP (the plant is always 247)
+    """A devices.<name> entry: where to find that device on the LAN. Any
+    field may be missing; the MAC lets netlookup find a moved IP."""
+
+    ip: str | None = None
+    mac: str | None = None  # normalised, e.g. "02:ab:cd:ef:00:01"
+    units: tuple[int, ...] = ()  # inverter Modbus unit IDs behind this IP (the plant is always 247)
 
 
 @dataclass(frozen=True)
 class Site:
+    """Where the panels are: degrees north / east, and altitude in metres
+    (None if the config doesn't give one)."""
+
     latitude: float
     longitude: float
     timezone: str  # IANA name, e.g. "America/Edmonton"
-    altitude_m: Optional[float] = None
+    altitude_m: float | None = None
 
 
 @dataclass(frozen=True)
 class Panel:
+    """array.panel: the one panel model every string is made of."""
+
     kw: float  # rated (STC) power of one panel
     gamma_pct_per_c: float  # power temperature coefficient, % per °C (negative)
     mount: str  # pvlib SAPM cell-temperature parameter set, e.g. "close_mount_glass_glass"
@@ -92,24 +101,33 @@ class Panel:
 
 @dataclass(frozen=True)
 class Face:
+    """An array.faces entry: one roof plane panels sit on."""
+
     tilt: float  # degrees from horizontal
     azimuth: float  # degrees clockwise from true north
 
 
 @dataclass(frozen=True)
 class PVString:
+    """An array.strings entry: how many panels one PV input has, and on
+    which face."""
+
     panels: int
     face: str  # a key of Array.faces
 
 
 @dataclass(frozen=True)
 class Array:
+    """The "array" section: the PV panels, roof faces and strings that
+    pvmodel turns into expected power."""
+
     panel: Panel
     albedo: float  # ground reflectance
-    faces: Dict[str, Face]
-    strings: Dict[int, PVString]  # PV input number (1 = PV1) -> its string
+    faces: dict[str, Face]
+    strings: dict[int, PVString]  # PV input number (1 = PV1) -> its string
 
     def kw(self, string: int) -> float:
+        """Rated (STC) kW of PV input `string`; KeyError if it isn't one."""
         return self.strings[string].panels * self.panel.kw
 
 
@@ -119,6 +137,9 @@ DEFAULT_CUBE_DIR = Path("captures/satellite/cubes")
 
 @dataclass(frozen=True)
 class Alerts:
+    """The "alerts" section: the ntfy topic and server notifications go to
+    (the server without a trailing slash)."""
+
     ntfy_topic: str = field(repr=False)  # repr=False: anyone who knows it can read and send
     ntfy_server: str = DEFAULT_NTFY_SERVER
 
@@ -137,29 +158,34 @@ class Cloud:
     token_file: Path  # absolute (resolved against the config folder)
     base_url: str = DEFAULT_CLOUD_BASE_URL  # the region's API host (api-us, api-eu, …)
     app_base_url: str = DEFAULT_CLOUD_APP_URL  # the region's web-app host, sent as origin/referer (app-us, …)
-    station_id: Optional[str] = None  # for device queries, e.g. the heater poll
-    batteries: Tuple[str, ...] = ()  # battery pack SNs to poll, e.g. ("110AXX1234000A", "110AXX1234000B")
-    obfuscation_key: Optional[str] = None  # the app's static 16-byte AES password key; needed only by login
-    client_basic: Optional[str] = None  # the app's OAuth client Basic credential (base64); login + refresh
+    station_id: str | None = None  # for device queries, e.g. the heater poll
+    batteries: tuple[str, ...] = ()  # battery pack SNs to poll, e.g. ("110AXX1234000A", "110AXX1234000B")
+    obfuscation_key: str | None = None  # the app's static 16-byte AES password key; needed only by login
+    client_basic: str | None = None  # the app's OAuth client Basic credential (base64); login + refresh
 
 
 @dataclass(frozen=True)
 class Config:
-    smart_load_names: Dict[int, str] = field(default_factory=dict)  # slot -> name
-    database_url: Optional[str] = field(default=None, repr=False)  # repr=False: holds a password
-    devices: Dict[str, Device] = field(default_factory=dict)  # "inverter", "loadhub", …
-    site: Optional[Site] = None
-    test_database_url: Optional[str] = field(default=None, repr=False)  # only tests/test_db.py uses it
-    alerts: Optional[Alerts] = None
-    array: Optional[Array] = None
-    satellite_cube_dir: Optional[Path] = None  # satellite.cube_dir, absolute; None without a config file
-    cloud: Optional["Cloud"] = None  # the "cloud" section; None without one
-    commands: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # "poll" -> {"weather": True, …} (as given)
+    """The parsed config file. Every section is optional (None or empty
+    when absent); a command that needs one calls require_*(), which raises
+    ConfigError saying how to add it."""
+
+    smart_load_names: dict[int, str] = field(default_factory=dict)  # slot -> name
+    database_url: str | None = field(default=None, repr=False)  # repr=False: holds a password
+    devices: dict[str, Device] = field(default_factory=dict)  # "inverter", "loadhub", …
+    site: Site | None = None
+    test_database_url: str | None = field(default=None, repr=False)  # only the tests use it (conftest.py)
+    alerts: Alerts | None = None
+    array: Array | None = None
+    satellite_cube_dir: Path | None = None  # satellite.cube_dir, absolute; None without a config file
+    cloud: Cloud | None = None  # the "cloud" section; None without one
+    commands: dict[str, dict[str, Any]] = field(default_factory=dict)  # "poll" -> {"weather": True, …} (as given)
     # Where it came from, for messages: the file, "--no-config", or where get_config looked.
-    origin: Optional[str] = field(default=None, compare=False)
-    path: Optional[Path] = field(default=None, compare=False)  # the file, if it came from one
+    origin: str | None = field(default=None, compare=False)
+    path: Path | None = field(default=None, compare=False)  # the file, if it came from one
 
     def _from(self) -> str:
+        """' (origin)' for the end of an error message, or '' without one."""
         return f" ({self.origin})" if self.origin else ""
 
     def cube_dir(self) -> Path:
@@ -168,6 +194,7 @@ class Config:
         return self.satellite_cube_dir if self.satellite_cube_dir is not None else DEFAULT_CUBE_DIR
 
     def require_database_url(self) -> str:
+        """database.url, or ConfigError (exit 2) if the config has none."""
         if not self.database_url:
             raise ConfigError(
                 f'the config has no database URL{self._from()}; add "database": {{"url": "postgresql://…"}}'
@@ -175,6 +202,7 @@ class Config:
         return self.database_url
 
     def require_site(self) -> Site:
+        """The site, or ConfigError if the config has none."""
         if self.site is None:
             raise ConfigError(
                 f'the config has no site{self._from()}; add "site": {{"latitude": …, '
@@ -183,6 +211,7 @@ class Config:
         return self.site
 
     def require_alerts(self) -> Alerts:
+        """The alerts section, or ConfigError if the config has none."""
         if self.alerts is None:
             raise ConfigError(
                 f'the config has no alerts{self._from()}; add "alerts": {{"ntfy_topic": "…"}} '
@@ -191,6 +220,7 @@ class Config:
         return self.alerts
 
     def require_cloud(self) -> "Cloud":
+        """The cloud section, or ConfigError if the config has none."""
         if self.cloud is None:
             raise ConfigError(
                 f"the config has no cloud section{self._from()}; add "
@@ -200,6 +230,7 @@ class Config:
         return self.cloud
 
     def require_array(self) -> Array:
+        """The PV array, or ConfigError if the config has none."""
         if self.array is None:
             raise ConfigError(
                 f'the config has no array{self._from()}; add "array": {{"panel": …, "albedo": …, '
@@ -207,7 +238,7 @@ class Config:
             )
         return self.array
 
-    def register_alias(self, register_name: str) -> Optional[str]:
+    def register_alias(self, register_name: str) -> str | None:
         """'plant_smart_load_7_power' -> 'Basement Plugs', if slot 7 is named."""
         prefix = "plant_smart_load_"
         if register_name.startswith(prefix):
@@ -221,7 +252,7 @@ CONFIG_NAME = "config.json"
 CONFIG_ENV = "SIGEN_CONFIG"
 
 
-def find_config(start: Optional[Path] = None) -> Optional[Path]:
+def find_config(start: Path | None = None) -> Path | None:
     """The nearest config.json: in `start` (default: the current directory) or the closest
     directory above it; None if there's none."""
     here = (start or Path.cwd()).resolve()
@@ -231,7 +262,7 @@ def find_config(start: Optional[Path] = None) -> Optional[Path]:
     return None
 
 
-def get_config(path: Optional[Path] = None) -> Config:
+def get_config(path: Path | None = None) -> Config:
     """The config to use: `path` (--config) if given, else the file named by $SIGEN_CONFIG,
     else the nearest config.json in the current directory or above it. With none of those, an
     empty Config whose origin says where it looked. A named file that's missing is exit 9."""
@@ -247,7 +278,10 @@ def get_config(path: Optional[Path] = None) -> Config:
     return load_config(path)
 
 
-def load_config(path: Optional[Path]) -> Config:
+def load_config(path: Path | None) -> Config:
+    """Read and check the config file at `path` (None: an empty Config).
+    A missing or unreadable file is NotFound (exit 9); bad contents are
+    ConfigError (exit 2), naming the key at fault."""
     if path is None:
         return Config()
     try:
@@ -305,7 +339,7 @@ def load_config(path: Optional[Path]) -> Config:
         database_url = db["url"].strip()
         test_database_url = db["test_url"].strip() if "test_url" in db else None
 
-    names: Dict[int, str] = {}
+    names: dict[int, str] = {}
     loads = doc.get("smart_loads", [])
     if not isinstance(loads, list):
         raise ConfigError(f"{path}: 'smart_loads' must be a list")
@@ -337,7 +371,7 @@ def load_config(path: Optional[Path]) -> Config:
     )
 
 
-def _cloud(path: Path, spec) -> "Cloud":
+def _cloud(path: Path, spec: Any) -> "Cloud":
     """The "cloud" section: token_file (required, a path relative to the config folder); base_url, app_base_url,
     station_id, batteries (all optional); and the app's two static constants, obfuscation_key and client_basic
     (optional, kept here instead of in the code so they are not committed -- login needs both, refresh needs
@@ -384,7 +418,7 @@ def _cloud(path: Path, spec) -> "Cloud":
     )
 
 
-def _command_settings(path: Path, command: str, spec) -> Dict[str, Any]:
+def _command_settings(path: Path, command: str, spec: Any) -> dict[str, Any]:
     """A command's section (COMMAND_SETTINGS), each value checked and converted (a "dir" to an absolute Path)."""
     kinds = COMMAND_SETTINGS[command]
     if not isinstance(spec, dict):
@@ -414,7 +448,7 @@ def _command_settings(path: Path, command: str, spec) -> Dict[str, Any]:
     return out
 
 
-def _cube_dir(path: Path, spec) -> Path:
+def _cube_dir(path: Path, spec: Any) -> Path:
     """satellite.cube_dir, relative to the config file's folder (an absolute one stays as it is)."""
     if not isinstance(spec, dict) or set(spec) - {"cube_dir"}:
         raise ConfigError(f'{path}: "satellite" must be {{"cube_dir": "captures/satellite/cubes"}}')
@@ -428,7 +462,8 @@ NTFY_TOPIC = re.compile(r"[-_A-Za-z0-9]{1,64}")  # what ntfy accepts as a topic 
 NTFY_SERVER = re.compile(r"https?://[^/\s]+/?")  # a server's base URL, e.g. https://ntfy.sh
 
 
-def _alerts(path: Path, spec) -> Alerts:
+def _alerts(path: Path, spec: Any) -> Alerts:
+    """The "alerts" section: ntfy_topic (required), ntfy_server (optional)."""
     shape = '"alerts" must be {"ntfy_topic": "…"}, optionally with "ntfy_server": "https://…"'
     if not isinstance(spec, dict) or "ntfy_topic" not in spec or set(spec) - {"ntfy_topic", "ntfy_server"}:
         raise ConfigError(f"{path}: {shape}")
@@ -440,13 +475,15 @@ def _alerts(path: Path, spec) -> Alerts:
     return Alerts(ntfy_topic=topic, ntfy_server=server.rstrip("/"))
 
 
-def _number(path: Path, where: str, value, low: float, high: float) -> float:
+def _number(path: Path, where: str, value: Any, low: float, high: float) -> float:
+    """`value` as a float if it's a JSON number in [low, high] (not a bool),
+    else ConfigError naming `where`."""
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
         raise ConfigError(f"{path}: {where} must be a number from {low:g} to {high:g}, got {value!r}")
     return float(value)
 
 
-def _array(path: Path, spec) -> Array:
+def _array(path: Path, spec: Any) -> Array:
     """The PV array: panel, ground albedo, roof faces, and which face each PV input's string is on."""
     shape = '"array" must be {"panel": {...}, "albedo": 0.2, "faces": {...}, "strings": {...}}'
     if not isinstance(spec, dict) or set(spec) != {"panel", "albedo", "faces", "strings"}:
@@ -491,7 +528,9 @@ def _array(path: Path, spec) -> Array:
     return Array(panel, _number(path, "array.albedo", spec["albedo"], 0, 1), faces, dict(sorted(strings.items())))
 
 
-def _site(path: Path, spec) -> Site:
+def _site(path: Path, spec: Any) -> Site:
+    """The "site" section: latitude, longitude, timezone (an IANA name with
+    a slash, or "UTC"), and optionally altitude_m."""
     shape = (
         '"site" must be {"latitude": 51.04, "longitude": -114.06, "timezone": "America/Edmonton"}, optionally '
         'with "altitude_m"'
@@ -509,5 +548,9 @@ def _site(path: Path, spec) -> Site:
     timezone = spec["timezone"]
     if not isinstance(timezone, str) or "/" not in timezone and timezone != "UTC":
         raise ConfigError(f'{path}: site.timezone must be an IANA name like "America/Edmonton", got {timezone!r}')
+    try:
+        ZoneInfo(timezone)  # the shape is right; is it a zone this computer knows (a typo isn't)?
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ConfigError(f"{path}: site.timezone {timezone!r} isn't a time zone this computer knows (a typo?)")
     altitude = _number(path, "site.altitude_m", spec["altitude_m"], -500, 9000) if "altitude_m" in spec else None
     return Site(float(spec["latitude"]), float(spec["longitude"]), timezone, altitude)

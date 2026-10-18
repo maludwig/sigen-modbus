@@ -14,7 +14,7 @@ from sigen.poll import PollResult
 from sigen.registers import BY_NAME
 from test_ntfy import TOPIC, fake_ntfy  # noqa: F401  (pytest fixture)
 
-UTC = datetime.timezone.utc
+UTC = datetime.UTC
 T0 = datetime.datetime(2026, 11, 20, 3, 0, tzinfo=UTC)
 MIN = datetime.timedelta(minutes=1)
 SEC = datetime.timedelta(seconds=1)
@@ -306,6 +306,12 @@ def test_a_restart_in_an_outage_carries_on_counting_and_doesnt_alert_twice(conn)
     w = alerts.Watcher(sender, detect=lambda window: [], out=lambda m: None, err=lambda m: None)
     w.preload_outage(conn)
     assert w.outage_alerted is False and w.reachability(failed_poll(t), t) == "unreachable"  # … alerts at once
+
+
+def test_preload_without_a_plant_unit_says_why():
+    w = alerts.Watcher(sender=None, out=lambda m: None)
+    with pytest.raises(ValueError, match="no plant unit"):
+        w.preload(None, {1: "inverter"}, datetime.datetime(2026, 10, 10, tzinfo=datetime.UTC))
 
 
 def test_poll_alerts_needs_the_alerts_section(run, config, both_server):

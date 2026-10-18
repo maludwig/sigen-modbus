@@ -41,7 +41,7 @@ losses, ~5–7 %). The cells cooled 0.2–0.4 °C/h at night (time constant ~13 
 import datetime
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from collections.abc import Mapping, Sequence
 
 from sigen import registers
 
@@ -161,46 +161,56 @@ class Window:
     where a reading has no value. Columns a detector needs but the window lacks count as all None."""
 
     times: Sequence[datetime.datetime]
-    columns: Mapping[str, Sequence[Optional[float]]]
+    columns: Mapping[str, Sequence[float | None]]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """Raises ValueError if a column's length differs from `times`, or the
+        times aren't strictly ascending."""
         for name, values in self.columns.items():
             if len(values) != len(self.times):
                 raise ValueError(f"column {name} has {len(values)} values for {len(self.times)} times")
         if any(b <= a for a, b in zip(self.times, self.times[1:])):
             raise ValueError("times must be strictly ascending")
 
-    def __getitem__(self, name: str) -> Sequence[Optional[float]]:
+    def __getitem__(self, name: str) -> Sequence[float | None]:
+        """The column's values, or all None if the window lacks it (or it's
+        empty)."""
         return self.columns.get(name) or [None] * len(self.times)
 
     def __len__(self) -> int:
+        """The number of readings."""
         return len(self.times)
 
 
 @dataclass(frozen=True)
 class Event:
+    """Something a detector found over [start, end], for sigen.alerts to
+    notify: `details` holds its numbers (units in the key names)."""
+
     kind: str  # "plateau", "warming", "sawtooth", "unexplained_power", "cold", "alarm", …
     start: datetime.datetime
     end: datetime.datetime
     summary: str  # one line, for a notification (no clock times: the sender appends the start)
-    details: Dict[str, float] = field(default_factory=dict)
-    key: Optional[str] = None  # what one event and its cooldown are keyed by, when finer than the kind
-    title: Optional[str] = None  # the notification's title, when the kind's fixed one won't do
-    priority: Optional[str] = None  # likewise, the ntfy priority
+    details: dict[str, float] = field(default_factory=dict)
+    key: str | None = None  # what one event and its cooldown are keyed by, when finer than the kind
+    title: str | None = None  # the notification's title, when the kind's fixed one won't do
+    priority: str | None = None  # likewise, the ntfy priority
 
     @property
     def ident(self) -> str:
+        """What sigen.alerts keys its cooldown by: `key` if set, else `kind`."""
         return self.key or self.kind
 
 
 # ---------- helpers ----------
 def _hours(a: datetime.datetime, b: datetime.datetime) -> float:
+    """Hours from a to b (negative if b is earlier)."""
     return (b - a).total_seconds() / 3600
 
 
 def runs(
     times: Sequence[datetime.datetime], ok: Sequence[bool], max_gap: datetime.timedelta = MAX_GAP
-) -> List[Tuple[int, int]]:
+) -> list[tuple[int, int]]:
     """(first, last) index pairs, inclusive, of stretches where `ok` holds without readings further apart than
     `max_gap` (a gap in the polling ends a stretch: nothing is known about the time in between)."""
     out, start = [], None
@@ -215,7 +225,7 @@ def runs(
     return out
 
 
-def quiet(w: Window, max_pv_kw: float = 0.05, max_battery_kw: float = 0.5, max_ac_kw: float = 0.5) -> List[bool]:
+def quiet(w: Window, max_pv_kw: float = 0.05, max_battery_kw: float = 0.5, max_ac_kw: float = 0.5) -> list[bool]:
     """Readings with no sun on the panels and the inverter nearly idle: then nothing but the surroundings (and a
     heater) changes the cells' temperature. A small heater still fits under the limits; a missing value is not quiet."""
     return [
@@ -231,10 +241,10 @@ def quiet(w: Window, max_pv_kw: float = 0.05, max_battery_kw: float = 0.5, max_a
 
 def interpolate(
     times: Sequence[datetime.datetime],
-    points: Sequence[Tuple[datetime.datetime, float]],
+    points: Sequence[tuple[datetime.datetime, float]],
     max_gap: datetime.timedelta = datetime.timedelta(hours=1),
     hold: datetime.timedelta = datetime.timedelta(0),
-) -> List[Optional[float]]:
+) -> list[float | None]:
     """Values at `times` by straight lines between `points` (time, value), ascending: e.g. Open-Meteo's 15-minute
     air temperatures onto the 15-second readings. None outside the points or between points further apart than
     `max_gap`, except that the last point's value holds for `hold` after it (the newest readings come after the
@@ -255,7 +265,7 @@ def interpolate(
     return out
 
 
-def _air_note(air: Sequence[Optional[float]], i: int, j: int) -> Tuple[Optional[float], Optional[float], str]:
+def _air_note(air: Sequence[float | None], i: int, j: int) -> tuple[float | None, float | None, str]:
     """Outside air at the start and end of [i, j] (the nearest known values inside it), and a phrase for summaries."""
     known = [a for a in air[i : j + 1] if a is not None]
     if not known:
@@ -271,7 +281,7 @@ def detect_plateau(
     min_duration: datetime.timedelta = datetime.timedelta(hours=2),
     min_above_air: float = 8.0,
     min_air_drop: float = 2.0,
-) -> List[Event]:
+) -> list[Event]:
     """The cells held within `tolerance` °C (0.1 = one sensor step) for at least `min_duration` while quiet, AND
     the outside air says they should have kept cooling: the cells were at least `min_above_air` °C above it on
     average, or the air fell at least `min_air_drop` °C meanwhile. (An unheated space can run several °C above the
@@ -280,7 +290,7 @@ def detect_plateau(
     whose spread may then reach 2 × `tolerance`."""
     temps, air = w[column], w[AIR]
     ok = [q and v is not None for q, v in zip(quiet(w), temps)]
-    found: List[Tuple[int, int]] = []
+    found: list[tuple[int, int]] = []
     tol = tolerance + 1e-9
     for a, b in runs(w.times, ok):
         lo, highs, lows = a, deque(), deque()  # indices of the window's max / min candidates
@@ -334,7 +344,7 @@ def detect_warming(
     min_rise: float = 0.3,
     max_rise_duration: datetime.timedelta = datetime.timedelta(minutes=45),
     air_margin: float = 6.0,
-) -> List[Event]:
+) -> list[Event]:
     """The cells warmed by at least `min_rise` °C within `max_rise_duration` while quiet (no sun, inverter idle),
     with the outside air at least `air_margin` °C below them (so warmer surroundings can't explain it: a warm
     wind can warm an unheated space fast). A zigzag with a `min_rise` threshold finds each rise ("tooth"); the
@@ -398,7 +408,7 @@ def detect_warming(
     return events
 
 
-def dc_balance(w: Window) -> List[Optional[float]]:
+def dc_balance(w: Window) -> list[float | None]:
     """What the inverter's DC side uses, kW: PV in, minus what goes into the battery, minus what goes out on the AC
     side. Its own standby and conversion losses, plus anything else hanging off the DC bus (a battery heater)."""
     return [None if None in (pv, b, ac) else pv - b - ac for pv, b, ac in zip(w[PV], w[BATTERY], w[INVERTER_AC])]
@@ -411,7 +421,7 @@ def detect_unexplained_power(
     loss_fraction: float = 0.08,
     max_busy_kw: float = 0.2,
     min_duration: datetime.timedelta = datetime.timedelta(seconds=30),
-) -> List[Event]:
+) -> list[Event]:
     """The DC side used more than `standby_kw` plus `loss_fraction` of the power it converts, by at least
     `min_excess_kw`, for at least `min_duration` (≥ 3 readings at 15 s: a single reading can be a load change caught
     mid-way). Only while the inverter isn't converting between the battery and the AC side (one of them within
@@ -458,7 +468,7 @@ def detect_idle_drain(
     max_battery_kw: float = 0.02,
     max_soc: float = 95.0,
     min_duration: datetime.timedelta = datetime.timedelta(minutes=30),
-) -> List[Event]:
+) -> list[Event]:
     """The battery's deliverable energy fell by at least `min_kwh` (its steps are 0.01 kWh) over a stretch of at
     least `min_duration` in which it read idle (|power| ≤ `max_battery_kw`) below `max_soc`: energy leaving that the
     battery's power reading doesn't show, e.g. a heater behind the BMS's meter. Not near full: right after a full
@@ -497,7 +507,7 @@ def detect_cold(
     threshold: float = 5.0,
     horizon: datetime.timedelta = datetime.timedelta(hours=6),
     trend: datetime.timedelta = datetime.timedelta(hours=1),
-) -> List[Event]:
+) -> list[Event]:
     """ "cold" if the latest value is at or below `threshold`; otherwise "cooling" if the straight-line trend over
     the last `trend` reaches it within `horizon`. The cells move slowly (time constant ~13 h), so a straight line
     over a few hours ahead is a fair guess; it overestimates the fall as they near their surroundings' temperature."""
@@ -541,7 +551,7 @@ def detect_cold_charging(
     threshold: float = 2.0,
     min_kw: float = 0.1,
     min_duration: datetime.timedelta = datetime.timedelta(minutes=1),
-) -> List[Event]:
+) -> list[Event]:
     """The battery charging at `min_kw` or more for at least `min_duration` while the coolest cluster is at or below
     `threshold` °C. The damage alarm: charging cold LiFePO4 plates lithium (permanent), and the BMS is supposed to
     prevent it (it already cuts the charge rate from ~16 °C down), so this says the protection isn't holding."""
@@ -566,8 +576,8 @@ def detect_cold_charging(
 
 
 def detect_charge_limited(
-    w: Window, min_fraction: float = 0.5, rated_kw: Optional[float] = None, max_soc: float = 90.0
-) -> List[Event]:
+    w: Window, min_fraction: float = 0.5, rated_kw: float | None = None, max_soc: float = 90.0
+) -> list[Event]:
     """The BMS allowed charging at less than `min_fraction` of the rated power (`rated_kw`, else the window's rated
     charging power column) while the SOC was below `max_soc` (near full it tapers anyway: ~3.1–3.6 kW at 95 %).
     What the cold costs. Measured on one system below 90 % SOC: the full 7.3 kW with the coolest cluster at 16 °C
@@ -598,7 +608,7 @@ def detect_charge_limited(
 
 def detect_below_reserve(
     w: Window, margin: float = 2.0, min_duration: datetime.timedelta = datetime.timedelta(minutes=1)
-) -> List[Event]:
+) -> list[Event]:
     """The SOC at least `margin` points below the backup reserve for at least `min_duration`. With the grid up the
     battery charges from it at full power up to the reserve, so this means the grid is down (the battery is backing
     up the house), or something drains it faster than the grid refills it."""
@@ -624,20 +634,20 @@ def detect_below_reserve(
 
 
 # ---------- alarms and faults ----------
-def alarm_bits(value) -> List[int]:
+def alarm_bits(value: float | None) -> list[int]:
     """The bits set in an alarm register's value; none for "not available" (all ones) or no value."""
     if value is None or value == NOT_AVAILABLE:
         return []
     return [bit for bit in range(16) if int(value) >> bit & 1]
 
 
-def alarm_text(short: str, name: str, flags: Mapping[int, str], bit: int) -> Tuple[str, str]:
+def alarm_text(short: str, name: str, flags: Mapping[int, str], bit: int) -> tuple[str, str]:
     """(plain title, the protocol's own words) for one alarm bit."""
     protocol = f"{name} bit {bit}: {flags.get(bit, 'not defined by the protocol')}"
     return ALARM_TEXT.get((short, bit), flags.get(bit, f"Undefined alarm ({name} bit {bit})")), protocol
 
 
-def active_alarms(w: Window, k: int) -> List[str]:
+def active_alarms(w: Window, k: int) -> list[str]:
     """Every alarm set in reading k, in plain words with the protocol's words after them."""
     out = []
     for column, (short, name, flags) in ALARM_REGISTERS.items():
@@ -647,7 +657,7 @@ def active_alarms(w: Window, k: int) -> List[str]:
     return out
 
 
-def detect_alarms(w: Window) -> List[Event]:
+def detect_alarms(w: Window) -> list[Event]:
     """Stretches where an alarm bit is set, one event per bit, titled in plain words; and stretches where the plant
     says it's off-grid (30009 ≠ 0), keyed like the "grid down" alarm bit, so one outage is one alert."""
     events = []
@@ -687,17 +697,19 @@ def detect_alarms(w: Window) -> List[Event]:
     return events
 
 
-def in_fault(w: Window) -> List[bool]:
+def in_fault(w: Window) -> list[bool]:
+    """Readings where the plant or the inverter reports the running state
+    Fault; a missing state doesn't count."""
     return [FAULT in (p, i) for p, i in zip(w[PLANT_STATE], w[INVERTER_STATE])]
 
 
-def not_running(w: Window) -> List[bool]:
+def not_running(w: Window) -> list[bool]:
     """Readings where the plant or the inverter reports a state other than Running (Fault, Shutdown, Standby, …). A
     missing state (a plant-only setup, or before the register was logged) doesn't count."""
     return [any(s is not None and s != RUNNING for s in (p, i)) for p, i in zip(w[PLANT_STATE], w[INVERTER_STATE])]
 
 
-def detect_fault(w: Window) -> List[Event]:
+def detect_fault(w: Window) -> list[Event]:
     """Stretches where the plant or the inverter reports the running state Fault. The summary lists the alarms set
     at the stretch's last reading (a fault's alarms say what it is: e.g. the rapid-shutdown button)."""
     events = []
@@ -742,7 +754,7 @@ DETECTORS = (
 )
 
 
-def detect_all(w: Window) -> List[Event]:
+def detect_all(w: Window) -> list[Event]:
     """detect_fault on every reading; every other detector, with its defaults, only on after_faults(w). In time
     order."""
     trusted = after_faults(w)

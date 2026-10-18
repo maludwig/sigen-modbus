@@ -199,7 +199,7 @@ def sample_values(device, k):
 @pytest.mark.fresh_schema
 def test_0004_moves_every_value(conn):
     at_0003(conn)
-    when = datetime.datetime(2026, 10, 9, 12, tzinfo=datetime.timezone.utc)
+    when = datetime.datetime(2026, 10, 9, 12, tzinfo=datetime.UTC)
     plant = [
         old_reading(conn, 247, sample_values("plant", k), when + datetime.timedelta(seconds=15 * k)) for k in range(3)
     ]
@@ -265,7 +265,7 @@ def test_0004_refuses_a_value_it_cannot_place(conn):
         "INSERT INTO register_meta (address, name, type, gain, unit, device) "
         "VALUES (39990, 'removed_from_the_map', 'u16', 1, NULL, 'plant')"
     )
-    old_reading(conn, 247, [(30014, 880), (39990, 5)], datetime.datetime(2026, 10, 9, tzinfo=datetime.timezone.utc))
+    old_reading(conn, 247, [(30014, 880), (39990, 5)], datetime.datetime(2026, 10, 9, tzinfo=datetime.UTC))
     with pytest.raises(Exception, match="2 values before, 1 after"):
         db.migrate(conn)
     # One transaction: nothing changed.
@@ -285,7 +285,7 @@ def backfill(conn):
 @pytest.mark.fresh_schema
 def test_backfill_runs_while_poll_writes_then_migrate_copies_the_rest(conn):
     at_0003(conn)
-    t = datetime.datetime(2026, 10, 9, 12, tzinfo=datetime.timezone.utc)
+    t = datetime.datetime(2026, 10, 9, 12, tzinfo=datetime.UTC)
     step = datetime.timedelta(seconds=15)
     for k in range(3):  # history
         old_reading(conn, 247, sample_values("plant", k), t + 2 * k * step)
@@ -331,7 +331,7 @@ def test_backfill_refuses_a_value_it_cannot_place(conn):
         "INSERT INTO register_meta (address, name, type, gain, unit, device) "
         "VALUES (39990, 'removed_from_the_map', 'u16', 1, NULL, 'plant')"
     )
-    old_reading(conn, 247, [(30014, 880), (39990, 5)], datetime.datetime(2026, 10, 9, tzinfo=datetime.timezone.utc))
+    old_reading(conn, 247, [(30014, 880), (39990, 5)], datetime.datetime(2026, 10, 9, tzinfo=datetime.UTC))
     with pytest.raises(Exception, match="2 values before, 1 after"):
         backfill(conn)
     conn.execute("ROLLBACK")  # the script's own transaction is left aborted
@@ -348,7 +348,7 @@ def test_poll_refuses_a_register_without_a_column(conn):
 
 def test_insert_reading_writes_one_wide_row(conn):
     db.migrate(conn)
-    t = datetime.datetime(2026, 10, 9, 12, tzinfo=datetime.timezone.utc)
+    t = datetime.datetime(2026, 10, 9, 12, tzinfo=datetime.UTC)
     rid = db.insert_reading(
         conn,
         ip="127.0.0.1",
@@ -656,9 +656,7 @@ def test_radar_record_to_db_stores_each_frame_once(run, site_config, conn, monke
     from test_weather import FakeWeb
 
     run("db", "migrate", "--config", site_config)
-    monkeypatch.setattr(
-        weather, "now_utc", lambda: datetime.datetime(2026, 10, 10, 14, 20, tzinfo=datetime.timezone.utc)
-    )
+    monkeypatch.setattr(weather, "now_utc", lambda: datetime.datetime(2026, 10, 10, 14, 20, tzinfo=datetime.UTC))
     monkeypatch.setattr(weather, "http_get", FakeWeb())
     code, out, _ = run("radar", "--config", site_config, "--record-to-db")
     assert code == ExitCode.OK and "3 frame(s) stored" in out
@@ -727,7 +725,7 @@ def test_the_shared_schema_is_emptied_after_a_test_and_rebuilt_if_it_changed(sha
     # On the shared schema itself (conn is connected to it): whatever this leaves behind, the reset after it repairs.
     from conftest import fingerprint
 
-    t = datetime.datetime(2026, 10, 9, 12, tzinfo=datetime.timezone.utc)
+    t = datetime.datetime(2026, 10, 9, 12, tzinfo=datetime.UTC)
     db.insert_reading(
         conn,
         ip="127.0.0.1",

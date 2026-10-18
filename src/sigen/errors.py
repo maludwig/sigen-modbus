@@ -8,6 +8,8 @@ from enum import IntEnum
 
 
 class ExitCode(IntEnum):
+    """The process exit codes `sigen` returns; each comment says when."""
+
     OK = 0  # success; for writes, verified by read-back, or already at the target
     ERROR = 1  # unexpected error (a bug, or something unclassified), e.g. capture won't overwrite
     USAGE = 2  # bad command-line usage (argparse's own code), an invalid config, or MAC lookup where it can't work
@@ -26,17 +28,32 @@ class ExitCode(IntEnum):
 
 
 class SigenError(Exception):
+    """Base of every failure the CLI reports; `main()` exits with exit_code.
+
+    Raised as-is for errors with no closer class (a journal entry naming an
+    unknown register, a GOES grid that doesn't fit).
+    """
+
     exit_code = ExitCode.ERROR
 
 
 class ConnectionFailed(SigenError):
+    """Couldn't reach the device, or the link dropped, timed out or garbled a
+    reply; also an outside service (NOAA's GOES bucket, ntfy) unreachable."""
+
     exit_code = ExitCode.CONNECTION
 
 
 class ModbusError(SigenError):
+    """The device answered with a Modbus exception reply (a refused write too).
+
+    function and code are the reply's; address is the register asked for, or
+    None if unknown.
+    """
+
     exit_code = ExitCode.MODBUS
 
-    def __init__(self, function, code, address=None):
+    def __init__(self, function: int, code: int, address: int | None = None) -> None:
         self.function, self.code, self.address = function, code, address
         names = {
             1: "illegal function",
@@ -51,18 +68,31 @@ class ModbusError(SigenError):
 
 
 class VerifyFailed(SigenError):
+    """Read-back after a write didn't match. Nothing raises it yet: control.py
+    reports this as an outcome ("verify_failed") instead."""
+
     exit_code = ExitCode.VERIFY_FAILED
 
 
 class Refused(SigenError):
+    """A write isn't allowed (register not writable, value out of range).
+    Nothing raises it yet: control.py reports this as an outcome ("refused")
+    instead."""
+
     exit_code = ExitCode.REFUSED
 
 
 class PreconditionFailed(SigenError):
+    """The state isn't what the command needs, e.g. `sigen satellite` is
+    already running (its satellite.pid names a live process)."""
+
     exit_code = ExitCode.PRECONDITION
 
 
 class NotFound(SigenError):
+    """Something looked for isn't there: no SigenStor found, nothing to undo,
+    an unreadable file, or a host / MAC that didn't answer."""
+
     exit_code = ExitCode.NOT_FOUND
 
 
@@ -79,9 +109,15 @@ class PlatformNotSupported(SigenError):
 
 
 class DatabaseError(SigenError):
+    """The database is unreachable or rejected a query (or psycopg is missing).
+
+    transient=True (unreachable, connection lost) lets the pollers warn, drop
+    the connection and carry on; anything else they re-raise.
+    """
+
     exit_code = ExitCode.DATABASE
 
-    def __init__(self, message: str, transient: bool = False):
+    def __init__(self, message: str, transient: bool = False) -> None:
         super().__init__(message)
         self.transient = transient  # unreachable / connection lost, rather than a rejected query
 

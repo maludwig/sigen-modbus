@@ -9,7 +9,7 @@ catches up on any that ended while it wasn't running. Recomputing a day replaces
 """
 
 import datetime
-from typing import Callable, List, Optional
+from collections.abc import Callable
 
 import psycopg
 
@@ -40,7 +40,7 @@ FLOWS = {
 PLANT = 247
 
 
-def finished_days(conn: psycopg.Connection, tz: datetime.tzinfo) -> List[datetime.date]:
+def finished_days(conn: psycopg.Connection, tz: datetime.tzinfo) -> list[datetime.date]:
     """Every local day from the first successful plant reading's to the one before the last's: each has a reading
     after its midnight."""
     first, last = conn.execute(
@@ -56,9 +56,9 @@ def store_day(
     conn: psycopg.Connection,
     day: datetime.date,
     tz: datetime.tzinfo,
-    site: Optional[Site] = None,
-    array: Optional[Array] = None,
-) -> Optional[dict]:
+    site: Site | None = None,
+    array: Array | None = None,
+) -> dict | None:
     """Compute `day` and store it (replacing its row, if any). Returns the row stored, or None if the day has no
     plant readings. With `site` and `array`, also store the day's clear-sky model energy (clear_sky_kwh)."""
     start = datetime.datetime.combine(day, datetime.time(), tz)
@@ -108,12 +108,12 @@ def describe(row: dict) -> str:
 def update(
     conn: psycopg.Connection,
     tz: datetime.tzinfo,
-    first: Optional[datetime.date] = None,
-    last: Optional[datetime.date] = None,
-    site: Optional[Site] = None,
-    array: Optional[Array] = None,
+    first: datetime.date | None = None,
+    last: datetime.date | None = None,
+    site: Site | None = None,
+    array: Array | None = None,
     log: Callable[[str], None] = lambda msg: None,
-) -> List[datetime.date]:
+) -> list[datetime.date]:
     """Store finished days. Without `first` and `last`: those not stored yet. With either: every finished day in
     [first, last], recomputed. With `site` and `array`, each day's clear-sky model energy too. Returns the days
     stored; logs one line each."""
@@ -133,7 +133,7 @@ def update(
     return done
 
 
-def all_time_energy(conn: psycopg.Connection) -> Optional["charts.DayEnergy"]:
+def all_time_energy(conn: psycopg.Connection) -> "charts.DayEnergy | None":
     """Every finished day in daily_energy added up, as one charts.DayEnergy: the totals and the flows summed, the
     first and last readings spanned, covered_hours summed -- for an all-time Sankey. None if the table is empty.
     (The table stores each day once so this is a single SUM; see the module docstring.) A total summed to NULL

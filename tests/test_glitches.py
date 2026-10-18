@@ -10,7 +10,7 @@ from sigen import alerts, charts, glitches, poll
 from sigen.poll import PollResult
 from sigen.registers import BY_NAME
 
-UTC = datetime.timezone.utc
+UTC = datetime.UTC
 T0 = datetime.datetime(2026, 10, 15, 13, 40, tzinfo=UTC)
 SEC = datetime.timedelta(seconds=1)
 A = {

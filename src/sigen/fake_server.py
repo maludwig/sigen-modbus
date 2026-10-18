@@ -22,9 +22,8 @@ import socketserver
 import struct
 import threading
 from pathlib import Path
-from typing import Optional
 
-from sigen.data_io import load_dir
+from sigen.data_io import RegisterImage, load_dir
 from sigen.registers import ALL_REGISTERS
 
 log = logging.getLogger("sigen.fake_server")
@@ -34,22 +33,27 @@ UNSUPPORTED_WORD = 0xFFFF
 
 # table -> {address: (first address, word count)} of the mapped register covering it.
 # Plant and inverter address ranges never overlap, so one map serves every unit.
-REGISTER_SPANS = {"input": {}, "holding": {}}
+REGISTER_SPANS: dict[str, dict[int, tuple[int, int]]] = {"input": {}, "holding": {}}
 for _r in ALL_REGISTERS:
     for _a in range(_r.address, _r.address + _r.words):
         REGISTER_SPANS[_r.table][_a] = (_r.address, _r.words)
 
 
 class RegisterBank:
-    def __init__(self, data_dir: Path):
+    """The fake device's register words, per unit and table, loaded from a
+    directory of JSON files, plus the holding-register writes clients made."""
+
+    def __init__(self, data_dir: Path) -> None:
         self.data_dir = Path(data_dir)
         self.lock = threading.Lock()
-        self.image = {}  # (unit, table) -> {address: word}
-        self.writes = {}  # (unit, address) -> word; survive reloads
-        self._mtimes = None
+        self.image: RegisterImage = {}  # (unit, table) -> {address: word}
+        self.writes: dict[tuple[int, int], int] = {}  # (unit, address) -> word; survive reloads
+        self._mtimes: dict[Path, float] | None = None
         self.reload_if_changed(force=True)
 
     def reload_if_changed(self, force: bool = False) -> None:
+        """Reload the data if any *.json was added, removed or touched (or
+        force). A bad file is logged and the last good image kept."""
         try:
             mtimes = {p: p.stat().st_mtime for p in sorted(self.data_dir.glob("*.json"))}
         except OSError as e:
@@ -67,17 +71,20 @@ class RegisterBank:
         counts = ", ".join(f"unit {u} {t}: {len(r)}" for (u, t), r in sorted(image.items()) if r)
         log.info("Loaded %d file(s) from %s (%s)", len(files), self.data_dir, counts or "no registers")
 
-    def units(self):
+    def units(self) -> set[int]:
+        """Unit IDs with at least one register of data; others get no reply.
+        Reloads first, so a file for a new unit is answered at once."""
+        self.reload_if_changed()
         with self.lock:
             return {u for (u, _t), regs in self.image.items() if regs}
 
-    def read(self, unit, table, address, count) -> Optional[list]:
+    def read(self, unit: int, table: str, address: int, count: int) -> list[int] | None:
         """Words for address..address+count-1, or None (-> exception 02) if the device would refuse."""
         self.reload_if_changed()
         with self.lock:
             regs = self.image.get((unit, table), {})
 
-            def word(a):
+            def word(a: int) -> int | None:
                 if table == "holding" and (unit, a) in self.writes:
                     return self.writes[(unit, a)]
                 return regs.get(a)
@@ -92,7 +99,10 @@ class RegisterBank:
                 return None  # ends mid-register
             return [UNSUPPORTED_WORD if word(a) is None else word(a) for a in range(address, end + 1)]
 
-    def write(self, unit, address, words, store=True) -> bool:
+    def write(self, unit: int, address: int, words: list[int], store: bool = True) -> bool:
+        """Write words to holding registers from address, in memory only.
+        False (-> exception 02) if any address has no data; store=False
+        checks but doesn't keep them (--ignore-writes)."""
         with self.lock:
             regs = self.image.get((unit, "holding"), {})
             if any(address + i not in regs for i in range(len(words))):
@@ -104,7 +114,13 @@ class RegisterBank:
 
 
 class _Handler(socketserver.BaseRequestHandler):
-    def _recv_exact(self, n):
+    """One client connection: unwraps Modbus TCP (MBAP) frames and passes
+    each PDU to FakeSigenServer.process."""
+
+    server: "FakeSigenServer"
+
+    def _recv_exact(self, n: int) -> bytes | None:
+        """Exactly n bytes from the client, or None if it closed first."""
         buf = b""
         while len(buf) < n:
             chunk = self.request.recv(n - len(buf))
@@ -113,7 +129,9 @@ class _Handler(socketserver.BaseRequestHandler):
             buf += chunk
         return buf
 
-    def handle(self):
+    def handle(self) -> None:
+        """Answer requests until the client disconnects or sends a malformed
+        header; replies keep the request's transaction and unit IDs."""
         peer = f"{self.client_address[0]}:{self.client_address[1]}"
         log.debug("Client connected: %s", peer)
         while True:
@@ -135,10 +153,15 @@ class _Handler(socketserver.BaseRequestHandler):
 
 
 class FakeSigenServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    """The fake SigenStor: a Modbus TCP server, a thread per client, over a
+    RegisterBank. Binds on construction; serve_forever() runs it."""
+
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, host: str, port: int, data_dir: Path, ignore_writes: bool = False, reject_writes: bool = False):
+    def __init__(
+        self, host: str, port: int, data_dir: Path, ignore_writes: bool = False, reject_writes: bool = False
+    ) -> None:
         self.bank = RegisterBank(data_dir)
         self.ignore_writes = ignore_writes
         self.reject_writes = reject_writes
@@ -146,13 +169,14 @@ class FakeSigenServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
     @property
     def port(self) -> int:
+        """The bound TCP port: the one picked when constructed with port 0."""
         return self.server_address[1]
 
-    def process(self, unit: int, pdu: bytes, peer: str) -> Optional[bytes]:
+    def process(self, unit: int, pdu: bytes, peer: str) -> bytes | None:
         """The reply PDU, or None to send nothing (a unit ID with no data)."""
         fn = pdu[0]
 
-        def exc(code, why):
+        def exc(code: int, why: str) -> bytes:
             log.info("%s unit %d fn %02d -> exception %02d (%s)", peer, unit, fn, code, why)
             return struct.pack(">BB", fn | 0x80, code)
 

@@ -25,6 +25,12 @@ def spans(plan):
 
 
 # ---------- planner ----------
+def test_entry_for_needs_words_or_an_error():
+    with pytest.raises(ValueError, match="needs the words read or the error"):
+        entry_for(BY_NAME["plant_ess_soc"])  # was a crash inside decode
+    assert entry_for(BY_NAME["plant_ess_soc"], error="timed out")["error"] == "timed out"
+
+
 def test_plan_for_the_real_register_map():
     assert spans(plan_blocks(PLANT_REGISTERS)) == [
         ("input", 30000, 124),  # 30124-30125 would make it 126

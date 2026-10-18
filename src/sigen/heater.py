@@ -18,13 +18,16 @@ refreshed once at launch and kept fresh (>1 h of life) by the thread, so queries
 
 import datetime
 import threading
-import time
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any
+from collections.abc import Callable
+
+import psycopg
 
 from sigen import db
 from sigen.cloud import DEVICE_BATTERY, CloudClient
 from sigen.config import Cloud
 from sigen.errors import CloudError
+from sigen.poll import PollResult
 
 BASE_INTERVAL = 600.0  # seconds between polls at rest (10 min)
 ACTIVE_INTERVAL = 60.0  # seconds between polls while the heater might run / is on (1 min)
@@ -34,7 +37,7 @@ PV_REGISTER = "inverter_pv_power"
 COOLEST_REGISTER = "inverter_ess_min_cluster_temperature"
 
 
-def heating_from(data) -> Optional[bool]:
+def heating_from(data: Any) -> bool | None:
     """The pack's "Heating status" (True/False) from a device dynamic-info response, or None if it isn't there."""
     rows = data.get("realTimeInfo", []) if isinstance(data, dict) else []
     for row in rows:
@@ -45,7 +48,7 @@ def heating_from(data) -> Optional[bool]:
     return None
 
 
-def gate_values(results, units: Dict[int, str]) -> Tuple[Optional[float], Optional[float]]:
+def gate_values(results: dict[int, PollResult], units: dict[int, str]) -> tuple[float | None, float | None]:
     """(PV power kW, coolest cluster °C) from a poll's inverter reading, or (None, None) where unavailable."""
     pv_kw = coolest_c = None
     for unit, result in results.items():
@@ -69,7 +72,7 @@ class HeaterPoller:
         self,
         client: CloudClient,
         station_id: str,
-        batteries: List[str],
+        batteries: list[str],
         db_url: str,
         *,
         out: Callable[[str], None] = print,
@@ -78,8 +81,8 @@ class HeaterPoller:
         active_interval: float = ACTIVE_INTERVAL,
         pv_threshold: float = PV_THRESHOLD_KW,
         cold_threshold: float = COLD_THRESHOLD_C,
-        now=lambda: datetime.datetime.now(datetime.timezone.utc),
-    ):
+        now: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.UTC),
+    ) -> None:
         self._client = client
         self._station = station_id
         self._batteries = list(batteries)
@@ -89,17 +92,19 @@ class HeaterPoller:
         self._pv_threshold, self._cold_threshold = pv_threshold, cold_threshold
         self._now = now
         self._pv_kw, self._coolest_c = 0.0, float("inf")  # gate; not active until the first poll says cold
-        self._state: Dict[int, bool] = {}  # battery index -> last heating (True/False)
+        self._state: dict[int, bool] = {}  # battery index -> last heating (True/False)
         self._rr = 0  # round-robin cursor
-        self._last_error: Optional[str] = None  # to avoid repeating the same cloud warning each minute
-        self._last_db_error: Optional[str] = None  # the same, for database trouble
+        self._last_error: str | None = None  # to avoid repeating the same cloud warning each minute
+        self._last_db_error: str | None = None  # the same, for database trouble
         self._db_broken = False  # a write failed -> reopen the connection next round
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="sigen-heater", daemon=True)
 
     @classmethod
-    def from_config(cls, cloud: Cloud, db_url: str, *, out=print, err=print) -> Optional["HeaterPoller"]:
+    def from_config(
+        cls, cloud: Cloud, db_url: str, *, out: Callable[[str], None] = print, err: Callable[[str], None] = print
+    ) -> "HeaterPoller | None":
         """Build one from the config's cloud section, or warn and return None if it can't poll (no station / packs)."""
         if not cloud.station_id or not cloud.batteries:
             err("warning: cloud heater polling off: the config's cloud section needs station_id and batteries")
@@ -114,7 +119,9 @@ class HeaterPoller:
         return cls(client, cloud.station_id, list(cloud.batteries), db_url, out=out, err=err)
 
     # ---------- the main poll feeds the gate ----------
-    def observe(self, results, units: Dict[int, str]) -> None:
+    def observe(self, results: dict[int, PollResult], units: dict[int, str]) -> None:
+        """Feed the gate from one Modbus poll (sigen.poll calls it after each): a failed or missing inverter reading
+        leaves the last PV / coolest values in place."""
         pv_kw, coolest_c = gate_values(results, units)
         with self._lock:
             if pv_kw is not None:
@@ -123,15 +130,20 @@ class HeaterPoller:
                 self._coolest_c = coolest_c
 
     def _active(self) -> bool:
+        """True for the 1-minute cadence: PV over the threshold with the coolest cluster under the cold threshold, or
+        any pack's heater last seen on."""
         with self._lock:
             might_run = self._pv_kw > self._pv_threshold and self._coolest_c < self._cold_threshold
         return might_run or any(self._state.values())
 
     # ---------- the thread ----------
     def start(self) -> None:
+        """Start the daemon thread; once only (sigen.poll calls it as the polling begins)."""
         self._thread.start()
 
     def stop(self, wait: float = 2.0) -> None:
+        """Ask the thread to stop and wait up to `wait` seconds for it; one stuck in a cloud query may outlive that,
+        which is harmless as it's a daemon."""
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(wait)
@@ -140,7 +152,7 @@ class HeaterPoller:
         """One UTC-timestamped activity line, e.g. `2026-10-17 15:21:38.225991Z  Cloud: Battery … heater Off, …`."""
         self._out(f"{self._now().strftime('%Y-%m-%d %H:%M:%S.%f')}Z  Cloud: {message}")
 
-    def _open(self):
+    def _open(self) -> psycopg.Connection | None:
         """A database connection, or None (warned once) if the database is down -- the cloud is still polled."""
         try:
             return db.connect(self._db_url)
@@ -152,7 +164,8 @@ class HeaterPoller:
             return None
 
     @staticmethod
-    def _close(conn) -> None:
+    def _close(conn: psycopg.Connection | None) -> None:
+        """Close the connection if there is one, ignoring any error (it's often the broken one being dropped)."""
         if conn is not None:
             try:
                 conn.close()
@@ -160,13 +173,15 @@ class HeaterPoller:
                 pass
 
     def _loop(self) -> None:
+        """The thread: refresh the token at launch (giving up for the session if that fails), then poll a round each
+        interval until stopped, reopening the database connection after a failed write."""
         self._log("refreshing token")
         try:
             self._client.refresh()  # Mitchell: refresh at launch (keeps queries from ever refreshing)
         except CloudError as e:
             self._err(f"warning: cloud heater polling off this session (couldn't refresh the token): {e}")
             return
-        conn = None
+        conn: psycopg.Connection | None = None
         try:
             while not self._stop.is_set():
                 if conn is None:
@@ -184,7 +199,7 @@ class HeaterPoller:
         finally:
             self._close(conn)
 
-    def _poll_round(self, conn) -> None:
+    def _poll_round(self, conn: psycopg.Connection | None) -> None:
         """Query one pack (round-robin); if its heater changed state, query the other(s) at once."""
         i = self._rr % len(self._batteries)
         self._rr += 1
@@ -193,13 +208,13 @@ class HeaterPoller:
                 if j != i:
                     self._query(conn, j)
 
-    def _query(self, conn, i: int) -> bool:
+    def _query(self, conn: psycopg.Connection | None, i: int) -> bool:
         """Poll pack i, log it, store the row (or note it unwritten), and return True if its heater changed state."""
         sn = self._batteries[i]
         self._log(f"Battery {sn} querying")
         polled_at = self._now()
-        heating: Optional[bool] = None
-        error: Optional[str] = None
+        heating: bool | None = None
+        error: str | None = None
         try:
             self._client.ensure_fresh()  # refresh only when the token is within an hour of expiry
             data = self._client.device_dynamic_info(self._station, sn, DEVICE_BATTERY)
@@ -222,7 +237,14 @@ class HeaterPoller:
         self._state[i] = heating
         return previous is not None and heating != previous
 
-    def _write(self, conn, polled_at, battery: int, heater_on: Optional[bool], error: Optional[str]) -> bool:
+    def _write(
+        self,
+        conn: psycopg.Connection | None,
+        polled_at: datetime.datetime,
+        battery: int,
+        heater_on: bool | None,
+        error: str | None,
+    ) -> bool:
         """Store one poll's row; on any database trouble warn once, flag the connection for reopening, and return
         False so the caller logs it unwritten. A database outage must never stop the heater thread."""
         if conn is None:

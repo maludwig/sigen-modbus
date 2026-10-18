@@ -33,14 +33,17 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any
+from collections.abc import Callable, Mapping
 from zoneinfo import ZoneInfo
 
+import psycopg
 from flask import Flask, Response, abort, redirect, render_template, request, url_for
+from werkzeug.wrappers import Response as BaseResponse
 
 from sigen import charts, db, sync
 from sigen import daily as daily_mod  # aliased: the `daily()` route below would shadow the module name
-from sigen.config import Config
+from sigen.config import Config, Site
 from sigen.errors import DatabaseError
 
 REFRESH_SECONDS = 300  # the daily page reloads this often while its day is today
@@ -83,15 +86,18 @@ SANKEY_EVERY = 60  # seconds between the page's fetches of the Sankey diagram (t
 
 
 class BadWindow(ValueError):
+    """A window in the query string that can't be read (parse_window,
+    data_window): a page shows why; a data endpoint answers 400."""
+
     pass
 
 
 def iso_utc(t: datetime.datetime) -> str:
     """ISO 8601 in UTC to the microsecond, with a Z: 2026-10-14T03:01:30.997599Z."""
-    return t.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return t.astimezone(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def strips_json(strips) -> List[dict]:
+def strips_json(strips: list[charts.Strip]) -> list[dict]:
     """charts.Strip objects as static/strips.js takes them (the page turns the ISO starts into seconds)."""
     return [
         {
@@ -104,7 +110,7 @@ def strips_json(strips) -> List[dict]:
     ]
 
 
-def model_end(end: datetime.datetime, site, after: datetime.timedelta = None) -> datetime.datetime:
+def model_end(end: datetime.datetime, site: Site, after: datetime.timedelta | None = None) -> datetime.datetime:
     """Where the clear-sky model can stop: `end`, or if the sun had set by then (on `end`'s local day, or before
     sunrise, the day before), `after` (MODEL_AFTER_SUNSET) past that sunset: after that it's 0 till morning. `end`
     where the sun doesn't set or rise."""
@@ -124,7 +130,9 @@ def model_end(end: datetime.datetime, site, after: datetime.timedelta = None) ->
     return min(end, sunset + after)
 
 
-def satellite_command(config: Config, start: datetime.datetime, end: datetime.datetime, tz) -> List[str]:
+def satellite_command(
+    config: Config, start: datetime.datetime, end: datetime.datetime, tz: datetime.tzinfo
+) -> list[str]:
     """`sigen satellite` for [start, end) (local times, whole minutes: the end rounded up), with this config."""
     end = end.astimezone(tz)
     whole = end.replace(second=0, microsecond=0)
@@ -146,7 +154,7 @@ def satellite_command(config: Config, start: datetime.datetime, end: datetime.da
     ]
 
 
-def launch_detached(command: List[str], log: Path):
+def launch_detached(command: list[str], log: Path) -> subprocess.Popen:
     """Start `command` in its own process (no console window, not in this one's Ctrl+C group), output to `log`;
     returns the Popen without waiting."""
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -167,8 +175,8 @@ def launch_detached(command: List[str], log: Path):
 
 
 def parse_window(
-    args, tz, now: Optional[datetime.datetime] = None
-) -> Tuple[datetime.datetime, datetime.datetime, bool, str]:
+    args: Mapping[str, str], tz: datetime.tzinfo, now: datetime.datetime | None = None
+) -> tuple[datetime.datetime, datetime.datetime, bool, str]:
     """(start, end, reaches now, description) from the query string."""
     now = now or datetime.datetime.now(tz)
     day, hours, minutes = args.get("day"), args.get("hours"), args.get("minutes")
@@ -185,7 +193,7 @@ def parse_window(
         # exactly that long, across a daylight-saving change too: subtracted in UTC (on a local time, Python subtracts
         # on the wall clock, and 72 h back across the autumn change would be 73 real hours)
         span = datetime.timedelta(hours=n / per_hour)
-        start = (now.astimezone(datetime.timezone.utc) - span).astimezone(tz)
+        start = (now.astimezone(datetime.UTC) - span).astimezone(tz)
         return start, now, True, f"last {n:g} {unit}"
     if day:
         try:
@@ -200,17 +208,17 @@ def parse_window(
     return start, min(end, now) if live else end, live, f"{date:%A %Y-%m-%d}" + (" (so far)" if live else "")
 
 
-def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -> Flask:
+def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None = launch_detached) -> Flask:
     """The dashboard. `launcher(command, log path)` starts the satellite fetch (None: never; tests pass a fake)."""
     url = config.require_database_url()
     tz = ZoneInfo(config.site.timezone) if config.site else datetime.datetime.now().astimezone().tzinfo
     names = config.smart_load_names
     app = Flask(__name__)
     fetch_lock = threading.Lock()
-    fetches: Dict[str, object] = {"process": None}  # the last process started
-    last_start: Dict[Tuple[datetime.date, datetime.date], float] = {}  # window's local days -> time.monotonic()
+    fetches: dict[str, object] = {"process": None}  # the last process started
+    last_start: dict[tuple[datetime.date, datetime.date], float] = {}  # window's local days -> time.monotonic()
 
-    def fetch_satellite(start, end):
+    def fetch_satellite(start: datetime.datetime, end: datetime.datetime) -> None:
         """Start `sigen satellite` for the window, unless one of ours is running or this window had one lately."""
         if launcher is None or config.site is None or config.path is None or end - start > MAX_FETCH:
             return
@@ -230,7 +238,7 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             except OSError as e:
                 print(f"warning: couldn't start sigen satellite: {e}", file=sys.stderr)
 
-    def day_nav(start, live):
+    def day_nav(start: datetime.datetime, live: bool) -> list[tuple[str, dict[str, str]]]:
         """The previous / next day links (none after today)."""
         before, after = start.date() - datetime.timedelta(days=1), start.date() + datetime.timedelta(days=1)
         return [(f"◀ {before:%m-%d}", {"day": f"{before}"})] + (
@@ -238,7 +246,7 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         )
 
     @app.get("/daily")
-    def daily():
+    def daily() -> str:
         """A day's totals (the device's counters) and a Sankey diagram of where the energy went (static/my_sankey.js)."""
         query = {k: v for k, v in request.args.items() if k == "day"}
         energy = sankey = None
@@ -282,7 +290,7 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         )
 
     @app.get("/all-time")
-    def all_time():
+    def all_time() -> str:
         """Every finished day in daily_energy added up: one Sankey of where all the energy has gone (static/my_sankey.js)."""
         energy = sankey = error = pv = None
         strips, notes = [], []
@@ -327,11 +335,13 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
     # microseconds, and that reading would come again. {"error": …} with 400 for a bad window, 503 if the database
     # fails.
 
-    def data_window(default) -> Tuple[datetime.datetime, datetime.datetime, Optional[datetime.datetime]]:
+    def data_window(
+        default: Mapping[str, str],
+    ) -> tuple[datetime.datetime, datetime.datetime, datetime.datetime | None]:
         """(start, end, since or None), all UTC, from a data endpoint's query string; BadWindow if it's no good. (A
         ?day= is the site's local day; after that, everything is UTC until the browser shows it in its own zone.)"""
         since = request.args.get("since")
-        utc = datetime.timezone.utc
+        utc = datetime.UTC
         if since is None:
             start, end, _, _ = parse_window(request.args if request.args else default, tz)
             return start.astimezone(utc), end.astimezone(utc), None
@@ -346,7 +356,11 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             raise BadWindow(f"since must be within the last {MAX_HOURS} hours")
         return start, end, start
 
-    def data_response(what: str, read: Callable, default):
+    def data_response(
+        what: str,
+        read: Callable[[psycopg.Connection, datetime.datetime, datetime.datetime, datetime.datetime | None], dict],
+        default: Mapping[str, str],
+    ) -> Response | tuple[dict[str, str], int]:
         """`read(conn, start, end, since)` → the JSON body, in a read-only session; errors as JSON too."""
         try:
             start, end, since = data_window(default)
@@ -365,11 +379,16 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
                 conn.close()
         return Response(json.dumps(body), mimetype="application/json", headers={"Cache-Control": "no-store"})
 
-    def after(times, since) -> List[int]:
+    def after(times: list[datetime.datetime], since: datetime.datetime | None) -> list[int]:
         """The indexes of the readings to send: all, or with ?since= only those strictly after it (none twice)."""
         return [k for k, t in enumerate(times) if since is None or t > since]
 
-    def columns(times, series: Dict[str, List[float]], since, digits: int):
+    def columns(
+        times: list[datetime.datetime],
+        series: dict[str, list[float]],
+        since: datetime.datetime | None,
+        digits: int,
+    ) -> tuple[list[str], dict[str, list[float]]]:
         """{"t": [ISO…], label: […]}-style pieces for the readings after `since`: (the times, {label: values})."""
         keep = after(times, since)
         return (
@@ -377,13 +396,17 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             {label: [round(values[k], digits) for k in keep] for label, values in series.items()},
         )
 
-    def string_voltage_data(conn, start, end, since):
+    def string_voltage_data(
+        conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime, since: datetime.datetime | None
+    ) -> dict:
         """{"t", "volts": {"1": [V, …], … "4": […]}}: each string's voltage at every inverter reading."""
         s = charts.string_readings(conn, start, end)
         t, volts = columns(s.times, {str(n): s.volts[n] for n in charts.STRINGS}, since, 1)
         return {"t": t, "volts": volts}
 
-    def string_power_data(conn, start, end, since):
+    def string_power_data(
+        conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime, since: datetime.datetime | None
+    ) -> dict:
         """{"t", "kw": {"1"…"4": [kW, …]}, "faces": {"1": "house SE", …}, "sky": {"t", "kw": {"1"…"4"}}}: each
         string's power (V × I) at every inverter reading, and with the config's array and site, its clear-sky model
         every minute up to now, or once the sun has set, MODEL_AFTER_SUNSET after it (model_end) ("sky" null without
@@ -406,7 +429,9 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
                 }
         return body
 
-    def string_power_strips_data(conn, start, end, since):
+    def string_power_strips_data(
+        conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime, since: datetime.datetime | None
+    ) -> dict:
         """{"strips": [{"label", "starts": [ISO…], "length" (seconds), "colours": ["#rrggbb", or null: no data,
         hatched]}], "notes": [how to read them]}: the strips under the string-power chart: the radar
         (charts.precipitation_strip) and with a site the satellite (satellite_strips), for the whole window every
@@ -427,7 +452,9 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             strips, notes = strips + more, notes + [note]
         return {"strips": strips_json(strips), "notes": notes}
 
-    def load_energy_data(conn, start, end, since):
+    def load_energy_data(
+        conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime, since: datetime.datetime | None
+    ) -> dict:
         """{"first", "last" (the window's first and last plant readings), "house" (kWh), "bars": {load: kWh}}: the
         whole window every time (two readings' counters: nothing to top up). Empty with fewer than two readings."""
         e = charts.energy_by_load(conn, names, start, end)
@@ -435,7 +462,9 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             return {"first": None, "last": None, "house": None, "bars": {}}
         return {"first": iso_utc(e.first[1]), "last": iso_utc(e.last[1]), "house": e.house, "bars": e.bars}
 
-    def sankey_data(conn, start, end, since):
+    def sankey_data(
+        conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime, since: datetime.datetime | None
+    ) -> dict:
         """{"first", "last" (the readings the totals run between), "sankey": charts.sankey's diagram} for the window,
         as /daily's (for any window, not only a day); the whole window every time. Empty with no readings."""
         e = charts.day_energy(conn, start, end)
@@ -443,7 +472,9 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             return {"first": None, "last": None, "sankey": None}
         return {"first": iso_utc(e.first), "last": iso_utc(e.last), "sankey": charts.sankey(e)}
 
-    def load_power_now_data(conn, start, end, since):
+    def load_power_now_data(
+        conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime, since: datetime.datetime | None
+    ) -> dict:
         """{"at" (the newest plant reading in the window), "house" (kW, the total), "bars": {load: kW}}: that one
         reading, every time (the page fetches it whole every few seconds). Empty with no reading."""
         p = charts.latest_load_power(conn, names, start, end)
@@ -451,7 +482,9 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             return {"at": None, "house": None, "bars": {}}
         return {"at": iso_utc(p.at), "house": round(p.house, 3), "bars": {k: round(v, 3) for k, v in p.bars.items()}}
 
-    def load_counters_data(conn, start, end, since):
+    def load_counters_data(
+        conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime, since: datetime.datetime | None
+    ) -> dict:
         """{"t", "kwh": {load: [lifetime kWh, …]}}: the counters at every plant reading (thinned past
         MAX_ENERGY_POINTS), for the slots that are named or moved, and Other. The page takes each one's first value
         off. A top-up leaves out a slot that didn't move: its counter is where it was."""
@@ -461,14 +494,18 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         t, kwh = columns(c.times, c.series, since, 2)
         return {"t": t, "kwh": kwh}
 
-    def load_snapshots_data(conn, start, end, since):
+    def load_snapshots_data(
+        conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime, since: datetime.datetime | None
+    ) -> dict:
         """{"t", "kw": {load: [kW, …]}}: each plant reading's power per slot (named or ever above 0) and Other. A
         top-up leaves out a slot that stayed at 0."""
         s = charts.load_power_snapshots(conn, names, start, end)
         t, kw = columns(s.times, s.series, since, 3)
         return {"t": t, "kw": kw}
 
-    def battery_temps_data(conn, start, end, since):
+    def battery_temps_data(
+        conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime, since: datetime.datetime | None
+    ) -> dict:
         """{"t", "c": {"coolest cluster", "warmest cluster", "average cell", "inverter internal": [°C, …]},
         "air": {"t", "c"}}: every inverter reading, and Open-Meteo's 15-minute air temperature. A row of those is
         stored a few minutes after its time, so a top-up sends the last AIR_MARGIN of them again (the page keeps the
@@ -486,7 +523,9 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         air = charts.air_temperatures(conn, start - AIR_MARGIN if since else start, end)
         return {"t": t, "c": c, "air": {"t": [iso_utc(at) for at, _ in air], "c": [round(v, 1) for _, v in air]}}
 
-    def battery_power_data(conn, start, end, since):
+    def battery_power_data(
+        conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime, since: datetime.datetime | None
+    ) -> dict:
         """{"t", "kw": {"battery" (>0 charging), "pv": [kW, …]}, "soc": {"t", "pct": {"SOC", "backup reserve",
         "charge cut-off": [%…]}}}: every inverter reading, and every plant reading's SOC and settings (a few
         milliseconds off the inverter's, so a top-up sends the last SOC_MARGIN of them again)."""
@@ -517,23 +556,23 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
     }
 
     @app.get("/")
-    def page():
+    def page() -> str:
         """The dashboard: each chart's title over its chart, drawn in the browser by uPlot (static/live_charts.js)
         from its /data/<name>.json; a window that reaches now is topped up every LIVE_EVERY seconds."""
         return render_page(request.args)
 
     @app.get("/uplot_dashboard")
-    def uplot_dashboard():
+    def uplot_dashboard() -> BaseResponse:
         """Where the dashboard was while it was being rebuilt in uPlot: now it's /."""
         return redirect(url_for("page", **request.args))
 
     @app.get("/night")
-    def night():
+    def night() -> str:
         """The dashboard for today as it looks before sunrise, whatever the time: its sunrise is tomorrow's, so the
         string charts show their night sky (to see it by day)."""
         return render_page({}, sunrise_in_days=1)
 
-    def render_page(args, sunrise_in_days: int = 0):
+    def render_page(args: Mapping[str, str], sunrise_in_days: int = 0) -> str:
         query = {k: v for k, v in args.items() if k in ("day", "hours", "minutes")}
         span = "hours" in query or "minutes" in query  # a sliding window
         try:
@@ -587,14 +626,14 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         )
 
     @app.get("/data/<name>.json")
-    def chart_data(name):
+    def chart_data(name: str) -> Response | tuple[dict[str, str], int]:
         """A chart's numbers (DATA), for today by default."""
         if name not in DATA:
             abort(404)
         what, read = DATA[name]
         return data_response(what, read, {})
 
-    def sync_json(build: Callable):
+    def sync_json(build: Callable[[psycopg.Connection], dict]) -> Response:
         """Run `build(conn)` in a read-only session and return its result as JSON; a database problem is a 503 with
         the reason, which `sigen sync` surfaces."""
         conn = None
@@ -615,12 +654,12 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         return Response(json.dumps(body), mimetype="application/json", headers={"Cache-Control": "no-store"})
 
     @app.get("/sync/schema")
-    def sync_schema():
+    def sync_schema() -> Response:
         """Read-only: this database's applied migrations, for `sigen sync`'s schema guard."""
         return sync_json(sync.schema_state)
 
     @app.get("/sync/rows")
-    def sync_rows():
+    def sync_rows() -> Response:
         """Read-only: good rows of a standalone syncable table in [start, end) (UTC ISO), for `sigen sync`."""
         table = request.args.get("table", "")
         if table not in sync.SYNCABLE:
@@ -632,12 +671,36 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         return sync_json(lambda conn: sync.export_rows(conn, table, start, end))
 
     @app.get("/sync/readings")
-    def sync_readings():
+    def sync_readings() -> Response:
         """Read-only: the readings cluster (readings + raw_* nested by poll) in [start, end) (UTC ISO)."""
         try:
             start, end = sync.parse_iso(request.args["start"]), sync.parse_iso(request.args["end"])
         except (KeyError, sync.SyncError):
             abort(400)
         return sync_json(lambda conn: sync.export_readings(conn, start, end))
+
+    @app.get("/status")
+    def status() -> Response:
+        """Health check. 200 {"status": "ok", "db": "online", "last_poll":
+        the newest reading's start (UTC ISO; null before the first)}, or 503
+        {"status": "error", "db": "offline" (can't connect) or "error" (it
+        answered, but the query failed), "last_poll": null, "error": why}."""
+        conn = None
+        try:
+            conn = db.connect(url)
+            with db.errors_as("reading the last poll"):
+                conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+                (last,) = conn.execute("SELECT max(started_at) FROM readings").fetchone()  # readings_started_at
+        except DatabaseError as e:
+            state = "offline" if e.transient else "error"
+            body, code = {"status": "error", "db": state, "last_poll": None, "error": str(e)}, 503
+        else:
+            body, code = {"status": "ok", "db": "online", "last_poll": None if last is None else iso_utc(last)}, 200
+        finally:
+            if conn is not None:
+                conn.close()
+        return Response(
+            json.dumps(body), status=code, mimetype="application/json", headers={"Cache-Control": "no-store"}
+        )
 
     return app

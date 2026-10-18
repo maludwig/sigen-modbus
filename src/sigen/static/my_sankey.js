@@ -1,4 +1,4 @@
-/* my_sankey.js: a small Sankey diagram on a <canvas>, for sigen's daily page. No dependencies.
+/* my_sankey.js: a small Sankey diagram on a <canvas>, for sigen's dashboard, daily and all-time pages. No dependencies.
 
    data = {sources: [{name, kwh, colour}], sinks: [{name, kwh, colour}], flows: [{from, to, kwh}]}
    (`from` indexes sources, `to` indexes sinks; colours are "#rrggbb").
@@ -15,6 +15,93 @@
 
    layout() is pure arithmetic, tested with Node (tests/js); draw() paints a layout onto a canvas. In a browser this
    file sets the global MySankey; in Node, require() returns the same functions. */
+
+/**
+ * One source or sink as the server sends it (charts.sankey()).
+ * @typedef {Object} SankeyDataNode
+ * @property {string} name  "Solar", "Battery", "Grid" or "Load"
+ * @property {number} kwh  its counter's kWh; 0 without one
+ * @property {string} colour  "#rrggbb"
+ */
+
+/**
+ * One flow from a source to a sink, as the server sends it.
+ * @typedef {Object} SankeyFlow
+ * @property {number} from  an index into sources
+ * @property {number} to  an index into sinks
+ * @property {number} kwh
+ */
+
+/**
+ * The diagram's input: charts.sankey() from the server. dropped and cutoff
+ * are for the note under it; the drawing doesn't read them.
+ * @typedef {Object} SankeyData
+ * @property {SankeyDataNode[]} sources
+ * @property {SankeyDataNode[]} sinks
+ * @property {SankeyFlow[]} flows
+ * @property {SankeyFlow[]} [dropped]  flows too small to draw
+ * @property {number} [cutoff]  kWh: a flow under this is dropped
+ */
+
+/**
+ * The options: DEFAULTS, any of them overridden, plus draw()'s height.
+ * @typedef {Object} SankeyOptions
+ * @property {number} nodeWidth  a slot's width, a share of the canvas's
+ * @property {number} minNodeWidth  CSS px
+ * @property {number} maxNodeWidth  CSS px
+ * @property {number} gap  CSS px between the slots of a column
+ * @property {number} minNode  CSS px: the shortest a slot gets
+ * @property {number} minBand  CSS px: the thinnest a band or bar gets
+ * @property {number} barWidth  CSS px
+ * @property {number} bandAlpha  the bands' opacity, 0-1
+ * @property {number} [height]  draw() only: the canvas's CSS px height
+ */
+
+/**
+ * A node as layout() places it, in CSS px from the canvas's top left.
+ * @typedef {Object} SankeyNode
+ * @property {"left"|"right"} side  sources left, sinks right
+ * @property {number} index  into data.sources or data.sinks
+ * @property {string} name
+ * @property {string} colour  "#rrggbb"
+ * @property {number} kwh  its label: its counter, at least its bands
+ * @property {number} banded  its bands' kWh
+ * @property {number} share  of its column's kwh, 0-1
+ * @property {number} x  the slot
+ * @property {number} y
+ * @property {number} w
+ * @property {number} h
+ * @property {number} barY  the bar, within the slot
+ * @property {number} barH
+ */
+
+/**
+ * A band as layout() places it, in CSS px: y0 / y0b its top and bottom at
+ * its source, y1 / y1b at its sink.
+ * @typedef {Object} SankeyBand
+ * @property {number} from  an index into data.sources
+ * @property {number} to  an index into data.sinks
+ * @property {number} kwh
+ * @property {number} x0  the sources' inner edge
+ * @property {number} y0
+ * @property {number} y0b
+ * @property {number} x1  the sinks' inner edge
+ * @property {number} y1
+ * @property {number} y1b
+ * @property {string} colour0  the source's, "#rrggbb"
+ * @property {string} colour1  the sink's, "#rrggbb"
+ */
+
+/**
+ * What layout() returns (and draw() too).
+ * @typedef {Object} SankeyLayout
+ * @property {number} width  CSS px
+ * @property {number} height  CSS px
+ * @property {number} scale  CSS px per kWh; 0 if even the minimum slots
+ *   don't fit
+ * @property {SankeyNode[]} nodes  the sources, then the sinks
+ * @property {SankeyBand[]} bands
+ */
 (function (root) {
   "use strict";
 
@@ -32,8 +119,15 @@
   const clamp = (x, lo, hi) => Math.min(Math.max(x, lo), hi);
   const sum = (xs) => xs.reduce((a, b) => a + b, 0);
 
-  // The largest kWh-to-pixel scale at which every column's cards (each max(kwh × scale, minNode) tall, gap apart)
-  // fit `height`; 0 if even the minimum-height cards don't.
+  /**
+   * The largest kWh-to-pixel scale at which every column's cards (each
+   * max(kwh × scale, minNode) tall, gap apart) fit `height`; 0 if even the
+   * minimum-height cards don't.
+   * @param {{kwh: number}[][]} columns  each column's nodes
+   * @param {number} height  CSS px
+   * @param {{minNode: number, gap: number}} o  CSS px, as in SankeyOptions
+   * @returns {number}  CSS px per kWh
+   */
   function fitScale(columns, height, o) {
     const used = (nodes, s) => sum(nodes.map((n) => Math.max(n.kwh * s, o.minNode))) + o.gap * Math.max(nodes.length - 1, 0);
     const fits = (s) => columns.every((nodes) => used(nodes, s) <= height + 1e-9);
@@ -50,10 +144,19 @@
     return lo;
   }
 
-  // Where everything goes on a width × height canvas: {scale (px per kWh), nodes: [{side, index, name, kwh (its
-  // label: its counter, at least its bands), banded (its bands' kWh), colour, share, x, y, w, h (the slot), barY,
-  // barH}], bands: [{from, to, kwh, x0, y0, y0b, x1, y1, y1b, colour0, colour1}]} (y0 / y0b: the band's top and bottom
-  // at its source; y1 / y1b at its sink). Nodes without a band, and flows of 0, are left out.
+  /**
+   * Where everything goes on a width × height canvas: {scale (px per kWh),
+   * nodes: [{side, index, name, kwh (its label: its counter, at least its
+   * bands), banded (its bands' kWh), colour, share, x, y, w, h (the slot),
+   * barY, barH}], bands: [{from, to, kwh, x0, y0, y0b, x1, y1, y1b, colour0,
+   * colour1}]} (y0 / y0b: the band's top and bottom at its source; y1 / y1b
+   * at its sink). Nodes without a band, and flows of 0, are left out.
+   * @param {SankeyData} data  from charts.sankey()
+   * @param {number} width  CSS px
+   * @param {number} height  CSS px
+   * @param {Partial<SankeyOptions>} [opts]  overrides of DEFAULTS
+   * @returns {SankeyLayout}
+   */
   function layout(data, width, height, opts) {
     const o = Object.assign({}, DEFAULTS, opts || {});
     const flows = (data.flows || []).filter((f) => f.kwh > 0);
@@ -107,6 +210,11 @@
     return {width, height, scale, nodes: left.concat(right), bands};
   }
 
+  /**
+   * A "#rrggbb" colour's red, green and blue, each 0-255.
+   * @param {string} hex
+   * @returns {number[]}  [r, g, b]
+   */
   function rgb(hex) {
     const v = parseInt(hex.slice(1), 16);
     return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
@@ -119,9 +227,18 @@
   const PAD = 6, LEADING = 3;  // around a label, and between its lines: NAME and the value fit a 44 px slot
   const kwhText = (n) => `${n.kwh.toFixed(2)} kWh`;
 
-  // One size for every node's kWh (so they all match): the largest up to maxSize at which each one fits its slot,
-  // less `inset` (the bar). measure(text, size) is its width in bold at that size (the canvas measures it; tests pass
-  // their own).
+  /**
+   * One size for every node's kWh (so they all match): the largest up to
+   * maxSize at which each one fits its slot, less `inset` (the bar).
+   * measure(text, size) is its width in bold at that size (the canvas
+   * measures it; tests pass their own).
+   * @param {{kwh: number, w: number}[]} nodes  SankeyNodes, or stand-ins
+   * @param {function(string, number): number} measure  text, size -> px
+   * @param {number} [inset]  CSS px
+   * @param {number} [maxSize]  px
+   * @param {number} [minSize]  px: returned when no larger size fits
+   * @returns {number}  a font size, px
+   */
   function valueSize(nodes, measure, inset = 0, maxSize = 18, minSize = 9) {
     for (let size = maxSize; size > minSize; size--) {
       if (nodes.every((n) => measure(kwhText(n), size) <= n.w - 2 * PAD - inset)) return size;
@@ -129,9 +246,17 @@
     return minSize;
   }
 
-  // The node's label beside its bar, on the outer side, centred on the bar (within its slot), as much as the slot's
-  // height allows: NAME (in the node's colour, darkened to read on white) / 40.45 kWh / 99.4 %, or without the share,
-  // or just the value.
+  /**
+   * The node's label beside its bar, on the outer side, centred on the bar
+   * (within its slot), as much as the slot's height allows: NAME (in the
+   * node's colour, darkened to read on white) / 40.45 kWh / 99.4 %, or
+   * without the share, or just the value.
+   * @param {CanvasRenderingContext2D} ctx  scaled to CSS px
+   * @param {SankeyNode} n
+   * @param {number} size  the value's font size, px, from valueSize()
+   * @param {SankeyOptions} o  only barWidth is read
+   * @returns {void}
+   */
   function label(ctx, n, size, o) {
     const all = [[`bold ${SMALL}px ${FONT}`, SMALL, n.name.toUpperCase(), darker(n.colour, 0.35)],
                  [`bold ${size}px ${FONT}`, size, kwhText(n), "#1d1d1f"],
@@ -151,8 +276,15 @@
     }
   }
 
-  // Paint `data` onto `canvas`: as wide as the canvas is on screen, opts.height tall (default: 70 % of the width,
-  // within 300-520 px), sharp on high-density screens. Returns the layout.
+  /**
+   * Paint `data` onto `canvas`: as wide as the canvas is on screen,
+   * opts.height tall (default: 70 % of the width, within 300-520 px), sharp
+   * on high-density screens. Returns the layout.
+   * @param {HTMLCanvasElement} canvas
+   * @param {SankeyData} data  from charts.sankey()
+   * @param {Partial<SankeyOptions>} [opts]  overrides of DEFAULTS, and height
+   * @returns {SankeyLayout}
+   */
   function draw(canvas, data, opts) {
     const o = Object.assign({}, DEFAULTS, opts || {});
     const width = canvas.clientWidth;

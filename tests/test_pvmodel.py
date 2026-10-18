@@ -79,6 +79,12 @@ def test_whole_array_clear_sky_day(model):
     assert morning[2] > morning[3] and evening[3] > evening[2]  # east in the morning, west later
 
 
+def test_a_day_runs_to_the_next_local_midnight_across_a_clock_change(model):
+    day = pd.Timestamp("2026-10-25", tz="Europe/London")  # the clocks go back: a 25-hour day
+    kw = model.clear_sky_kw(day, 20, 180, 1.0, freq="1h")
+    assert len(kw) == 25 and kw.index[-1] == pd.Timestamp("2026-10-25 23:00", tz="Europe/London")
+
+
 def test_weather_changes_the_answer(model):
     day = pd.Timestamp("2026-10-10", tz="America/Edmonton")
     times = pd.date_range(day, day + pd.Timedelta(days=1), freq="5min", inclusive="left")

@@ -161,7 +161,7 @@ from test_db import config, conn, db_url  # noqa: E402,F401  (pytest fixtures; n
 
 def test_alert_log(run, config, conn):
     run("db", "migrate", "--config", config)
-    t = datetime.datetime(2026, 10, 12, 3, 0, tzinfo=datetime.timezone.utc)
+    t = datetime.datetime(2026, 10, 12, 3, 0, tzinfo=datetime.UTC)
     sent = ntfy.Attempt(
         t,
         "Coolest cluster 4.9 °C",

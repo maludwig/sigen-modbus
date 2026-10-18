@@ -24,7 +24,10 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, TypeVar
+from collections.abc import Callable, Iterable, Mapping, Sequence
+
+import psycopg
 
 from sigen import __version__
 from sigen.config import Site
@@ -36,7 +39,7 @@ USER_AGENT = f"sigen-modbus/{__version__}"
 
 # Column name (= Open-Meteo variable) -> unit, in Open-Meteo's default units. Every one of them
 # is available both hourly and every 15 minutes.
-OPEN_METEO_VARIABLES: Dict[str, str] = {
+OPEN_METEO_VARIABLES: dict[str, str] = {
     "shortwave_radiation": "W/m²",
     "direct_radiation": "W/m²",
     "diffuse_radiation": "W/m²",
@@ -70,17 +73,22 @@ RADAR_BOX = 0.01  # degrees: the query box around the site, sampled at its centr
 
 
 def now_utc() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+    """The current time, aware UTC: the default `now` for the fetches."""
+    return datetime.datetime.now(datetime.UTC)
 
 
 # ---------- HTTP ----------
 @dataclass(frozen=True)
 class Response:
-    status: Optional[int]  # None: nothing answered (DNS, refused, timeout)
+    """What http_get got: a status and body, or (status None) why nothing
+    answered."""
+
+    status: int | None  # None: nothing answered (DNS, refused, timeout)
     text: str  # the body, or what went wrong
 
     @property
     def ok(self) -> bool:
+        """Only HTTP 200 counts; any other status is parsed as a failure."""
         return self.status == 200
 
     def describe(self) -> str:
@@ -88,7 +96,9 @@ class Response:
         return self.text if self.status is None else f"HTTP {self.status}\n{self.text}"
 
 
-def http_get(url: str, params: Dict[str, object], timeout: float = TIMEOUT) -> Response:
+def http_get(url: str, params: Mapping[str, object], timeout: float = TIMEOUT) -> Response:
+    """GET url?params (timeout in seconds). Never raises for HTTP or network
+    failures: an error status keeps its body; no answer gives status None."""
     request = urllib.request.Request(f"{url}?{urllib.parse.urlencode(params)}", headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as r:
@@ -99,13 +109,13 @@ def http_get(url: str, params: Dict[str, object], timeout: float = TIMEOUT) -> R
         return Response(None, f"no response from {url}: {type(e).__name__}: {e}")
 
 
-Getter = Callable[[str, Dict[str, object]], Response]
+Getter = Callable[[str, dict[str, object]], Response]
 
 
 def save_capture(directory: Path, name: str, when: datetime.datetime, text: str) -> Path:
     """DIR/NAME_YYYY-MM-DDTHHMMSSZ.json (UTC); never overwrites (adds _2, _3, …)."""
     directory.mkdir(parents=True, exist_ok=True)
-    stem = f"{name}_{when.astimezone(datetime.timezone.utc):%Y-%m-%dT%H%M%S}Z"
+    stem = f"{name}_{when.astimezone(datetime.UTC):%Y-%m-%dT%H%M%S}Z"
     for n in range(1, 1000):
         path = directory / (f"{stem}.json" if n == 1 else f"{stem}_{n}.json")
         try:
@@ -120,14 +130,19 @@ def save_capture(directory: Path, name: str, when: datetime.datetime, text: str)
 # ---------- Open-Meteo ----------
 @dataclass
 class WeatherRow:
+    """One Open-Meteo fetch at one resolution (an open_meteo_weather row):
+    OPEN_METEO_VARIABLES for the latest finished period, or an error."""
+
     fetched_at: datetime.datetime
     resolution_minutes: int
-    valid_at: Optional[datetime.datetime] = None  # end of the period; None when error is set
-    values: Dict[str, object] = field(default_factory=dict)
-    error: Optional[str] = None
+    valid_at: datetime.datetime | None = None  # end of the period; None when error is set
+    values: dict[str, object] = field(default_factory=dict)
+    error: str | None = None
 
 
-def open_meteo_params(site: Site, resolution: int) -> Dict[str, object]:
+def open_meteo_params(site: Site, resolution: int) -> dict[str, object]:
+    """Open-Meteo query for the site: every variable at `resolution` minutes
+    (60 or 15), past and forecast days, times as UTC unix seconds."""
     return {
         "latitude": site.latitude,
         "longitude": site.longitude,
@@ -139,7 +154,9 @@ def open_meteo_params(site: Site, resolution: int) -> Dict[str, object]:
     }
 
 
-def _convert(name: str, value):
+def _convert(name: str, value: Any) -> int | bool | float | None:
+    """An Open-Meteo JSON value as its column's type: weather_code an int,
+    is_day a bool, the rest floats; None (no data) stays None."""
     if value is None:
         return None
     if name == "weather_code":
@@ -172,19 +189,23 @@ def parse_open_meteo(response: Response, resolution: int, fetched_at: datetime.d
         row.values = {}
         row.error = f"unexpected response ({type(e).__name__}: {e})\n{response.text}"
         return row
-    row.valid_at = datetime.datetime.fromtimestamp(times[index], datetime.timezone.utc)
+    row.valid_at = datetime.datetime.fromtimestamp(times[index], datetime.UTC)
     return row
 
 
 def fetch_open_meteo(
-    site: Site, resolution: int, get: Optional[Getter] = None, now: Callable[[], datetime.datetime] = now_utc
-) -> Tuple[WeatherRow, Response]:
+    site: Site, resolution: int, get: Getter | None = None, now: Callable[[], datetime.datetime] = now_utc
+) -> tuple[WeatherRow, Response]:
+    """One Open-Meteo request: (the parsed row, the raw response to capture).
+    `get` and `now` stand in for http_get and the clock in tests."""
     fetched_at = now()
     response = (get or http_get)(OPEN_METEO_URL, open_meteo_params(site, resolution))
     return parse_open_meteo(response, resolution, fetched_at), response
 
 
 def format_open_meteo(row: WeatherRow) -> str:
+    """For `sigen weather`: the period, then every variable with its unit on a
+    line of its own; or one FAILED line."""
     head = f"Open-Meteo {row.resolution_minutes} min, fetched {row.fetched_at:%Y-%m-%d %H:%M:%S}Z"
     if row.error:
         return f"{head}: FAILED: {_first_line(row.error)}"
@@ -197,6 +218,8 @@ def format_open_meteo(row: WeatherRow) -> str:
 
 
 def _first_line(text: str, limit: int = 200) -> str:
+    """An error text's first non-blank line (two when the first is "HTTP nnn",
+    so the body's first line shows too), cut to `limit` characters with "…"."""
     lines = [line for line in text.splitlines() if line.strip()]
     first = " ".join(lines[:2]) if lines and lines[0].startswith("HTTP ") else (lines[0] if lines else "")
     return first[:limit] + ("…" if len(first) > limit else "")
@@ -205,20 +228,24 @@ def _first_line(text: str, limit: int = 200) -> str:
 # ---------- radar ----------
 @dataclass
 class RadarRow:
+    """One radar frame at the site (a radar_frames row): rain in mm/h and snow
+    in cm/h, each with GeoMet's class, and whether radar covers the site; or an
+    error (frame_at None when even listing the frames failed)."""
+
     fetched_at: datetime.datetime
-    frame_at: Optional[datetime.datetime] = None
-    rain_mm_h: Optional[float] = None
-    rain_class: Optional[str] = None
-    snow_cm_h: Optional[float] = None
-    snow_class: Optional[str] = None
-    covered: Optional[bool] = None
-    error: Optional[str] = None
+    frame_at: datetime.datetime | None = None
+    rain_mm_h: float | None = None
+    rain_class: str | None = None
+    snow_cm_h: float | None = None
+    snow_class: str | None = None
+    covered: bool | None = None
+    error: str | None = None
 
 
 TIME_DIMENSION = re.compile(r'<Dimension name="time"[^>]*>\s*([^/<\s]+)/([^/<\s]+)/PT(\d+)M\s*</Dimension>')
 
 
-def parse_frames(response: Response) -> List[datetime.datetime]:
+def parse_frames(response: Response) -> list[datetime.datetime]:
     """Frame times from a one-layer GetCapabilities ("start/end/PT6M"), oldest first."""
     if not response.ok:
         raise ValueError(response.describe())
@@ -226,8 +253,7 @@ def parse_frames(response: Response) -> List[datetime.datetime]:
     if match is None:
         raise ValueError(f"no time dimension in the capabilities\n{response.text}")
     start, end = (
-        datetime.datetime.strptime(t, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-        for t in match.group(1, 2)
+        datetime.datetime.strptime(t, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.UTC) for t in match.group(1, 2)
     )
     step = datetime.timedelta(minutes=int(match.group(3)))
     frames = []
@@ -237,7 +263,9 @@ def parse_frames(response: Response) -> List[datetime.datetime]:
     return frames
 
 
-def feature_info_params(site: Site, layer: str, frame: datetime.datetime) -> Dict[str, object]:
+def feature_info_params(site: Site, layer: str, frame: datetime.datetime) -> dict[str, object]:
+    """WMS GetFeatureInfo query for one layer at one frame: a 3x3 image of the
+    box around the site (lat,lon, as WMS 1.3.0 wants), read at its centre."""
     box = f"{site.latitude - RADAR_BOX},{site.longitude - RADAR_BOX},{site.latitude + RADAR_BOX},{site.longitude + RADAR_BOX}"
     return {
         "service": "WMS",
@@ -256,7 +284,7 @@ def feature_info_params(site: Site, layer: str, frame: datetime.datetime) -> Dic
     }
 
 
-def parse_feature(response: Response, layer: str):
+def parse_feature(response: Response, layer: str) -> tuple[float | None, str | None] | bool:
     """(value, class) for a radar layer; True/False for the coverage layer (a vector layer:
     a polygon comes back only where the radars reach)."""
     if not response.ok:
@@ -265,23 +293,23 @@ def parse_feature(response: Response, layer: str):
         features = json.loads(response.text)["features"]
         if layer == COVERAGE_LAYER:
             return bool(features)
-        if not features:
-            raise ValueError("no feature at the site")
-        properties = features[0]["properties"]
-        value = properties.get("value")
-        return (None if value is None else float(value)), properties.get("class")
+        if features:
+            properties = features[0]["properties"]
+            value = properties.get("value")
+            return (None if value is None else float(value)), properties.get("class")
     except (ValueError, KeyError, TypeError, IndexError) as e:
-        raise ValueError(f"unexpected response ({type(e).__name__}: {e})\n{response.text}")
+        raise ValueError(f"unexpected response ({type(e).__name__}: {e})\n{response.text}") from e
+    raise ValueError("no feature at the site")  # a well-formed answer that doesn't cover the site
 
 
 def fetch_radar(
     site: Site,
     skip: Iterable[datetime.datetime] = (),
     latest_only: bool = False,
-    get: Optional[Getter] = None,
+    get: Getter | None = None,
     now: Callable[[], datetime.datetime] = now_utc,
-    capture: Optional[Path] = None,
-) -> List[RadarRow]:
+    capture: Path | None = None,
+) -> list[RadarRow]:
     """Rows for GeoMet's frames, newest first: just the newest with latest_only, otherwise
     every frame not in `skip`. The first failure ends the round with an error row (the rest
     are tried next time), so an outage gives one row per round, not one per frame."""
@@ -317,6 +345,8 @@ def fetch_radar(
 
 
 def format_radar(row: RadarRow) -> str:
+    """One line for `sigen radar` (and summarize_radar): the frame's rain and
+    snow rates with their classes, flagged if radar doesn't cover the site."""
     head = f"radar frame {row.frame_at:%Y-%m-%d %H:%M}Z" if row.frame_at else "radar"
     if row.error:
         return f"{head}: FAILED: {_first_line(row.error)}"
@@ -339,17 +369,20 @@ def summarize_open_meteo(row: WeatherRow) -> str:
 
 
 # ---------- storing ----------
+T = TypeVar("T")
+
+
 class Store:
     """The database connection weather rows go through, reconnecting after it drops. An
     unreachable database costs the rows of that fetch (with a warning); a rejected insert is
     raised, since it's a bug."""
 
-    def __init__(self, db_url: str, err: Callable[[str], None]):
+    def __init__(self, db_url: str, err: Callable[[str], None]) -> None:
         self._url = db_url
         self._err = err
-        self._conn = None
+        self._conn: psycopg.Connection | None = None
 
-    def use(self, what: str, fn):
+    def use(self, what: str, fn: Callable[[psycopg.Connection], T]) -> tuple[bool, T | None]:
         """(True, fn(conn)), or (False, None) if the database is unavailable."""
         from sigen import db
         from sigen.errors import DatabaseError
@@ -371,6 +404,7 @@ class Store:
             return False, None
 
     def close(self) -> None:
+        """Close the connection, if open; a later use() reconnects."""
         if self._conn is not None:
             self._conn.close()
             self._conn = None
@@ -379,10 +413,10 @@ class Store:
 def record_open_meteo(
     site: Site,
     resolution: int,
-    store: Optional[Store] = None,
-    capture: Optional[Path] = None,
-    get: Optional[Getter] = None,
-) -> Tuple[WeatherRow, bool]:
+    store: Store | None = None,
+    capture: Path | None = None,
+    get: Getter | None = None,
+) -> tuple[WeatherRow, bool]:
     """Fetch one resolution; save the whole response under `capture`; store the row.
     Returns (row, whether it was stored)."""
     from sigen import db
@@ -401,8 +435,8 @@ RADAR_LOOKBACK = datetime.timedelta(hours=4)  # longer than GeoMet keeps frames
 
 
 def record_radar(
-    site: Site, store: Optional[Store] = None, capture: Optional[Path] = None, get: Optional[Getter] = None
-) -> Tuple[List[RadarRow], Optional[int]]:
+    site: Site, store: Store | None = None, capture: Path | None = None, get: Getter | None = None
+) -> tuple[list[RadarRow], int | None]:
     """Without a store: the newest frame. With one: every frame GeoMet has that isn't stored
     yet, stored. Returns (rows, how many good rows were newly stored: None if the database
     was unavailable, 0 without a store)."""
@@ -420,7 +454,7 @@ def record_radar(
     return rows, added if ok else None
 
 
-def summarize_radar(rows: Sequence[RadarRow], added: Optional[int]) -> str:
+def summarize_radar(rows: Sequence[RadarRow], added: int | None) -> str:
     """One line, for poll's log."""
     good = [r for r in rows if not r.error]
     failed = [r for r in rows if r.error]
@@ -435,6 +469,8 @@ def summarize_radar(rows: Sequence[RadarRow], added: Optional[int]) -> str:
 # ---------- background jobs ----------
 @dataclass
 class Job:
+    """A Background job: run() every `interval` seconds, named in warnings."""
+
     name: str
     interval: float  # seconds; the first run is immediate
     run: Callable[[], None]
@@ -445,7 +481,9 @@ class Background:
     once; a job in the middle of a request is abandoned (the thread is a daemon), so stopping
     never waits for the next scheduled run."""
 
-    def __init__(self, jobs: Sequence[Job], err: Callable[[str], None], monotonic=time.monotonic):
+    def __init__(
+        self, jobs: Sequence[Job], err: Callable[[str], None], monotonic: Callable[[], float] = time.monotonic
+    ) -> None:
         self._jobs = list(jobs)
         self._err = err
         self._monotonic = monotonic
@@ -453,14 +491,20 @@ class Background:
         self._thread = threading.Thread(target=self._loop, name="sigen-weather", daemon=True)
 
     def start(self) -> None:
+        """Start the thread; every job's first run is immediate."""
         self._thread.start()
 
     def stop(self, wait: float = 1.0) -> None:
+        """Wake the thread and give a running job up to `wait` seconds to
+        finish; a started job that's still running is left to the daemon."""
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(wait)
 
     def _loop(self) -> None:
+        """The thread: run whichever job is due first, one at a time, logging
+        its exceptions. A run that overran skips the missed slots instead of
+        catching up."""
         due = {id(job): self._monotonic() for job in self._jobs}
         while self._jobs and not self._stop.is_set():
             job = min(self._jobs, key=lambda j: due[id(j)])

@@ -85,3 +85,18 @@ def test_summary_without_capacity_registers_falls_back_to_nominal():
     del readings["plant_ess_available_max_charging_capacity"]
     out = format_summary("192.0.2.1", readings)
     assert "55.4% of 15.06 kWh nominal" in out and "available" not in out
+
+
+def test_inverter_lines_survive_a_partial_read():
+    from sigen.reading import format_inverter
+
+    readings = {  # one register of each group read, the rest failed
+        "inverter_model_type": {"value": "SigenStor EC"},
+        "inverter_phase_a_voltage": {"value": 121.04},
+        "inverter_ess_min_cluster_temperature": {"value": 8.5},
+        "inverter_phase_b_voltage": {"error": "timed out"},
+    }
+    lines = "\n".join(format_inverter(1, readings))
+    assert "firmware ?" in lines
+    assert "Grid:            121.0 V / ? V (? V), ? Hz" in lines
+    assert "Battery cells:   8.5–? °C, average ? V" in lines

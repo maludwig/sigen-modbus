@@ -307,12 +307,47 @@ def test_capture_writes_utf8_file(run, midsoc_server, tmp_path):
     assert re.fullmatch(r"my_system_\d{4}-\d\d-\d\d_\d\d-\d\d-\d\dZ\.json", f.name)
     assert f"Saved {f}" in out
     data = f.read_bytes()
-    assert "°C".encode("utf-8") in data and b"\r\n" not in data
+    assert "°C".encode() in data and b"\r\n" not in data
     doc = json.loads(data.decode("utf-8"))
     assert doc["input_registers"]["30066"]["raw"] == [0, 880]
     assert doc["derived"]["battery_total_estimate_kwh"] == 15.88
     assert load_document(f)  # replayable as fake data
     assert run("read-json", "--data-file", f)[0] == ExitCode.OK
+
+
+def test_a_wrongly_shaped_data_file_is_a_value_error(tmp_path):
+    from sigen.data_io import load_document
+
+    for doc in ([1, 2], {"input_registers": "30014"}, {"other_units": [5]}):
+        f = tmp_path / "bad.json"
+        f.write_text(json.dumps(doc), encoding="utf-8")
+        with pytest.raises(ValueError, match="not a register dump"):  # what the fake server's reload catches
+            load_document(f)
+
+
+def test_the_fake_server_answers_a_new_units_file_at_once(tmp_path):
+    from sigen.fake_server import RegisterBank
+
+    (tmp_path / "plant.json").write_text(json.dumps({"input_registers": {"30014": {"raw": [880]}}}), encoding="utf-8")
+    bank = RegisterBank(tmp_path)
+    assert bank.units() == {247}
+    (tmp_path / "unit5.json").write_text(
+        json.dumps({"unit_id": 5, "input_registers": {"30014": {"raw": [1]}}}), encoding="utf-8"
+    )
+    assert bank.units() == {5, 247}  # no read of a known unit needed first
+
+
+def test_local_time_keeps_a_written_offset():
+    import datetime
+
+    from sigen.cli import _local_time
+
+    utc = datetime.UTC
+    with_offset = _local_time("2026-10-10T06:00+00:00", "America/Edmonton", "--start")
+    assert with_offset == datetime.datetime(2026, 10, 10, 6, 0, tzinfo=utc)  # that instant, not 06:00 local
+    assert str(with_offset.tzinfo) == "America/Edmonton"
+    wall_clock = _local_time("2026-10-10T06:00", "America/Edmonton", "--start")
+    assert wall_clock == datetime.datetime(2026, 10, 10, 12, 0, tzinfo=utc)  # no offset: Edmonton's 06:00 (UTC-6)
 
 
 def test_capture_name_prefix_and_never_overwrites(run, server, tmp_path, monkeypatch):

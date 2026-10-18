@@ -30,13 +30,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any
+from collections.abc import Callable
+
+import psycopg
 
 from sigen import db
 from sigen.errors import SchemaNotReady, SyncError
 
 TIMEOUT = 60.0
-UTC = datetime.timezone.utc
+UTC = datetime.UTC
 
 RAW_PLANT = "raw_plant_register_values"
 RAW_INVERTER = "raw_inverter_register_values"
@@ -52,11 +55,11 @@ class Syncable:
 
     time_column: str
     identity: str
-    key: Tuple[str, ...]
+    key: tuple[str, ...]
     good: str = "error IS NULL"
 
 
-SYNCABLE: Dict[str, Syncable] = {
+SYNCABLE: dict[str, Syncable] = {
     "open_meteo_weather": Syncable("valid_at", "id", ("resolution_minutes", "valid_at")),
     "radar_frames": Syncable("frame_at", "id", ("frame_at",)),
     "battery_heater": Syncable("polled_at", "id", ("battery", "polled_at")),
@@ -64,17 +67,17 @@ SYNCABLE: Dict[str, Syncable] = {
 }
 
 # `--only-sync` kinds. The standalone ones map to one table each; "readings" is the cluster, handled on its own.
-STANDALONE_KINDS: Dict[str, List[str]] = {
+STANDALONE_KINDS: dict[str, list[str]] = {
     "weather": ["open_meteo_weather"],
     "radar": ["radar_frames"],
     "heater": ["battery_heater"],
     "satellite": ["satellite_shade"],
 }
 READINGS_KIND = "readings"
-KINDS: List[str] = [*STANDALONE_KINDS, READINGS_KIND]  # every selectable kind, in a stable order
+KINDS: list[str] = [*STANDALONE_KINDS, READINGS_KIND]  # every selectable kind, in a stable order
 
 
-def resolve_kinds(selected: Optional[List[str]]) -> List[str]:
+def resolve_kinds(selected: list[str] | None) -> list[str]:
     """The kinds to sync: `selected` (validated, de-duplicated, in the given order) or all of them. SyncError on an
     unknown kind."""
     if not selected:
@@ -82,7 +85,7 @@ def resolve_kinds(selected: Optional[List[str]]) -> List[str]:
     unknown = [k for k in selected if k not in KINDS]
     if unknown:
         raise SyncError(f"unknown sync kind(s) {', '.join(unknown)}; known: {', '.join(KINDS)}")
-    out: List[str] = []
+    out: list[str] = []
     for k in selected:
         if k not in out:
             out.append(k)
@@ -105,7 +108,7 @@ def iso(dt: datetime.datetime) -> str:
 
 
 # ---------- the peer serves these (read-only; called from the dashboard) ----------
-def schema_state(conn) -> dict:
+def schema_state(conn: psycopg.Connection) -> dict:
     """What a peer reports for the guard: its applied migrations as {version: checksum}, and whether it is fully
     migrated against the code it runs."""
     applied = db.applied_migrations(conn)
@@ -113,7 +116,7 @@ def schema_state(conn) -> dict:
     return {"applied": {str(v): c for v, c in applied.items()}, "fully_migrated": applied == code}
 
 
-def export_rows(conn, table: str, start: datetime.datetime, end: datetime.datetime) -> dict:
+def export_rows(conn: psycopg.Connection, table: str, start: datetime.datetime, end: datetime.datetime) -> dict:
     """Good rows of a standalone `table` whose time column is in [start, end), without the identity column."""
     spec = SYNCABLE.get(table)
     if spec is None:
@@ -130,7 +133,7 @@ def export_rows(conn, table: str, start: datetime.datetime, end: datetime.dateti
     return {"table": table, "columns": columns, "rows": [[_jsonable(v) for v in row] for row in rows]}
 
 
-def export_readings(conn, start: datetime.datetime, end: datetime.datetime) -> dict:
+def export_readings(conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime) -> dict:
     """The readings cluster for [start, end): good readings nested under their poll, each carrying its raw register
     row as a positional array. The raw column order is sent once, at the top, as `columns`. No ids cross the wire."""
     manifest = {table: _register_columns(conn, table) for table in (RAW_PLANT, RAW_INVERTER)}
@@ -140,7 +143,7 @@ def export_readings(conn, start: datetime.datetime, end: datetime.datetime) -> d
             f"WHERE error IS NULL AND started_at >= %s AND started_at < %s ORDER BY poll_id, started_at",
             (start, end),
         ).fetchall()
-        raw: Dict[str, Dict[int, list]] = {}
+        raw: dict[str, dict[int, list]] = {}
         for table in (RAW_PLANT, RAW_INVERTER):
             collist = ", ".join(f'"{c}"' for c in manifest[table])
             raw[table] = {
@@ -150,7 +153,7 @@ def export_readings(conn, start: datetime.datetime, end: datetime.datetime) -> d
                     (start, end),
                 )
             }
-    polls: Dict[int, List[dict]] = {}
+    polls: dict[int, list[dict]] = {}
     for row in readings:
         reading_id, poll_id = row[0], row[1]
         fields = dict(zip(READING_COLS, row[2:]))
@@ -165,7 +168,8 @@ def export_readings(conn, start: datetime.datetime, end: datetime.datetime) -> d
     return {"columns": manifest, "polls": [{"readings": rs} for rs in polls.values()]}
 
 
-def _columns(conn, table: str) -> List[str]:
+def _columns(conn: psycopg.Connection, table: str) -> list[str]:
+    """`table`'s column names in the local schema, in table order."""
     return [
         r[0]
         for r in conn.execute(
@@ -176,19 +180,21 @@ def _columns(conn, table: str) -> List[str]:
     ]
 
 
-def _register_columns(conn, table: str) -> List[str]:
+def _register_columns(conn: psycopg.Connection, table: str) -> list[str]:
     """A raw table's columns minus the ones the importer supplies itself (reading_id, started_at)."""
     return [c for c in _columns(conn, table) if c not in ("reading_id", "started_at")]
 
 
-def _jsonable(value):
+def _jsonable(value: Any) -> Any:
+    """A database value ready for JSON: datetimes as UTC ISO strings
+    (see iso), everything else as is."""
     if isinstance(value, datetime.datetime):
         return iso(value)
     return value
 
 
 # ---------- the client pulls and imports (called from `sigen sync`) ----------
-def check_schema(conn, peer_url: str) -> None:
+def check_schema(conn: psycopg.Connection, peer_url: str) -> None:
     """Refuse unless the local database is fully migrated and the peer is on exactly the same migrations -- the wide
     tables' columns must line up before any import."""
     code = {m.version: m.checksum for m in db.load_migrations()}
@@ -203,8 +209,14 @@ def check_schema(conn, peer_url: str) -> None:
 
 
 def sync_kind(
-    conn, peer_url: str, kind: str, start, end, dry_run: bool, out: Callable[[str], None] = print
-) -> Tuple[int, int]:
+    conn: psycopg.Connection,
+    peer_url: str,
+    kind: str,
+    start: datetime.datetime,
+    end: datetime.datetime,
+    dry_run: bool,
+    out: Callable[[str], None] = print,
+) -> tuple[int, int]:
     """Sync one kind; returns (imported, already-present)."""
     if kind == READINGS_KIND:
         return sync_readings(conn, peer_url, start, end, dry_run, out)
@@ -216,16 +228,25 @@ def sync_kind(
 
 
 def sync_standalone(
-    conn, peer_url: str, table: str, start, end, dry_run: bool, out: Callable[[str], None] = print
-) -> Tuple[int, int]:
+    conn: psycopg.Connection,
+    peer_url: str,
+    table: str,
+    start: datetime.datetime,
+    end: datetime.datetime,
+    dry_run: bool,
+    out: Callable[[str], None] = print,
+) -> tuple[int, int]:
     """Pull a standalone `table` for [start, end) and insert the rows we don't already have."""
     spec = SYNCABLE[table]
     body = _get(peer_url, "/sync/rows", {"table": table, "start": iso(start), "end": iso(end)})
-    columns: List[str] = body["columns"]
+    columns: list[str] = body["columns"]
+    missing = [k for k in spec.key if k not in columns]
+    if missing:
+        raise SyncError(f"the peer's {table} rows lack the key column(s) {', '.join(missing)}")
     key_at = [columns.index(k) for k in spec.key]
     coerce = _coercers(conn, table, columns)
     have = _present_keys(conn, table, spec, start, end)
-    to_insert: List[list] = []
+    to_insert: list[list] = []
     skipped = 0
     for row in body["rows"]:
         key = tuple(_key(row[i]) for i in key_at)
@@ -244,8 +265,13 @@ def sync_standalone(
 
 
 def sync_readings(
-    conn, peer_url: str, start, end, dry_run: bool, out: Callable[[str], None] = print
-) -> Tuple[int, int]:
+    conn: psycopg.Connection,
+    peer_url: str,
+    start: datetime.datetime,
+    end: datetime.datetime,
+    dry_run: bool,
+    out: Callable[[str], None] = print,
+) -> tuple[int, int]:
     """Pull the readings cluster for [start, end): a fresh local poll_id per poll, the database assigning reading
     ids, raw rows relinked by nesting. Whole window in one transaction."""
     body = _get(peer_url, "/sync/readings", {"start": iso(start), "end": iso(end)})
@@ -254,7 +280,7 @@ def sync_readings(
     have = _present_reading_keys(conn, start, end)
     counts = [0, 0]  # [imported, already-present]
 
-    def process():
+    def process() -> None:
         for poll in body["polls"]:
             new = [r for r in poll["readings"] if (r["unit_id"], _key(r["started_at"])) not in have]
             counts[1] += len(poll["readings"]) - len(new)
@@ -276,7 +302,10 @@ def sync_readings(
     return counts[0], counts[1]
 
 
-def _insert_reading(conn, reading: dict, poll_id: int, manifest: Dict[str, List[str]]) -> None:
+def _insert_reading(conn: psycopg.Connection, reading: dict, poll_id: int, manifest: dict[str, list[str]]) -> None:
+    """Insert one wire-form reading under local `poll_id`, then its raw
+    register row (if any) against the reading id the database assigned.
+    `manifest` gives each raw table's column order."""
     started_at = parse_iso(reading["started_at"])
     new_id = conn.execute(
         "INSERT INTO readings (ip_addr, started_at, ended_at, version, error, unit_id, poll_id, glitch) "
@@ -304,7 +333,9 @@ def _insert_reading(conn, reading: dict, poll_id: int, manifest: Dict[str, List[
             break
 
 
-def _check_manifest(conn, manifest: Dict[str, List[str]]) -> None:
+def _check_manifest(conn: psycopg.Connection, manifest: dict[str, list[str]]) -> None:
+    """SyncError unless the peer's raw-table column lists match ours
+    exactly: the positional raw arrays depend on it."""
     for table in (RAW_PLANT, RAW_INVERTER):
         if manifest.get(table) != _register_columns(conn, table):
             raise SyncError(
@@ -313,7 +344,11 @@ def _check_manifest(conn, manifest: Dict[str, List[str]]) -> None:
             )
 
 
-def _present_keys(conn, table: str, spec: Syncable, start, end) -> set:
+def _present_keys(
+    conn: psycopg.Connection, table: str, spec: Syncable, start: datetime.datetime, end: datetime.datetime
+) -> set[tuple[Any, ...]]:
+    """The natural keys (canonicalised by _key) of the rows `table` already
+    holds in [start, end), good or not."""
     cols = ", ".join(f'"{c}"' for c in spec.key)
     with db.errors_as(f"reading existing {table}"):
         rows = conn.execute(
@@ -323,7 +358,11 @@ def _present_keys(conn, table: str, spec: Syncable, start, end) -> set:
     return {tuple(_key(v) for v in row) for row in rows}
 
 
-def _present_reading_keys(conn, start, end) -> set:
+def _present_reading_keys(
+    conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime
+) -> set[tuple[int, str]]:
+    """(unit_id, started_at as UTC ISO) of every local reading in
+    [start, end), errored ones included."""
     with db.errors_as("reading existing readings"):
         rows = conn.execute(
             "SELECT unit_id, started_at FROM readings WHERE started_at >= %s AND started_at < %s", (start, end)
@@ -331,7 +370,7 @@ def _present_reading_keys(conn, start, end) -> set:
     return {(unit_id, _key(started_at)) for unit_id, started_at in rows}
 
 
-def _coercers(conn, table: str, columns: List[str]) -> List[Callable]:
+def _coercers(conn: psycopg.Connection, table: str, columns: list[str]) -> list[Callable[[Any], Any]]:
     """One coercer per column: JSON hands timestamps back as ISO strings and inet as plain strings, so turn those
     into the types the local schema stores; every other type comes back ready to insert."""
     types = {
@@ -343,13 +382,13 @@ def _coercers(conn, table: str, columns: List[str]) -> List[Callable]:
         )
     }
 
-    def to_ts(value):
+    def to_ts(value: str | None) -> datetime.datetime | None:
         return None if value is None else parse_iso(value)
 
-    def to_inet(value):
+    def to_inet(value: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
         return None if value is None else ipaddress.ip_address(value)
 
-    def coercer(column: str) -> Callable:
+    def coercer(column: str) -> Callable[[Any], Any]:
         kind = types.get(column, "")
         if kind.startswith("timestamp"):
             return to_ts
@@ -360,11 +399,12 @@ def _coercers(conn, table: str, columns: List[str]) -> List[Callable]:
     return [coercer(c) for c in columns]
 
 
-def _identity(value):
+def _identity(value: Any) -> Any:
+    """The coercer for columns that need none."""
     return value
 
 
-def _key(value):
+def _key(value: Any) -> Any:
     """Canonicalise a key value so the peer's JSON (timestamps as strings) compares equal to the local database's
     (timestamps as datetimes)."""
     if isinstance(value, datetime.datetime):
@@ -378,13 +418,17 @@ def _key(value):
 
 
 def _report(out: Callable[[str], None], what: str, imported: int, skipped: int, dry_run: bool) -> None:
+    """Print one table's summary line through `out`."""
     out(
         f"  {what}: {imported} to import, {skipped} already present"
         + (" (dry run, nothing written)" if dry_run else "")
     )
 
 
-def _get(peer_url: str, path: str, params: Optional[dict] = None) -> dict:
+def _get(peer_url: str, path: str, params: dict[str, str] | None = None) -> dict:
+    """GET a peer /sync/* endpoint as JSON (TIMEOUT seconds). SyncError on
+    an HTTP error, no connection, bad JSON, or an {"error": ...} body.
+    Tests monkeypatch this to fake the peer."""
     full = peer_url.rstrip("/") + path
     if params:
         full += "?" + urllib.parse.urlencode(params)
@@ -396,6 +440,8 @@ def _get(peer_url: str, path: str, params: Optional[dict] = None) -> dict:
         raise SyncError(f"the peer at {full} returned HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:200]}")
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise SyncError(f"couldn't reach the peer at {full}: {getattr(e, 'reason', e)}")
-    if isinstance(body, dict) and body.get("error"):
+    if not isinstance(body, dict):
+        raise SyncError(f"the peer at {full} sent a JSON {type(body).__name__}, not an object")
+    if body.get("error"):
         raise SyncError(f"the peer at {full} reported: {body['error']}")
     return body

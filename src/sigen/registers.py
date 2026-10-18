@@ -12,7 +12,7 @@ TypQxQ/Sigenergy-Local-Modbus Home Assistant integration. Unit 247 is the plant
 import re
 import struct
 from dataclasses import dataclass
-from typing import Dict, FrozenSet, List, Optional, Tuple
+from typing import Any
 
 PLANT_UNIT_ID = 247
 
@@ -24,12 +24,12 @@ _TYPE_FMT = {"u16": ">H", "s16": ">h", "u32": ">I", "s32": ">i", "u64": ">Q", "s
 NOT_SET = {"u32": 0xFFFFFFFF, "u64": 0xFFFFFFFFFFFFFFFF}
 
 
-def decode_int(words: List[int], rtype: str) -> int:
+def decode_int(words: list[int], rtype: str) -> int:
     """16-bit words (big-endian, high word first) -> integer of the given type."""
     return struct.unpack(_TYPE_FMT[rtype], struct.pack(f">{len(words)}H", *words))[0]
 
 
-def encode_int(n: int, rtype: str) -> List[int]:
+def encode_int(n: int, rtype: str) -> list[int]:
     """Integer -> 16-bit words. Raises ValueError if it doesn't fit."""
     try:
         packed = struct.pack(_TYPE_FMT[rtype], n)
@@ -38,12 +38,17 @@ def encode_int(n: int, rtype: str) -> List[int]:
     return list(struct.unpack(f">{TYPE_WORDS[rtype]}H", packed))
 
 
-def encode_string(text: str, count: int) -> List[int]:
+def encode_string(text: str, count: int) -> list[int]:
+    """ASCII text -> exactly `count` words, two chars each, NUL-padded.
+
+    Longer text is cut off; non-ASCII characters become "?".
+    """
     data = text.encode("ascii", "replace")[: count * 2].ljust(count * 2, b"\x00")
     return list(struct.unpack(f">{count}H", data))
 
 
-def decode_string(words: List[int]) -> str:
+def decode_string(words: list[int]) -> str:
+    """Words -> ASCII text, trailing NULs dropped; inverse of encode_string."""
     return struct.pack(f">{len(words)}H", *words).rstrip(b"\x00").decode("ascii", "replace")
 
 
@@ -145,33 +150,37 @@ PLANT_ALARMS_1 = {
 ALL_ONES_16 = 0xFFFF  # what an unsupported register reads as inside a block read
 
 
-def flag_names(n: int, flags: Dict[int, str]) -> List[str]:
+def flag_names(n: int, flags: dict[int, str]) -> list[str]:
     """The meanings of the bits set in n; bits the protocol doesn't define are named, not dropped."""
     return [flags.get(bit, f"undefined bit {bit}") for bit in range(16) if n >> bit & 1]
 
 
 @dataclass(frozen=True)
 class Register:
+    """One entry in the register map: where a value lives, how to decode it,
+    and whether (and with what values) it may be written."""
+
     name: str
     table: str  # "input" (read-only, function 04) or "holding" (settings, function 03)
     address: int
     type: str  # u16 s16 u32 s32 u64 s64, or "string" (ASCII, `count` words)
     gain: float = 1  # raw = round(value * gain)
-    unit: Optional[str] = None
-    labels: Optional[Dict[int, str]] = None
-    flags: Optional[Dict[int, str]] = None  # bit -> meaning, for bit-field registers (alarms)
+    unit: str | None = None
+    labels: dict[int, str] | None = None
+    flags: dict[int, str] | None = None  # bit -> meaning, for bit-field registers (alarms)
     description: str = ""
     # Write allowlist. Only registers with writable=True can ever be written.
     writable: bool = False
-    allowed: Optional[FrozenSet[int]] = None  # allowed raw values (for coded registers)
-    min: Optional[float] = None  # allowed range, in engineering units
-    max: Optional[float] = None
-    cli_option: Optional[str] = None  # e.g. "--backup-soc"
+    allowed: frozenset[int] | None = None  # allowed raw values (for coded registers)
+    min: float | None = None  # allowed range, in engineering units
+    max: float | None = None
+    cli_option: str | None = None  # e.g. "--backup-soc"
     device: str = "plant"  # "plant" (unit 247) or "inverter" (its own unit ID)
-    count: Optional[int] = None  # words, for type "string" only
+    count: int | None = None  # words, for type "string" only
 
     @property
     def words(self) -> int:
+        """How many 16-bit words to read: `count` for strings, else by type."""
         return self.count if self.type == "string" else TYPE_WORDS[self.type]
 
     @property
@@ -181,10 +190,11 @@ class Register:
 
     @property
     def function(self) -> int:
+        """Modbus read function code: 4 for input registers, 3 for holding."""
         return 4 if self.table == "input" else 3
 
     # --- decoding ---
-    def decode(self, words: List[int]) -> Tuple[Optional[float], Optional[str]]:
+    def decode(self, words: list[int]) -> tuple[float | None, str | None]:
         """Words -> (engineering value, label). Value is None for the "not set" sentinel.
         A string register's value is its text."""
         if self.type == "string":
@@ -200,7 +210,11 @@ class Register:
         label = self.labels.get(n, "Unknown") if self.labels is not None else None
         return value, label
 
-    def describe(self, words: List[int]) -> str:
+    def describe(self, words: list[int]) -> str:
+        """Words -> display text: "12.5 kW", "Running (1)", or a string's text.
+
+        Used in control-command messages.
+        """
         value, label = self.decode(words)
         if self.type == "string":
             return value
@@ -223,18 +237,18 @@ class Register:
             options = ", ".join(self.choices()) if self.labels else "a number"
             raise ValueError(f"'{text}' isn't valid for {self.name}; use {options}")
 
-    def choices(self) -> List[str]:
+    def choices(self) -> list[str]:
         """Allowed label slugs for coded registers (for --help and error messages)."""
         if not self.labels:
             return []
         codes = sorted(self.allowed) if self.allowed is not None else sorted(self.labels)
         return [slug(self.labels[c]) for c in codes if c in self.labels]
 
-    def encode_unchecked(self, value: float) -> List[int]:
+    def encode_unchecked(self, value: float) -> list[int]:
         """Encode without the write allowlist (for comparisons only, never for writing)."""
         return encode_int(round(value * self.gain), self.type)
 
-    def validate(self, value: float) -> List[int]:
+    def validate(self, value: float) -> list[int]:
         """Check a value against the allowlist and return its encoded words.
 
         Raises ValueError with a human-readable reason if it isn't allowed.
@@ -256,11 +270,12 @@ class Register:
         return encode_int(raw, self.type)
 
 
-def R(*args, **kwargs) -> Register:
+def R(*args: Any, **kwargs: Any) -> Register:
+    """Shorthand for a plant (unit 247) Register in the table below."""
     return Register(*args, **kwargs)
 
 
-PLANT_REGISTERS: List[Register] = [
+PLANT_REGISTERS: list[Register] = [
     # --- live status (input registers, read-only) ---
     R(
         "plant_system_time",
@@ -557,11 +572,13 @@ PLANT_REGISTERS: List[Register] = [
 OUTPUT_TYPES = {0: "L/N", 1: "L1/L2/L3", 2: "L1/L2/L3/N", 3: "L1/L2/N"}
 
 
-def I(*args, **kwargs) -> Register:
+def I(*args: Any, **kwargs: Any) -> Register:
+    """Shorthand for an inverter Register (on the inverter's own unit ID)."""
     return Register(*args, device="inverter", **kwargs)
 
 
-def _pv_strings(n: int) -> List[Register]:
+def _pv_strings(n: int) -> list[Register]:
+    """Voltage and current registers for PV strings 1..n (31027 onward)."""
     return [
         reg
         for i in range(1, n + 1)
@@ -581,7 +598,7 @@ def _pv_strings(n: int) -> List[Register]:
 #  - B-C/C-A line voltage, phase C voltage/current (31007, 31009, 31015, 31021): read all-ones,
 #    invalid for output type L1/L2/N (split phase);
 #  - 30613-30619 power-adjustment feedback: all-ones until remote setpoints are in use.
-INVERTER_REGISTERS: List[Register] = [
+INVERTER_REGISTERS: list[Register] = [
     I("inverter_model_type", "input", 30500, "string", count=15),
     I("inverter_serial_number", "input", 30515, "string", count=10),
     I("inverter_firmware_version", "input", 30525, "string", count=15),
@@ -672,10 +689,10 @@ INVERTER_REGISTERS: List[Register] = [
     I("inverter_pv_total_generation", "input", 31511, "u32", 100, "kWh"),
 ]
 
-REGISTERS_BY_DEVICE: Dict[str, List[Register]] = {"plant": PLANT_REGISTERS, "inverter": INVERTER_REGISTERS}
-ALL_REGISTERS: List[Register] = PLANT_REGISTERS + INVERTER_REGISTERS
+REGISTERS_BY_DEVICE: dict[str, list[Register]] = {"plant": PLANT_REGISTERS, "inverter": INVERTER_REGISTERS}
+ALL_REGISTERS: list[Register] = PLANT_REGISTERS + INVERTER_REGISTERS
 # Addresses are unique across device types (each type has its own ranges, checked against
 # every table of protocol V2.9), so one address -> register lookup serves both.
-BY_NAME: Dict[str, Register] = {r.name: r for r in ALL_REGISTERS}
-BY_ADDRESS: Dict[Tuple[str, int], Register] = {(r.table, r.address): r for r in ALL_REGISTERS}
-WRITABLE: List[Register] = [r for r in PLANT_REGISTERS if r.writable]
+BY_NAME: dict[str, Register] = {r.name: r for r in ALL_REGISTERS}
+BY_ADDRESS: dict[tuple[str, int], Register] = {(r.table, r.address): r for r in ALL_REGISTERS}
+WRITABLE: list[Register] = [r for r in PLANT_REGISTERS if r.writable]

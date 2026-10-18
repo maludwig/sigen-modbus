@@ -12,7 +12,7 @@ from sigen.registers import ALL_REGISTERS, PLANT_UNIT_ID
 
 from test_db import conn, db_url  # noqa: F401  (pytest fixtures)
 
-UTC = datetime.timezone.utc
+UTC = datetime.UTC
 
 
 def _t(minute, second=0, micro=0):
@@ -273,10 +273,17 @@ def test_sync_recomputes_daily_after_readings(db_url, tmp_path, monkeypatch):
     from sigen import cli, daily
 
     cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({"database": {"url": db_url}}), encoding="utf-8")
+    site = {"latitude": 51.0, "longitude": -114.0, "timezone": "America/Edmonton"}
+    cfg.write_text(json.dumps({"database": {"url": db_url}, "site": site}), encoding="utf-8")
     recomputed = []
     monkeypatch.setattr(cli.sync, "check_schema", lambda c, url: None)
-    monkeypatch.setattr(daily, "update", lambda c, tz, first, last, log=None: recomputed.append((first, last)) or [])
+
+    def update(c, tz, first, last, site=None, array=None, log=None):
+        recomputed.append((first, last))
+        assert site is not None and site.latitude == 51.0  # the clear-sky model's inputs go along
+        return []
+
+    monkeypatch.setattr(daily, "update", update)
     args = types.SimpleNamespace(
         config=cfg,
         no_config=False,
@@ -301,3 +308,26 @@ def test_sync_recomputes_daily_after_readings(db_url, tmp_path, monkeypatch):
     monkeypatch.setattr(cli.sync, "sync_kind", lambda c, url, kind, s, e, d, out: (2, 0))
     assert cli.cmd_sync(args) == cli.ExitCode.OK
     assert recomputed == []  # dry run -> no recompute
+
+
+# ---------- a peer's malformed answers are SyncError ----------
+def test_a_peer_answer_that_isnt_an_object_is_sync_error(monkeypatch):
+    class Reply:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b"[1, 2]"
+
+    monkeypatch.setattr(sync.urllib.request, "urlopen", lambda req, timeout: Reply())
+    with pytest.raises(SyncError, match="JSON list, not an object"):
+        sync._get("http://peer", "/sync/schema")
+
+
+def test_peer_rows_without_a_key_column_are_sync_error(monkeypatch):
+    monkeypatch.setattr(sync, "_get", lambda url, path, params=None: {"columns": ["temperature_2m"], "rows": []})
+    with pytest.raises(SyncError, match="lack the key column"):
+        sync.sync_standalone(None, "http://peer", "open_meteo_weather", _t(0), _t(15), dry_run=True)

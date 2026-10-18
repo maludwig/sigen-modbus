@@ -34,6 +34,8 @@ test("resample: linear between neighbours, held, and null where there's nothing 
   same(L.resample([1000, 5000], from, values, "linear", 3600), [13 + 1 / 3, null]);   // 5000: in a 2 h gap
   same(L.resample([-1, 0, 199, 899, 2000, 2100], from.slice(0, 3), values.slice(0, 3), "hold", 200),
        [null, 10, 10, null, 16, null]);                                // held for at most 200 s
+  same(L.resample([300, 900, 1500, 2100], [0, 900, 1800, 2700], [10, null, 16, 19]),
+       [null, null, null, 17]);                                        // a null neighbour is a gap, not a 0
 });
 
 test("append: newer rows only; a missing label filled; a new one refused unless the table is empty", () => {

@@ -26,7 +26,8 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any
+from collections.abc import Callable
 
 from sigen.errors import CloudError
 
@@ -64,22 +65,23 @@ def encode_password(password: str, key: bytes) -> str:
 class Tokens:
     """What's in the token file, with the derived timing. access_token/refresh_token may be None before a login."""
 
-    def __init__(self, data: dict):
-        self.access_token: Optional[str] = data.get("access_token")
-        self.refresh_token: Optional[str] = data.get("refresh_token")
-        self.expires_in = data.get("expires_in")
-        self.obtained_at = data.get("obtained_at")
-        self.expires_at = data.get("expires_at")
-        self.device_id: Optional[str] = data.get("device_id")
+    def __init__(self, data: dict) -> None:
+        self.access_token: str | None = data.get("access_token")
+        self.refresh_token: str | None = data.get("refresh_token")
+        self.expires_in: int | None = data.get("expires_in")
+        self.obtained_at: str | None = data.get("obtained_at")
+        self.expires_at: str | None = data.get("expires_at")
+        self.device_id: str | None = data.get("device_id")
 
     def seconds_left(self) -> float:
         """Seconds until the access token expires (negative if already expired); +inf if unknown."""
         if not self.expires_at:
             return float("inf")
         when = datetime.datetime.fromisoformat(self.expires_at)
-        return (when - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+        return (when - datetime.datetime.now(datetime.UTC)).total_seconds()
 
     def as_dict(self) -> dict:
+        """The token-file JSON: the same six keys the constructor reads."""
         return {
             "access_token": self.access_token,
             "refresh_token": self.refresh_token,
@@ -100,17 +102,17 @@ class CloudClient:
         token_file: Path,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = TIMEOUT,
-        opener: Optional[Callable] = None,
+        opener: Callable[[urllib.request.Request], Any] | None = None,
         *,
         app_base_url: str = DEFAULT_APP_URL,
-        obfuscation_key: Optional[str] = None,
-        client_basic: Optional[str] = None,
-    ):
+        obfuscation_key: str | None = None,
+        client_basic: str | None = None,
+    ) -> None:
         self.token_file = Path(token_file)
         self.base_url = base_url.rstrip("/")
         self.app_base_url = app_base_url.rstrip("/")  # origin/referer host (region-specific)
         self.timeout = timeout
-        self._opener = opener or self._urlopen  # tests inject a stand-in
+        self._opener: Callable[[urllib.request.Request], Any] = opener or self._urlopen  # tests inject a stand-in
         # The app's static constants, NOT shipped in this code: the password key (login) and the OAuth client
         # Basic credential (login + refresh). They come from the config, so they aren't committed here.
         self.obfuscation_key = obfuscation_key
@@ -118,6 +120,9 @@ class CloudClient:
 
     # ---------- token file ----------
     def load(self) -> Tokens:
+        """The token file as Tokens, read fresh each call (no caching), so a
+        refresh by another process is seen. Raises CloudError if it's missing
+        or unreadable."""
         if not self.token_file.exists():
             raise CloudError(f"no token file {self.token_file}: run `sigen cloud login` first.")
         try:
@@ -126,6 +131,8 @@ class CloudClient:
             raise CloudError(f"can't read the token file {self.token_file}: {e}")
 
     def _save(self, tokens: Tokens) -> None:
+        """Write the token file via a temp file and os.replace, making its
+        folder if needed."""
         self.token_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.token_file.with_suffix(self.token_file.suffix + ".tmp")
         tmp.write_text(json.dumps(tokens.as_dict(), indent=1) + "\n", encoding="utf-8")
@@ -140,10 +147,13 @@ class CloudClient:
         return uuid.uuid4().hex
 
     # ---------- HTTP ----------
-    def _urlopen(self, request):
+    def _urlopen(self, request: urllib.request.Request) -> Any:
+        """The default opener: urllib's urlopen with this client's timeout."""
         return urllib.request.urlopen(request, timeout=self.timeout)
 
-    def _request(self, method: str, url: str, headers: dict, data: Optional[bytes] = None):
+    def _request(self, method: str, url: str, headers: dict, data: bytes | None = None) -> tuple[int, str]:
+        """Send one request; return (HTTP status, body text), HTTP errors
+        included. Raises CloudError only when the cloud can't be reached."""
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with self._opener(req) as r:
@@ -153,7 +163,10 @@ class CloudClient:
         except (urllib.error.URLError, OSError) as e:
             raise CloudError(f"couldn't reach the Sigen cloud at {url}: {getattr(e, 'reason', e)}")
 
-    def _headers(self, access_token: Optional[str] = None, form: bool = False) -> dict:
+    def _headers(self, access_token: str | None = None, form: bool = False) -> dict:
+        """The web app's request headers. form=True is the OAuth token POST
+        (form body, Basic client credential; raises CloudError without
+        cloud.client_basic); an access_token adds a bearer authorization."""
         h = {
             "accept": "*/*",
             "accept-language": "en_US",
@@ -203,6 +216,8 @@ class CloudClient:
 
     # ---------- auth ----------
     def _obfuscation_key_bytes(self) -> bytes:
+        """cloud.obfuscation_key as UTF-8 bytes, for encode_password; raises
+        CloudError if the config doesn't set it."""
         if not self.obfuscation_key:
             raise CloudError(
                 "cloud.obfuscation_key is not set in the config: `sigen cloud login` needs the app's "
@@ -210,7 +225,7 @@ class CloudClient:
             )
         return self.obfuscation_key.encode("utf-8")
 
-    def login(self, username: str, password: str, mfa_prompt: Optional[Callable[[dict], str]] = None) -> Tokens:
+    def login(self, username: str, password: str, mfa_prompt: Callable[[dict], str] | None = None) -> Tokens:
         """Password login, saving the tokens. If the cloud asks for a security code and `mfa_prompt` is given, it is
         called with the response to get the code and a second request is made. Raises CloudError if not logged in.
         One attempt per request: the account locks after a few failures, so nothing is retried."""
@@ -274,13 +289,15 @@ class CloudClient:
         return tokens
 
     def access_token(self, refresh_if_needed: bool = False) -> str:
+        """The saved access token, refreshed first via ensure_fresh only if
+        refresh_if_needed. Raises CloudError if there is none."""
         tokens = self.ensure_fresh() if refresh_if_needed else self.load()
         if not tokens.access_token:
             raise CloudError(f"{self.token_file} has no access token: run `sigen cloud login`.")
         return tokens.access_token
 
     # ---------- read-only queries ----------
-    def get(self, path: str, params: Optional[dict] = None, *, refresh_if_needed: bool = False):
+    def get(self, path: str, params: dict | None = None, *, refresh_if_needed: bool = False) -> Any:
         """GET an API path (e.g. "/device/gateway/<id>") and return its `data`. refresh_if_needed only for callers
         that own refreshing (poll); plain queries pass False and fail cleanly on an expired token."""
         token = self.access_token(refresh_if_needed=refresh_if_needed)
@@ -301,26 +318,27 @@ class CloudClient:
             raise CloudError(f"{path}: HTTP {status}, API code {body.get('code')}, {body.get('msg')!r}")
         return body.get("data")
 
-    def device_dynamic_info(self, station_id: str, sn_code: str, device_type: int):
-        """The realTimeInfo list for one device (battery heating status, SOC, etc.)."""
+    def device_dynamic_info(self, station_id: str, sn_code: str, device_type: int) -> Any:
+        """One device's dynamic info: a dict whose realTimeInfo list holds its live values (battery heating status,
+        SOC, etc.)."""
         return self.get(
             "/device/sigen/device/dynamic/info",
             {"stationId": station_id, "deviceType": device_type, "snCode": sn_code, "refreshFlag": ""},
             refresh_if_needed=False,
         )
 
-    def gateway(self, station_id: str):
+    def gateway(self, station_id: str) -> Any:
         """The LoadHub/gateway's grid, inverter, generator measurements and contactor states."""
         return self.get(f"/device/gateway/{station_id}")
 
 
 # ---------- helpers ----------
-def _tokens_from(body: dict, device_id: Optional[str]) -> Optional[Tokens]:
+def _tokens_from(body: dict, device_id: str | None) -> Tokens | None:
     """Build Tokens from a token-endpoint body if it carries an access token, stamping the timing; else None."""
     data = body if body.get("access_token") or body.get("accessToken") else body.get("data")
     if not isinstance(data, dict) or not (data.get("access_token") or data.get("accessToken")):
         return None
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     expires_in = data.get("expires_in", data.get("expiresIn"))
     return Tokens(
         {
@@ -334,12 +352,16 @@ def _tokens_from(body: dict, device_id: Optional[str]) -> Optional[Tokens]:
     )
 
 
-def _challenge_id(body: dict):
+def _challenge_id(body: dict) -> str | None:
+    """The MFA challenge id from a token-endpoint body (under `data` or at
+    the top, snake or camel case), or None if the cloud didn't ask."""
     d = body.get("data") if isinstance(body.get("data"), dict) else {}
     return d.get("challenge_id") or d.get("challengeId") or body.get("challenge_id")
 
 
-def _redact(obj):
+def _redact(obj: Any) -> Any:
+    """A copy of a parsed JSON body with token, password and code values
+    replaced by "***" at any depth, safe to put in an error message."""
     secret = {"access_token", "refresh_token", "accessToken", "refreshToken", "password", "verification_code"}
     if isinstance(obj, dict):
         return {k: ("***" if k in secret else _redact(v)) for k, v in obj.items()}

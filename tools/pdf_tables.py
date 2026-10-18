@@ -11,12 +11,12 @@ continuation on later pages, merges rows split across pages with extract_table.p
 row (word count matches type, RO/RW/WO, numbering). "Appendix N …" tables (description +
 bit/value) are written too. Problems go to stderr; exit code 1 if there were any.
 """
+
 import argparse
 import csv
 import re
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 import pdfplumber
 
@@ -28,7 +28,7 @@ SETTINGS = {"text_x_tolerance": 1.5}
 CAPTION = re.compile(r"^(Table (\d+(?:-\d+)+)|Appendix (\d+)) ([A-Z].*)$")
 
 
-def cell(text: Optional[str]) -> str:
+def cell(text: str | None) -> str:
     return " ".join((text or "").split())
 
 
@@ -57,11 +57,11 @@ def slug(text: str) -> str:
 class Logical:
     """One table as printed: its header and rows, possibly spread over several pages."""
 
-    def __init__(self, page: int, header: List[str]):
-        self.page, self.header, self.rows = page, header, []      # rows: (page, cells)
+    def __init__(self, page: int, header: list[str]):
+        self.page, self.header, self.rows = page, header, []  # rows: (page, cells)
 
 
-def is_header(cells: List[str]) -> bool:
+def is_header(cells: list[str]) -> bool:
     cells = [cell(c) for c in cells]
     first = cells[0].replace(" ", "").lower() if cells else ""
     return first.startswith("no") or (len(cells) == 2 and cells[1] in ("Bit", "Value"))
@@ -73,11 +73,11 @@ def read_document(pdf) -> tuple:
     for n, page in enumerate(pdf.pages, 1):
         for line in (page.extract_text(x_tolerance=1.5) or "").splitlines():
             m = CAPTION.match(line.strip())
-            if m and not re.search(r"\.{5,}", line):                # skip table-of-contents lines
+            if m and not re.search(r"\.{5,}", line):  # skip table-of-contents lines
                 kind = "table" if m.group(2) else "appendix"
                 captions.append((kind, m.group(2) or m.group(3), m.group(4).strip(), n))
         for raw in page.extract_tables(table_settings=SETTINGS):
-            rows = [[c or "" for c in r] for r in raw]         # raw text, line breaks kept
+            rows = [[c or "" for c in r] for r in raw]  # raw text, line breaks kept
             if not rows:
                 continue
             if is_header(rows[0]):
@@ -96,7 +96,7 @@ def register_rows(table: Logical):
     width = len(table.header)
     names = column_names([table.header], width)
     name_col = names.index("name") if "name" in names else None
-    problems, groups, hidden = [], [], []                         # groups: [page, cells, merged pages]
+    problems, groups, hidden = [], [], []  # groups: [page, cells, merged pages]
     for page, raw in table.rows:
         raw = list(raw)
         if name_col is not None and name_col < len(raw):
@@ -123,7 +123,7 @@ def register_rows(table: Logical):
         row["source_page"] = str(page) if last == page else f"{page}-{last}"
         checked = row
         span = re.fullmatch(r"(\d{5})-(\d{5})", row.get("address", "").replace(" ", ""))
-        if span:                     # a "Reserved 40069-40156" range row: check its first address
+        if span:  # a "Reserved 40069-40156" range row: check its first address
             row["address"] = f"{span.group(1)}-{span.group(2)}"
             row["quantity"] = row.get("quantity", "").replace(" ", "")
             checked = {**row, "address": span.group(1)}
@@ -131,8 +131,9 @@ def register_rows(table: Logical):
         expected = int(row["no"]) + 1 if row.get("no", "").isdigit() else None
         rows.append(row)
     if hidden:
-        print(f"  note: removed hidden row numbers from {len(hidden)} name(s): {hidden[0]}…{hidden[-1]}",
-              file=sys.stderr)
+        print(
+            f"  note: removed hidden row numbers from {len(hidden)} name(s): {hidden[0]}…{hidden[-1]}", file=sys.stderr
+        )
     return names + ["source_page"], rows, problems
 
 
@@ -142,7 +143,7 @@ def appendix_rows(table: Logical):
         cells = [cell(c) for c in raw]
         if len(cells) < 2 or not cells[0] or cells[1].lower().replace(" ", "") == "notdefined":
             continue
-        if rows and not cells[1]:                                  # description wrapped onto a new row
+        if rows and not cells[1]:  # description wrapped onto a new row
             rows[-1]["description"] += " " + cells[0]
             continue
         rows.append({"value": cells[1], "description": cells[0], "source_page": str(page)})
@@ -153,8 +154,12 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--pdf", type=Path, required=True, help="protocol PDF")
     p.add_argument("--out-dir", type=Path, required=True, help="directory for the CSV files")
-    p.add_argument("--only", action="append", metavar="ID",
-                   help="table id (e.g. 5-3) or appendix number to write; repeatable (default: all)")
+    p.add_argument(
+        "--only",
+        action="append",
+        metavar="ID",
+        help="table id (e.g. 5-3) or appendix number to write; repeatable (default: all)",
+    )
     args = p.parse_args(argv)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     with pdfplumber.open(args.pdf) as pdf:
@@ -162,14 +167,14 @@ def main(argv=None) -> int:
     used, total_problems = -1, 0
     for kind, ident, title, page in captions:
         if kind == "table" and not ident.startswith("5-"):
-            continue                                              # chapters 2-4: prose tables, not registers
+            continue  # chapters 2-4: prose tables, not registers
         # The table starts on the caption's page or the next; a caption with no table there
         # (e.g. a stray mention in the revision history) claims nothing.
-        index = next((i for i, t in enumerate(tables)
-                      if i > used and t.header is not None and page <= t.page <= page + 1), None)
+        index = next(
+            (i for i, t in enumerate(tables) if i > used and t.header is not None and page <= t.page <= page + 1), None
+        )
         if index is None:
-            print(f"warning: no table right after {kind} {ident} {title!r} (page {page}); skipped",
-                  file=sys.stderr)
+            print(f"warning: no table right after {kind} {ident} {title!r} (page {page}); skipped", file=sys.stderr)
             continue
         used = index
         if args.only and ident not in args.only:

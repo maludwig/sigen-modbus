@@ -10,12 +10,45 @@
    Use: lay = Strips.layout(strips, xaxis, hooks); new uPlot({..., height: h + lay.extra, axes: [lay.xaxis, ...],
    hooks: lay.hooks}, ...); then lay.cursor.line = Strips.cursorLine(plot). In a browser this file sets the global
    Strips; in Node, require() returns the same functions (stripRows and stripSpans are tested in tests/js). */
+
+/**
+ * One strip as the page has it: charts.Strip from the server, starts
+ * turned into Unix seconds.
+ * @typedef {Object} Strip
+ * @property {string} label
+ * @property {number[]} starts  each bar's start, Unix seconds, ascending
+ * @property {number} length  a bar's longest span, seconds
+ * @property {(string|null)[]} colours  one per start; null = no data
+ */
+
+/**
+ * Where each strip's label and bar go, in CSS px down from the plot's
+ * bottom edge, and the whole band's height.
+ * @typedef {Object} Band
+ * @property {{labelY: number, barY: number, barH: number}[]} rows
+ * @property {number} height
+ */
+
+/**
+ * What layout() returns: the options to build the chart with.
+ * @typedef {Object} Layout
+ * @property {Object} xaxis  the x axis, with room for the strips
+ * @property {Object} hooks  the hooks, with painting and the cursor added
+ * @property {number} extra  CSS px to add to the chart's height
+ * @property {{line: (HTMLElement|null)}} cursor  set .line once built
+ */
 (function (root) {
   "use strict";
 
   const STRIP = {top: 6, label: 14, bar: 9, gap: 6, below: 4};   // CSS px: above the first, each row's parts, under
 
-  // The rows' places in CSS px from the plot's bottom edge, and the band's height.
+  /**
+   * The rows' places in CSS px from the plot's bottom edge, and the band's
+   * height.
+   * @param {number} n  how many strips
+   * @param {typeof STRIP} [s]  the spacing
+   * @returns {Band}
+   */
   function stripRows(n, s = STRIP) {
     const step = s.label + s.bar + s.gap, rows = [];
     for (let i = 0; i < n; i++) {
@@ -25,8 +58,17 @@
     return {rows, height: n ? s.top + n * step - s.gap : 0};
   }
 
-  // A strip's bars as [left, right, colour] in pixels: toPx(time) mapped and clipped to [left, right]; bars wholly
-  // outside are left out.
+  /**
+   * A strip's bars as [left, right, colour] in pixels: toPx(time) mapped and
+   * clipped to [left, right]; bars wholly outside are left out.
+   * @param {number[]} starts  Unix seconds
+   * @param {number} length  seconds
+   * @param {(string|null)[]} colours
+   * @param {function(number): number} toPx  Unix seconds -> canvas pixels
+   * @param {number} left
+   * @param {number} right
+   * @returns {[number, number, (string|null)][]}
+   */
   function stripSpans(starts, length, colours, toPx, left, right) {
     const out = [];
     for (let i = 0; i < starts.length; i++) {
@@ -38,6 +80,13 @@
   }
 
   let hatching = null;                                    // the "no data" pattern, made once per pixel ratio
+  /**
+   * The grey "////" fill under every bar, which shows where a strip has no
+   * data; cached until the pixel ratio changes.
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {number} pr  device pixel ratio
+   * @returns {CanvasPattern}
+   */
   function hatch(ctx, pr) {
     if (hatching && hatching.pr === pr) return hatching.pattern;
     const tile = root.document.createElement("canvas"), n = Math.round(6 * pr), g = tile.getContext("2d");
@@ -56,6 +105,14 @@
     return hatching.pattern;
   }
 
+  /**
+   * Paint every strip (label, hatching, bars, outline) on the chart's canvas
+   * below its plot: uPlot's draw hook, added by layout().
+   * @param {uPlot} u
+   * @param {Strip[]} strips
+   * @param {Band} band
+   * @returns {void}
+   */
   function paintStrips(u, strips, band) {
     const pr = root.devicePixelRatio || 1, ctx = u.ctx, {left, top, width, height} = u.bbox;
     const below = top + height, toPx = (t) => u.valToPos(t, "x", true);
@@ -82,7 +139,15 @@
     ctx.restore();
   }
 
-  function moveStripCursor(u, line, band) {               // uPlot's cursor line stops at the plot: carry it on
+  /**
+   * uPlot's cursor line stops at the plot: carry it on down through the
+   * strips (the setCursor hook); hidden while the cursor is off the chart.
+   * @param {uPlot} u
+   * @param {HTMLElement} line  from cursorLine()
+   * @param {Band} band
+   * @returns {void}
+   */
+  function moveStripCursor(u, line, band) {
     const x = u.cursor.left;
     if (x == null || x < 0) {
       line.style.display = "none";
@@ -93,9 +158,16 @@
                                top: `${(u.bbox.top + u.bbox.height) / pr}px`, height: `${band.height}px`});
   }
 
-  // Room for `strips` under a chart: {xaxis (with the gap the band needs), hooks (painting them and carrying the
-  // cursor down), extra (CSS px to add to the chart's height), cursor (set cursor.line = cursorLine(plot) once the
-  // chart exists)}. No strips: everything as given.
+  /**
+   * Room for `strips` under a chart: {xaxis (with the gap the band needs),
+   * hooks (painting them and carrying the cursor down), extra (CSS px to add
+   * to the chart's height), cursor (set cursor.line = cursorLine(plot) once
+   * the chart exists)}. No strips: everything as given.
+   * @param {Strip[]} strips
+   * @param {Object} xaxis  the uPlot x axis options to extend
+   * @param {Object} hooks  the uPlot hooks to extend
+   * @returns {Layout}
+   */
   function layout(strips, xaxis, hooks) {
     if (!strips.length) return {xaxis, hooks, extra: 0, cursor: {line: null}};
     const band = stripRows(strips.length), cursor = {line: null}, extra = band.height + STRIP.below;
@@ -104,7 +176,13 @@
                     setCursor: [(u) => cursor.line && moveStripCursor(u, cursor.line, band)]}};
   }
 
-  function cursorLine(plot) {                             // the cursor's line, carried on down through the strips
+  /**
+   * The cursor's line, carried on down through the strips: a hidden dashed
+   * div beside the plot, for layout()'s cursor.line.
+   * @param {uPlot} plot
+   * @returns {HTMLElement}
+   */
+  function cursorLine(plot) {
     const line = root.document.createElement("div");
     line.style.cssText = "position:absolute;width:0;border-left:1px dashed #607d8b;pointer-events:none;display:none";
     plot.over.parentNode.appendChild(line);

@@ -13,41 +13,43 @@ The site, faces, panel counts and panel come from the config ("site", "array"). 
 timezone-aware. Without measured weather it assumes air at 12 °C and wind at 2 m/s.
 """
 
-from typing import Dict, Optional, Union
-
 import pandas as pd
 import pvlib
 
 from sigen.config import Array, Site
 
 TEMP_AIR, WIND = 12.0, 2.0  # °C, m/s: the fixed weather for clear-sky days without measurements
-Number = Union[float, pd.Series]
+Number = float | pd.Series
 
 
 class Model:
-    def __init__(self, site: Site, array: Array):
+    """The clear-sky model for one site and array: the pvlib location, the
+    panel's cell-temperature parameters and its temperature coefficient, set
+    up once and shared by every face and string."""
+
+    def __init__(self, site: Site, array: Array) -> None:
         self.site, self.array = site, array
-        self.location = pvlib.location.Location(
+        self.location: pvlib.location.Location = pvlib.location.Location(
             site.latitude,
             site.longitude,
             tz=site.timezone,
             altitude=site.altitude_m if site.altitude_m is not None else 0,
         )
-        self.temp_params = pvlib.temperature.TEMPERATURE_MODEL_PARAMETERS["sapm"][array.panel.mount]
-        self.gamma = array.panel.gamma_pct_per_c / 100
+        self.temp_params: dict[str, float] = pvlib.temperature.TEMPERATURE_MODEL_PARAMETERS["sapm"][array.panel.mount]
+        self.gamma: float = array.panel.gamma_pct_per_c / 100
 
     def face_kw(
         self,
         times: pd.DatetimeIndex,
-        ghi,
-        dni,
-        dhi,
+        ghi: pd.Series,
+        dni: pd.Series,
+        dhi: pd.Series,
         temp_air: Number,
         wind_speed: Number,
         tilt: float,
         azimuth: float,
         kw: float,
-        sun: Optional[pd.DataFrame] = None,
+        sun: pd.DataFrame | None = None,
     ) -> pd.Series:
         """Modelled DC power (kW) of `kw` of panels at `tilt` / `azimuth`, given the sunlight and weather at `times`.
         `sun` (the solar position at `times`) saves recomputing it for several faces."""
@@ -77,7 +79,7 @@ class Model:
         return pvlib.pvsystem.pvwatts_dc(effective, temp_cell, kw * 1000, self.gamma).clip(lower=0) / 1000
 
     def clear_sky_at(
-        self, times: pd.DatetimeIndex, faces: Dict[str, float], temp_air: Number = TEMP_AIR, wind_speed: Number = WIND
+        self, times: pd.DatetimeIndex, faces: dict[str, float], temp_air: Number = TEMP_AIR, wind_speed: Number = WIND
     ) -> pd.DataFrame:
         """Clear-sky DC power (kW) at `times` for {face name: kW of panels on it}, one column per face. One sky and
         sun computation for all of them."""
@@ -122,6 +124,7 @@ class Model:
     ) -> pd.Series:
         """Clear-sky DC power (kW) of `kw` of panels at `tilt` / `azimuth`, every `freq` over
         `days` cloudless days from `day` (a local midnight)."""
-        times = pd.date_range(day, day + pd.Timedelta(days=days), freq=freq, inclusive="left")
+        # DateOffset, not Timedelta: the next local midnight even across a clock change (a 23 or 25 h day)
+        times = pd.date_range(day, day + pd.DateOffset(days=days), freq=freq, inclusive="left")
         sky = self.location.get_clearsky(times, model="ineichen")
         return self.face_kw(times, sky["ghi"], sky["dni"], sky["dhi"], temp_air, wind_speed, tilt, azimuth, kw)
