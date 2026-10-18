@@ -394,7 +394,7 @@ def test_the_page_starts_a_satellite_fetch(seeded, tmp_path):
     (command, log, process), = started
     assert command[1:4] == ["-m", "sigen", "satellite"]
     assert command[4:] == ["--start", "2026-10-01 00:00", "--end", "2026-10-02 00:00", "--config",
-                           str(tmp_path / "config.json"), "--cube-dir", str(tmp_path / "cubes")]
+                           str(tmp_path / "config.json"), "--cube-dir", str(tmp_path / "cubes"), "--record-to-db"]
     assert log == tmp_path / "cubes" / dashboard.SATELLITE_LOG
     client.get("/?day=2026-09-30")
     assert len(started) == 1                                 # ours is still running: none started
@@ -759,6 +759,23 @@ def test_measured_strip():
     assert strip.starts == [m(0), m(15), m(30), m(45), m(60)]
     assert strip.colours == ["#808080", charts.LOW_SUN_COLOUR, None, "#ffc680", charts.STRIP_OVER_COLOUR]
     assert "orange = twice it" in note and "per 15 min" in note
+
+
+def test_satellite_shade_round_trip(conn):
+    """A ShadeSeries stored and read back: dedup (one good row per scan), NaN <-> NULL, an error row isn't a scan,
+    and the result drives satellite_strips."""
+    nan = float("nan")
+    t0 = datetime.datetime(2026, 10, 9, 20, 0, tzinfo=datetime.timezone.utc)
+    t1 = t0 + datetime.timedelta(minutes=10)
+    series = goes_shade.ShadeSeries(times=[t0, t1], sun_elevation=[30.0, 28.0], sun_azimuth=[nan, nan],
+                                    columns={c: [0.5, nan] for c in db.SATELLITE_SHADE_VALUES})
+    assert db.insert_satellite_shade(conn, t1, series) == 2
+    assert db.insert_satellite_shade(conn, t1, series) == 0                   # one good row per scan: dedup
+    assert db.insert_satellite_shade(conn, t1, None, error="NOAA down") == 0  # a failed run: an error row, not a scan
+    back = charts.satellite_shade_series(conn)
+    assert back.times == [t0, t1] and back.sun_elevation == [30.0, 28.0]
+    assert back.column("trans_top")[0] == 0.5 and math.isnan(back.column("trans_top")[1])   # NULL -> NaN
+    assert [s.label for s in charts.satellite_strips(back)[0]] == [label for _, label, _, _ in charts.SATELLITE_STRIPS]
 
 
 def test_cli_starts_the_server(run, seeded, monkeypatch):

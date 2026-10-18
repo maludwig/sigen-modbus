@@ -58,6 +58,7 @@ SYNCABLE: Dict[str, Syncable] = {
     "open_meteo_weather": Syncable("valid_at", "id", ("resolution_minutes", "valid_at")),
     "radar_frames": Syncable("frame_at", "id", ("frame_at",)),
     "battery_heater": Syncable("polled_at", "id", ("battery", "polled_at")),
+    "satellite_shade": Syncable("scan_at", "id", ("scan_at",)),
 }
 
 # `--only-sync` kinds. The standalone ones map to one table each; "readings" is the cluster, handled on its own.
@@ -65,6 +66,7 @@ STANDALONE_KINDS: Dict[str, List[str]] = {
     "weather": ["open_meteo_weather"],
     "radar": ["radar_frames"],
     "heater": ["battery_heater"],
+    "satellite": ["satellite_shade"],
 }
 READINGS_KIND = "readings"
 KINDS: List[str] = [*STANDALONE_KINDS, READINGS_KIND]      # every selectable kind, in a stable order

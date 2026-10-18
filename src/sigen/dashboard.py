@@ -107,7 +107,8 @@ def satellite_command(config: Config, start: datetime.datetime, end: datetime.da
     whole = end.replace(second=0, microsecond=0)
     end = whole if whole == end else whole + datetime.timedelta(minutes=1)
     return [sys.executable, "-m", "sigen", "satellite", "--start", f"{start.astimezone(tz):%Y-%m-%d %H:%M}",
-            "--end", f"{end:%Y-%m-%d %H:%M}", "--config", str(config.path), "--cube-dir", str(config.cube_dir())]
+            "--end", f"{end:%Y-%m-%d %H:%M}", "--config", str(config.path), "--cube-dir", str(config.cube_dir()),
+            "--record-to-db"]
 
 
 def launch_detached(command: List[str], log: Path):
@@ -182,18 +183,6 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
                                               config.cube_dir() / SATELLITE_LOG)
             except OSError as e:
                 print(f"warning: couldn't start sigen satellite: {e}", file=sys.stderr)
-
-    def satellite_series(start, end):
-        """The satellite strips' data for the window: whatever cubes exist now (none: every strip hatched)."""
-        if config.site is None:
-            return None
-        from sigen import goes_shade
-        try:
-            return goes_shade.shade_between(config.cube_dir(), config.site.latitude, config.site.longitude,
-                                            config.site.timezone, start, end)
-        except (OSError, KeyError, ValueError) as e:      # a damaged cube: draw the strips empty, say why
-            print(f"warning: reading the satellite cubes: {e}", file=sys.stderr)
-            return goes_shade.ShadeSeries()
 
     def day_nav(start, live):
         """The previous / next day links (none after today)."""
@@ -349,9 +338,8 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             clear_sky = charts.clear_sky_strings(conn, config.site, config.array, start, end)
             pv_strip, pv_note = charts.measured_strip(charts.string_readings(conn, start, end), clear_sky)
             strips, notes = [pv_strip] + strips, [pv_note] + notes
-        satellite = satellite_series(start, end)
-        if satellite is not None:
-            more, note = charts.satellite_strips(satellite)
+        if config.site is not None:                      # the satellite strips, from the stored scans (satellite_shade)
+            more, note = charts.satellite_strips(charts.satellite_shade_series(conn, start, end))
             strips, notes = strips + more, notes + [note]
         return {"strips": [{"label": s.label, "starts": [iso_utc(x) for x in s.starts],
                             "length": s.length.total_seconds(),

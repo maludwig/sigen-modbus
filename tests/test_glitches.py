@@ -223,7 +223,7 @@ def test_0007_flags_the_history_as_judge_would(conn):
              "suspect": (plant(), inverter(pv=0, amps=1.0)), "stopped": (plant(load=0, state=0), inverter(state=0)),
              "plant only": (plant(load=0), None)}
     ids = {name: store_poll(conn, T0 + k * 15 * SEC, p, i) for k, (name, (p, i)) in enumerate(polls.items())}
-    assert db.migrate(conn) == ["0007_glitch", "0008_battery_heater", "0009_timestamp_brin"]
+    assert db.migrate(conn) == ["0007_glitch", "0008_battery_heater", "0009_timestamp_brin", "0010_satellite_shade"]
     flags = {rid: g for rid, g in conn.execute("SELECT id, glitch FROM readings")}
     for name, (p, i) in polls.items():
         verdict = glitches.judge({d: v for d, v in (("plant", p), ("inverter", i)) if v is not None})

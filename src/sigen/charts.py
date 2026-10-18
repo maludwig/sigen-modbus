@@ -22,7 +22,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from sigen.db import has_glitch_column, values_table, wide_layout
+from sigen.db import SATELLITE_SHADE_VALUES, has_glitch_column, values_table, wide_layout
 from sigen.registers import BY_NAME
 
 PLANT, INVERTER = 247, 1
@@ -645,6 +645,21 @@ def precipitation_strip(p: Precipitation) -> Tuple[Strip, str]:
     return strip, (f"{p.kind.capitalize()}: the radar at the site, as {p.kind} (Open-Meteo's kind for most frames): "
                    f"white = nothing, darkest = {p.top[p.kind]:.2f} {PRECIP_UNITS[p.kind]} (the most in 7 days), log "
                    f"scale (k = {PRECIP_EASING_K}); hatched = no frame")
+
+
+def satellite_shade_series(conn, start=None, end=None):
+    """The stored GOES shade (satellite_shade) for the window as a goes_shade.ShadeSeries, for satellite_strips: good
+    scans in time order, NULL columns as NaN (what ShadeSeries uses for "nothing to measure"). sun_azimuth isn't
+    stored (the strips don't use it), so it comes back NaN."""
+    from sigen.goes_shade import ShadeSeries
+    where, params = _between(start, end, "scan_at")
+    rows = conn.execute(f"SELECT scan_at, sun_elevation_deg, {', '.join(SATELLITE_SHADE_VALUES)} "
+                        f"FROM satellite_shade WHERE error IS NULL{where} ORDER BY scan_at", params).fetchall()
+    nan = float("nan")
+    val = lambda v: nan if v is None else v
+    return ShadeSeries(times=[r[0] for r in rows], sun_elevation=[val(r[1]) for r in rows],
+                       sun_azimuth=[nan] * len(rows),
+                       columns={c: [val(r[2 + i]) for r in rows] for i, c in enumerate(SATELLITE_SHADE_VALUES)})
 
 
 # The satellite strips (sigen.goes_shade): (column, label, low-sun mask?, value -> share of sun: 1 white, 0 black)

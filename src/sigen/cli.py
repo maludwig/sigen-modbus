@@ -662,7 +662,7 @@ def _local_time(text: str, timezone: str, what: str) -> datetime.datetime:
 
 def cmd_satellite(args) -> int:
     from zoneinfo import ZoneInfo
-    from sigen import goes
+    from sigen import db, goes, goes_shade
     config = _config(args)
     site = config.require_site()
     cube_dir = args.cube_dir if args.cube_dir is not None else config.cube_dir()
@@ -688,13 +688,30 @@ def cmd_satellite(args) -> int:
     err(f"GOES-{args.satellite} {', '.join(args.products)} ±{args.km:g} km around {site.latitude}, {site.longitude}, "
         f"{start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} {site.timezone}"
         + ("" if daylight is None else f", within {daylight:g} min of daylight") + f", into {cube_dir}")
+    conn = db.connect(config.require_database_url()) if args.record_to_db else None
+    if conn is not None:
+        db.check_ready(conn)                          # fail early if the schema isn't ready
     pid_file = goes.claim_pid_file(cube_dir)          # another run still going: exit 7
+    error = None
     try:
         goes.build_cubes(lat=site.latitude, lon=site.longitude, timezone=site.timezone, start=start, end=end,
                          cube_dir=cube_dir, products=args.products, km=args.km, satellite=args.satellite,
                          sector=args.sector, workers=args.workers, daylight_minutes=daylight, log=print)
+        series = (goes_shade.shade_between(cube_dir, site.latitude, site.longitude, site.timezone, start, end,
+                                           args.satellite) if conn is not None else None)
+    except Exception as e:                            # a build / shade failure: record it (if storing), then report
+        if conn is None:
+            raise
+        error, series = str(e), None
     finally:
         goes.release_pid_file(pid_file)
+    if conn is not None:
+        added = db.insert_satellite_shade(conn, datetime.datetime.now(datetime.timezone.utc), series, error=error)
+        conn.close()
+        if error is not None:
+            err(f"error: satellite run failed: {error}")
+            return ExitCode.CONNECTION
+        print(f"{added} scan(s) stored")
     return ExitCode.OK
 
 
@@ -1211,7 +1228,7 @@ def build_parser() -> argparse.ArgumentParser:
                                     "by appending to a copy and swapping it in, so readers never see half a scan. "
                                     "One run at a time per --cube-dir (satellite.pid there): exit 7 if another is "
                                     "still running. Exit 3 if NOAA couldn't be reached.")
-    _config_option(sa, "site (where the box is centred, and its timezone for the dates)")
+    _config_option(sa, "site (where the box is centred, and its timezone for the dates; database.url for --record-to-db)")
     sa.add_argument("--day", metavar="DATE", help="local date, e.g. 2026-10-10 (default: today)")
     sa.add_argument("--start", metavar="TIME", help='local start, e.g. "2026-10-10 06:00" (with --end, instead of --day)')
     sa.add_argument("--end", metavar="TIME", help="local end (exclusive)")
@@ -1228,6 +1245,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="where the cubes go (default: the config's satellite.cube_dir, else "
                          "captures/satellite/cubes next to the config file)")
     sa.add_argument("--satellite", default="18", help="GOES satellite number (default: 18, GOES-West)")
+    sa.add_argument("--record-to-db", action="store_true",
+                    help="also compute and store each scan's cloud shade over the site (the strip values) in the "
+                         "satellite_shade table")
     sa.add_argument("--sector", default="F", choices=["F", "C"], help="F = full disk (default), C = CONUS")
     sa.set_defaults(func=cmd_satellite)
 

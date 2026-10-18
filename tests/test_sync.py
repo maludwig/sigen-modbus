@@ -139,6 +139,20 @@ def test_export_battery_heater_good_only(conn):
     assert polled == [sync.iso(_t(5))]                                            # only the good row
 
 
+# ---------- standalone: the satellite_shade entry ----------
+def test_export_satellite_shade_good_only(conn):
+    from sigen.goes_shade import ShadeSeries
+    nan = float("nan")
+    series = ShadeSeries(times=[_t(5)], sun_elevation=[30.0], sun_azimuth=[nan],
+                         columns={c: [0.5] for c in db.SATELLITE_SHADE_VALUES})
+    db.insert_satellite_shade(conn, _t(6), series)
+    db.insert_satellite_shade(conn, _t(9), None, error="NOAA down")               # error row: excluded
+    body = sync.export_rows(conn, "satellite_shade", _t(0), _t(15))
+    assert "id" not in body["columns"]
+    scans = [row[body["columns"].index("scan_at")] for row in body["rows"]]
+    assert scans == [sync.iso(_t(5))]                                             # only the good scan
+
+
 # ---------- the readings cluster ----------
 def _insert_poll(conn, at=None):
     at = at or _t(5)

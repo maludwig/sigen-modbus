@@ -599,3 +599,28 @@ def insert_radar_rows(conn, rows) -> int:
                 if r.error is None:
                     added += cur.rowcount
     return added
+
+
+SATELLITE_SHADE_VALUES = ["trans_top", "trans_0km", "trans_2km", "trans_5km", "trans_10km",
+                          "prob_0km", "prob_2km", "prob_5km", "prob_10km"]        # the strip values, DB column order
+
+
+def insert_satellite_shade(conn, fetched_at, series, error: Optional[str] = None) -> int:
+    """Store a sigen.goes_shade.ShadeSeries, one row per scan (NaN -> NULL), one good row per scan (ON CONFLICT).
+    With `error` set, store a single failed-run row (scan_at NULL) instead. Returns how many good rows were added."""
+    import math
+    columns = ["fetched_at", "scan_at", "sun_elevation_deg", *SATELLITE_SHADE_VALUES, "error"]
+    query = (f"INSERT INTO satellite_shade ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))}) "
+             "ON CONFLICT (scan_at) WHERE error IS NULL DO NOTHING")
+    clean = lambda v: None if v is None or (isinstance(v, float) and math.isnan(v)) else v
+    added = 0
+    with errors_as("storing satellite shade failed"):
+        with conn.transaction():
+            if error is not None:
+                conn.execute(query, [fetched_at, None, None, *([None] * len(SATELLITE_SHADE_VALUES)), error])
+            elif series is not None:
+                for i, scan_at in enumerate(series.times):
+                    row = [fetched_at, scan_at, clean(series.sun_elevation[i]),
+                           *[clean(series.column(c)[i]) for c in SATELLITE_SHADE_VALUES], None]
+                    added += conn.execute(query, row).rowcount
+    return added
