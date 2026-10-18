@@ -74,7 +74,7 @@ def list_keys(satellite: str, prefix: str, get=None) -> List[Tuple[str, int]]:
         response = get(bucket_url(satellite), params)
         if not response.ok:
             raise ConnectionFailed(
-                f"listing {prefix} in {bucket_url(satellite)} failed: " f"{response.describe().splitlines()[0]}"
+                f"listing {prefix} in {bucket_url(satellite)} failed: {response.describe().splitlines()[0]}"
             )
         root = ET.fromstring(response.text)
         keys += [

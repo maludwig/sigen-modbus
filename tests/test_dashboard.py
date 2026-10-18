@@ -941,7 +941,7 @@ def _insert_daily_energy(conn, day, totals, flows, covered=24.0):
     cols.update({daily.FLOWS[k]: v for k, v in flows.items()})
     names = list(cols)
     conn.execute(
-        f"INSERT INTO daily_energy ({', '.join(names)}) " f"VALUES ({', '.join('%(' + n + ')s' for n in names)})", cols
+        f"INSERT INTO daily_energy ({', '.join(names)}) VALUES ({', '.join('%(' + n + ')s' for n in names)})", cols
     )
 
 

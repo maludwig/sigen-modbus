@@ -50,7 +50,7 @@ def require_supported() -> None:
     if sys.platform.startswith("linux"):
         if shutil.which("ip") is None:
             raise PlatformNotSupported(
-                "MAC lookup on Linux needs the `ip` command (iproute2), which isn't " "installed or isn't on PATH"
+                "MAC lookup on Linux needs the `ip` command (iproute2), which isn't installed or isn't on PATH"
             )
         return
     raise PlatformNotSupported(f"MAC lookup works on Windows and Linux, not {sys.platform}")

@@ -100,9 +100,7 @@ def empty_tables(conn) -> None:
 
     tables = [
         t
-        for t, in conn.execute(
-            "SELECT tablename FROM pg_tables WHERE schemaname = current_schema() " "ORDER BY tablename"
-        )
+        for t, in conn.execute("SELECT tablename FROM pg_tables WHERE schemaname = current_schema() ORDER BY tablename")
         if t not in KEPT_TABLES
     ]
     for _ in range(len(tables)):  # a table another refers to empties once that one has

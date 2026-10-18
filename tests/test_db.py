@@ -110,7 +110,7 @@ def test_0002_upgrades_existing_readings(conn):
         (first.version, first.name, first.checksum),
     )
     conn.execute(
-        "INSERT INTO register_meta (address, name, type, gain, unit) " "VALUES (30014, 'plant_ess_soc', 'u16', 10, '%')"
+        "INSERT INTO register_meta (address, name, type, gain, unit) VALUES (30014, 'plant_ess_soc', 'u16', 10, '%')"
     )
     rid = conn.execute(
         "INSERT INTO readings (ip_addr, started_at, ended_at, version) "
@@ -449,7 +449,7 @@ def test_query_json_and_several_statements(run, config, conn):
     code, out, _ = run(
         "db",
         "query",
-        "SELECT 1 AS a, NULL AS b, now() AS t; SET search_path TO DEFAULT; " "SELECT 2 AS a",
+        "SELECT 1 AS a, NULL AS b, now() AS t; SET search_path TO DEFAULT; SELECT 2 AS a",
         "--config",
         config,
         "--json",

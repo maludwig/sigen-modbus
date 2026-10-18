@@ -16,8 +16,9 @@ import psycopg
 from sigen import charts, db
 from sigen.config import Array, Site
 
-METHOD = 2  # how a day is computed (sigen.charts.day_energy): bump it when that changes.
+# How a day is computed (sigen.charts.day_energy): bump it when that changes.
 # 1: the device's daily counters for solar, house, battery; 2: lifetime counters only
+METHOD = 2
 CHECK_EVERY = 600  # seconds between poll's checks for a newly finished day
 TOTALS = {
     "solar": "solar_kwh",
@@ -43,7 +44,7 @@ def finished_days(conn: psycopg.Connection, tz: datetime.tzinfo) -> List[datetim
     """Every local day from the first successful plant reading's to the one before the last's: each has a reading
     after its midnight."""
     first, last = conn.execute(
-        "SELECT min(started_at), max(started_at) FROM readings " "WHERE unit_id = %s AND error IS NULL", (PLANT,)
+        "SELECT min(started_at), max(started_at) FROM readings WHERE unit_id = %s AND error IS NULL", (PLANT,)
     ).fetchone()
     if first is None:
         return []

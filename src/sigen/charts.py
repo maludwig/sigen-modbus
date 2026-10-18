@@ -156,8 +156,9 @@ def string_readings(conn, start=None, end=None) -> StringData:
     return data
 
 
-LIVE_VOLTS = 10.0  # a string below this is dark (the panels show voltage well before sunrise): the page
-# trims the string-voltage chart's time axis to the readings with a string at or above
+# A string below this is dark (the panels show voltage well before sunrise): the page trims the string-voltage chart's
+# time axis to the readings with a string at or above it.
+LIVE_VOLTS = 10.0
 
 
 def clear_sky_strings(conn, site, array, start: datetime.datetime, end: datetime.datetime):

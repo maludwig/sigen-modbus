@@ -201,7 +201,7 @@ def _check_applied(applied: Dict[int, Tuple[str, str]], migrations: Sequence[Mig
             )
         if mig.checksum != checksum:
             raise SchemaNotReady(
-                f"migration {mig.label} was edited after it was applied; put the change " f"in a new migration instead"
+                f"migration {mig.label} was edited after it was applied; put the change in a new migration instead"
             )
 
 
@@ -277,7 +277,7 @@ def wide_layout(conn) -> bool:
     tables alone don't say so: the backfill script creates them, and fills them, while register_values is still
     the table poll writes to.)"""
     return conn.execute(
-        "SELECT coalesce((SELECT relkind = 'v' FROM pg_class WHERE oid = to_regclass('register_values')), " "false)"
+        "SELECT coalesce((SELECT relkind = 'v' FROM pg_class WHERE oid = to_regclass('register_values')), false)"
     ).fetchone()[0]
 
 
@@ -340,7 +340,7 @@ def missing_columns(conn) -> List[str]:
             problems.append(f"{reg.name} ({reg.address}) has no column in {values_table(reg.device)}")
         elif have != COLUMN_TYPES[reg.type]:
             problems.append(
-                f"{values_table(reg.device)}.{reg.name} is {have}, but {reg.type} needs " f"{COLUMN_TYPES[reg.type]}"
+                f"{values_table(reg.device)}.{reg.name} is {have}, but {reg.type} needs {COLUMN_TYPES[reg.type]}"
             )
     return problems
 
@@ -421,7 +421,7 @@ def status(conn, migrations: Optional[Sequence[Migration]] = None) -> dict:
             # An exact count(*) on a large table takes a while, so past a million rows use the
             # planner's estimate (which is 0 until the table has been analyzed, hence not always).
             estimate = conn.execute(
-                "SELECT greatest(reltuples, 0)::bigint FROM pg_class " "WHERE oid = 'register_values'::regclass"
+                "SELECT greatest(reltuples, 0)::bigint FROM pg_class WHERE oid = 'register_values'::regclass"
             ).fetchone()[0]
             if estimate < 1_000_000:
                 out["register_values"] = conn.execute("SELECT count(*) FROM register_values").fetchone()[0]
@@ -689,7 +689,7 @@ def last_alerts_sent(conn) -> Dict[Optional[str], datetime.datetime]:
     with errors_as("reading the alert log failed"):
         return dict(
             conn.execute(
-                "SELECT kind, max(alerted_at) FROM alert_log WHERE NOT was_suppressed " "GROUP BY kind"
+                "SELECT kind, max(alerted_at) FROM alert_log WHERE NOT was_suppressed GROUP BY kind"
             ).fetchall()
         )
 

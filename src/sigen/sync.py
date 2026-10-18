@@ -317,7 +317,7 @@ def _present_keys(conn, table: str, spec: Syncable, start, end) -> set:
     cols = ", ".join(f'"{c}"' for c in spec.key)
     with db.errors_as(f"reading existing {table}"):
         rows = conn.execute(
-            f'SELECT {cols} FROM "{table}" ' f'WHERE "{spec.time_column}" >= %s AND "{spec.time_column}" < %s',
+            f'SELECT {cols} FROM "{table}" WHERE "{spec.time_column}" >= %s AND "{spec.time_column}" < %s',
             (start, end),
         ).fetchall()
     return {tuple(_key(v) for v in row) for row in rows}

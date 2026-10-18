@@ -71,7 +71,7 @@ def plan_blocks(
             if current:
                 if reg.address <= end:
                     raise ValueError(
-                        f"{reg.name} ({reg.address}) overlaps {current[-1].name} " f"({current[-1].address}-{end})"
+                        f"{reg.name} ({reg.address}) overlaps {current[-1].name} ({current[-1].address}-{end})"
                     )
                 if reg.address - end - 1 <= gap_limit and reg_end - start + 1 <= max_words:
                     current.append(reg)

@@ -170,7 +170,7 @@ class Config:
     def require_database_url(self) -> str:
         if not self.database_url:
             raise ConfigError(
-                f"the config has no database URL{self._from()}; " f'add "database": {{"url": "postgresql://…"}}'
+                f'the config has no database URL{self._from()}; add "database": {{"url": "postgresql://…"}}'
             )
         return self.database_url
 
@@ -361,7 +361,7 @@ def _cloud(path: Path, spec) -> "Cloud":
     app_base_url = spec.get("app_base_url", DEFAULT_CLOUD_APP_URL)
     if not isinstance(app_base_url, str) or not re.match(r"^https?://", app_base_url):
         raise ConfigError(
-            f'{path}: cloud.app_base_url must be a URL like "{DEFAULT_CLOUD_APP_URL}", got ' f"{app_base_url!r}"
+            f'{path}: cloud.app_base_url must be a URL like "{DEFAULT_CLOUD_APP_URL}", got {app_base_url!r}'
         )
     station = spec.get("station_id")
     if station is not None and (not isinstance(station, str) or not station.strip()):
@@ -392,7 +392,7 @@ def _command_settings(path: Path, command: str, spec) -> Dict[str, Any]:
     unknown = set(spec) - set(kinds)
     if unknown:
         raise ConfigError(
-            f"{path}: {command}: unknown setting(s) {', '.join(sorted(unknown))}; " f"known: {', '.join(kinds)}"
+            f"{path}: {command}: unknown setting(s) {', '.join(sorted(unknown))}; known: {', '.join(kinds)}"
         )
     out = {}
     for name, value in spec.items():

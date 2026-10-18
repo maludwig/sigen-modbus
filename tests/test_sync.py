@@ -95,7 +95,7 @@ def _peer_body(valids):
 def test_sync_table_dry_run_then_import_then_idempotent(conn, monkeypatch):
     monkeypatch.setattr(sync, "_get", lambda url, path, params=None: _peer_body([_t(5), _t(9)]))
     present = lambda: conn.execute(
-        "SELECT count(*) FROM open_meteo_weather " "WHERE valid_at >= %s AND valid_at < %s", (_t(0), _t(15))
+        "SELECT count(*) FROM open_meteo_weather WHERE valid_at >= %s AND valid_at < %s", (_t(0), _t(15))
     ).fetchone()[0]
 
     assert sync.sync_standalone(conn, "http://peer", "open_meteo_weather", _t(0), _t(15), True, out=lambda m: None) == (

@@ -243,7 +243,7 @@ class Register:
             raise ValueError(f"{self.name} ({self.table} {self.address}) is not writable")
         raw = round(value * self.gain)
         if abs(raw - value * self.gain) > 1e-6:
-            raise ValueError(f"{value} has more precision than {self.name} supports " f"(steps of {1 / self.gain:g})")
+            raise ValueError(f"{value} has more precision than {self.name} supports (steps of {1 / self.gain:g})")
         if self.allowed is not None and raw not in self.allowed:
             names = ", ".join(
                 f"{c} ({self.labels.get(c, '?')})" if self.labels else str(c) for c in sorted(self.allowed)

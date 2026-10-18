@@ -131,7 +131,7 @@ def listing(keys, token=None):
     )
     return Response(
         200,
-        f'<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{contents}{more}' f"</ListBucketResult>",
+        f'<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{contents}{more}</ListBucketResult>',
     )
 
 

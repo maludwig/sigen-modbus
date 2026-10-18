@@ -220,7 +220,7 @@ def run_poll(config, count, interval=60):
 
 def glitch_per_poll(conn):
     rows = conn.execute(
-        "SELECT poll_id, array_agg(DISTINCT coalesce(glitch, '-')) FROM readings GROUP BY poll_id " "ORDER BY poll_id"
+        "SELECT poll_id, array_agg(DISTINCT coalesce(glitch, '-')) FROM readings GROUP BY poll_id ORDER BY poll_id"
     ).fetchall()
     assert all(len(values) == 1 for _, values in rows)  # both units' readings agree
     return [None if values[0] == "-" else values[0] for _, values in rows]

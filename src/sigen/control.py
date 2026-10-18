@@ -185,7 +185,7 @@ def set_register(
                     )
                 return result(
                     "verify_failed",
-                    f"write failed ({e}); register reads " f"{reg.describe(after)}",
+                    f"write failed ({e}); register reads {reg.describe(after)}",
                     write_sent=True,
                     after_words=after,
                     **seen,
@@ -207,7 +207,7 @@ def set_register(
     if after != target:
         return result(
             "verify_failed",
-            f"read back {reg.describe(after)} but wrote " f"{reg.describe(target)}",
+            f"read back {reg.describe(after)} but wrote {reg.describe(target)}",
             write_sent=True,
             after_words=after,
             **seen,

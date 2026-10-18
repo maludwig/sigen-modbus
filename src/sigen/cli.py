@@ -1342,7 +1342,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="CHARS",
         type=_positive(int, 0),
         default=80,
-        help="cut table cells longer than CHARS with … (default: 80; 0 = never; " "--json never cuts)",
+        help="cut table cells longer than CHARS with … (default: 80; 0 = never; --json never cuts)",
     )
     dq.set_defaults(func=cmd_db_query)
 
@@ -1428,7 +1428,7 @@ def build_parser() -> argparse.ArgumentParser:
     sy.add_argument("--dry-run", action="store_true", help="report what would be imported; write nothing")
     _config_option(
         sy,
-        "the LOCAL database URL to write into, and site.timezone (to recompute daily totals after a " "readings sync)",
+        "the LOCAL database URL to write into, and site.timezone (to recompute daily totals after a readings sync)",
     )
     sy.set_defaults(func=cmd_sync)
 
@@ -1451,7 +1451,7 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument(
         "--ip",
         metavar="ADDRESS",
-        help="SigenStor IP address (default: devices.inverter.ip from the config; " "polling never uses scanning)",
+        help="SigenStor IP address (default: devices.inverter.ip from the config; polling never uses scanning)",
     )
     _config_option(
         pl,
@@ -1650,7 +1650,7 @@ def build_parser() -> argparse.ArgumentParser:
         "can open it (Windows Firewall asks the first time).",
     )
     _config_option(
-        da, "database.url, smart-load names, site.timezone for local times, and the dashboard section's " "settings"
+        da, "database.url, smart-load names, site.timezone for local times, and the dashboard section's settings"
     )
     da.add_argument(
         "--host",

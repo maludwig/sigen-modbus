@@ -52,3 +52,6 @@ sigen = ["migrations/*.sql", "migrations/backfill/*.sql", "templates/*.html", "s
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-n auto"
+
+[tool.black]
+line-length = 120
