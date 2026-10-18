@@ -36,18 +36,23 @@ def finished_days(conn, tz) -> List[datetime.date]:
     return [day + datetime.timedelta(days=k) for k in range((last_day - day).days)]
 
 
-def store_day(conn, day: datetime.date, tz) -> Optional[dict]:
+def store_day(conn, day: datetime.date, tz, site=None, array=None) -> Optional[dict]:
     """Compute `day` and store it (replacing its row, if any). Returns the row stored, or None if the day has no
-    plant readings."""
+    plant readings. With `site` and `array`, also store the day's clear-sky model energy (clear_sky_kwh)."""
     start =datetime.datetime.combine(day, datetime.time(), tz)
     end = start + datetime.timedelta(days=1)   # wall-clock arithmetic: the next local midnight, DST or not
     with db.errors_as(f"computing the energy of {day}"):
         e = charts.day_energy(conn, start, end)
     if e is None:
         return None
+    clear_sky = None
+    if site is not None and array is not None:
+        with db.errors_as(f"computing the clear-sky model of {day}"):
+            clear_sky = charts.day_clear_sky_kwh(conn, site, array, start, end)
     row = {"day": day, "timezone": str(tz), **{column: e.totals.get(key) for key, column in TOTALS.items()},
            **{column: e.flows[flow] for flow, column in FLOWS.items()},
-           "first_reading": e.first, "last_reading": e.last, "covered_hours": e.covered_hours, "method": METHOD}
+           "first_reading": e.first, "last_reading": e.last, "covered_hours": e.covered_hours,
+           "clear_sky_kwh": clear_sky, "method": METHOD}
     columns = list(row)
     with db.errors_as(f"storing the energy of {day}"):
         conn.execute(f"INSERT INTO daily_energy ({', '.join(columns)}) "
@@ -58,15 +63,17 @@ def store_day(conn, day: datetime.date, tz) -> Optional[dict]:
 
 def describe(row: dict) -> str:
     kwh = lambda column: "-" if row[column] is None else f"{row[column]:.2f}"
-    return (f"{row['day']}: solar {kwh('solar_kwh')}, house {kwh('load_kwh')}, grid in {kwh('grid_imported_kwh')} / "
+    return (f"{row['day']}: solar {kwh('solar_kwh')}/{kwh('clear_sky_kwh')} clear-sky, "
+            f"house {kwh('load_kwh')}, grid in {kwh('grid_imported_kwh')} / "
             f"out {kwh('grid_exported_kwh')}, battery in {kwh('battery_charged_kwh')} / out "
             f"{kwh('battery_discharged_kwh')} kWh ({row['covered_hours']:.1f} h of readings)")
 
 
 def update(conn, tz, first: Optional[datetime.date] = None, last: Optional[datetime.date] = None,
-           log: Callable[[str], None] = lambda msg: None) -> List[datetime.date]:
+           site=None, array=None, log: Callable[[str], None] = lambda msg: None) -> List[datetime.date]:
     """Store finished days. Without `first` and `last`: those not stored yet. With either: every finished day in
-    [first, last], recomputed. Returns the days stored; logs one line each."""
+    [first, last], recomputed. With `site` and `array`, each day's clear-sky model energy too. Returns the days
+    stored; logs one line each."""
     with db.errors_as("finding the days to store"):
         days = finished_days(conn, tz)
         if first is None and last is None:
@@ -76,7 +83,7 @@ def update(conn, tz, first: Optional[datetime.date] = None, last: Optional[datet
             days = [d for d in days if (first is None or d >= first) and (last is None or d <= last)]
     done = []
     for day in days:
-        row = store_day(conn, day, tz)
+        row = store_day(conn, day, tz, site, array)
         if row is not None:
             done.append(day)
             log(f"daily energy {describe(row)}")

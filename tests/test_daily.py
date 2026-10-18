@@ -55,7 +55,7 @@ def test_a_range_is_recomputed(a_day, conn):
 
 def test_db_daily_and_status(run, a_day, site_config):
     code, out, _ = run("db", "daily", "--config", site_config)
-    assert code == ExitCode.OK and "daily energy 2026-10-02: solar 30.00, house 15.00" in out
+    assert code == ExitCode.OK and "daily energy 2026-10-02: solar 30.00/" in out and "house 15.00" in out
     assert "Stored 2 day(s)" in out
     assert "every finished day is stored already" in run("db", "daily", "--config", site_config)[1]
     code, out, _ = run("db", "daily", "--config", site_config, "--from", "2026-10-02", "--to", "2026-10-02")

@@ -740,6 +740,7 @@ def test_all_time_page(config, conn):
     assert "Where all your energy has gone" in html and "/static/my_sankey.js" in html
     assert '"name": "Solar"' in html and '"flows": [' in html and '"flows": []' not in html   # a real Sankey
     assert ">All-time<" in html and 'class="on"' in html                                       # the nav, this page on
+    assert "/static/strips.js" in html and "Strips.layout" in html      # the solar line, with strips.js's renderer
 
 
 def test_all_time_page_without_days(config):
@@ -754,8 +755,25 @@ def test_pv_history(conn):
     assert line.kwh == [12.0, 30.0, 18.0] and len(line.t) == 3
     assert line.peak_kwh == 30.0 and line.peak_day == "Oct 7"
     assert line.t[0] == int(datetime.datetime(2026, 10, 6, 12, tzinfo=TZ).timestamp())   # stamped at local noon
+    assert (line.x_min, line.x_max) == (int(datetime.datetime(2026, 10, 6, tzinfo=TZ).timestamp()),
+                                        int(datetime.datetime(2026, 10, 9, tzinfo=TZ).timestamp()))   # whole days
     conn.execute("DELETE FROM daily_energy WHERE day > %s", (datetime.date(2026, 10, 6),))
     assert charts.pv_history(conn, TZ) is None                                            # fewer than two days
+
+
+def test_all_time_strips(conn):
+    for day, solar in [(datetime.date(2026, 10, 6), 10.0), (datetime.date(2026, 10, 7), 40.0)]:
+        _insert_daily_energy(conn, day, {"solar": solar, "load": 8.0}, _flows())
+    conn.execute("UPDATE daily_energy SET clear_sky_kwh = 50")
+    strips, notes = charts.all_time_strips(conn, TZ)
+    assert [s.label for s in strips] == ["PV / clear-sky"]          # only PV has data (no radar / satellite inserted)
+    pv = strips[0]
+    assert pv.starts == [datetime.datetime(2026, 10, 6, tzinfo=TZ), datetime.datetime(2026, 10, 7, tzinfo=TZ)]
+    assert pv.length == datetime.timedelta(days=1)                  # a bar per local day, midnight to midnight
+    assert pv.colours == [charts._ratio_colour(0.2), charts._ratio_colour(0.8)]   # 10/50 and 40/50
+    assert notes[-1] == "hatched = no data that day"
+    conn.execute("DELETE FROM daily_energy WHERE day > %s", (datetime.date(2026, 10, 6),))
+    assert charts.all_time_strips(conn, TZ) == ([], [])             # fewer than two days
 
 
 def test_measured_strip():

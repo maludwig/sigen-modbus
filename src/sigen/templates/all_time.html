@@ -21,23 +21,34 @@
   {% else %}
     <h1>Where all your energy has gone</h1>
     <p class="meta">Drawn {{ drawn.strftime("%Y-%m-%d %H:%M:%S") }} ({{ tz }}). Finished days {{ span }},
-      {{ "%.0f"|format(energy.covered_hours) }} h of power readings. Each day's totals are its lifetime counters'
-      increase; the bands are estimated from the 15-second power readings (solar serves the house first, then the
-      battery, then the grid; the battery and the grid serve the house first), so they add up to a little less than
-      the totals &mdash; the inverter's losses and any time the poller missed.</p>
+      {{ "%.0f"|format(energy.covered_hours) }} h of power readings.</p>
     {% if pv %}
-      <h2>Solar produced each day</h2>
+      <h2>Solar produced each day
+        <button class="help" aria-controls="note-pv" aria-expanded="false" title="About this chart">i</button></h2>
+      <div class="meta note" id="note-pv" hidden>Each finished day's solar generation (kWh); best
+        {{ "%.1f"|format(pv.peak_kwh) }} kWh on {{ pv.peak_day }}. The all-time Sankey below adds these up with the
+        rest. {% if strip_notes %}Underneath, a bar per day. {{ strip_notes|join("; ") }}.{% endif %}</div>
       <div id="pv"></div>
-      <p class="meta">Each finished day's solar generation (kWh); best {{ "%.1f"|format(pv.peak_kwh) }} kWh on
-        {{ pv.peak_day }}. The all-time Sankey below adds these up with the rest.</p>
     {% endif %}
-    <canvas id="sankey"></canvas>
-    {% if sankey.dropped %}
-      <p class="meta">Not drawn: {{ sankey.dropped|length }} flow{{ "s" if sankey.dropped|length > 1 }} under 0.5 %
-        of all energy in ({{ "%.2f"|format(sankey.cutoff) }} kWh):
+    <h2>Where it went, every finished day
+      <button class="help" aria-controls="note-sankey" aria-expanded="false" title="About this chart">i</button></h2>
+    <div class="meta note" id="note-sankey" hidden>Each day's totals are its lifetime counters' increase; the bands
+      are estimated from the 15-second power readings (solar serves the house first, then the battery, then the grid;
+      the battery and the grid serve the house first), so they add up to a little less than the totals &mdash; the
+      inverter's losses and any time the poller missed.
+      {% if sankey.dropped %}Not drawn: {{ sankey.dropped|length }} flow{{ "s" if sankey.dropped|length > 1 }} under
+        0.5 % of all energy in ({{ "%.2f"|format(sankey.cutoff) }} kWh):
         {% for f in sankey.dropped %}{{ f.from }} &rarr; {{ f.to }} {{ "%.2f"|format(f.kwh) }} kWh{{ ", " if not loop.last }}{% endfor %};
-        taken off the diagram's totals at both ends.</p>
-    {% endif %}
+        taken off the diagram's totals at both ends.{% endif %}</div>
+    <canvas id="sankey"></canvas>
+    <script>
+      // each title's ⓘ shows or hides its chart's note (as on the charts page)
+      document.querySelectorAll("button.help").forEach((button) => button.addEventListener("click", () => {
+        const note = document.getElementById(button.getAttribute("aria-controls")), open = note.hidden;
+        note.hidden = !open;
+        button.setAttribute("aria-expanded", String(open));
+      }));
+    </script>
     <script src="{{ url_for('static', filename='my_sankey.js') }}"></script>
     <script>
       const sankey = {{ sankey|tojson }};
@@ -49,25 +60,30 @@
     </script>
     {% if pv %}
       <script src="{{ uplot }}.iife.min.js"></script>
+      <script src="{{ url_for('static', filename='strips.js') }}"></script>
       <script>
-        const pvEl = document.getElementById("pv");
+        // The solar line, and under it the per-day strips (static/strips.js: as under the string-power chart).
+        const pvEl = document.getElementById("pv"), PV_HEIGHT = 220;
         const pvData = [{{ pv.t|tojson }}, {{ pv.kwh|tojson }}];
+        const pvStrips = {{ strips|tojson }}.map((s) => ({...s, starts: s.starts.map((iso) => Date.parse(iso) / 1000)}));
         const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
         const fmtDay = (v) => { const d = new Date(v * 1000); return MONTHS[d.getMonth()] + " " + d.getDate(); };
-        const pvOpts = () => ({
-          width: pvEl.clientWidth, height: 220, cursor: {y: false},
-          scales: {y: {range: (u, lo, hi) => [0, hi > 0 ? hi * 1.05 : 1]}},
+        const lay = Strips.layout(pvStrips, {space: 80, values: (u, splits) => splits.map(fmtDay)}, {});
+        const pvPlot = new uPlot({
+          width: pvEl.clientWidth, height: PV_HEIGHT + lay.extra, cursor: {y: false},
+          scales: {x: {time: true, range: () => [{{ pv.x_min }}, {{ pv.x_max }}]},   // whole days, so each bar shows whole
+                   y: {range: (u, lo, hi) => [0, hi > 0 ? hi * 1.05 : 1]}},
           series: [{label: "Day", value: (u, v) => v == null ? "--" : fmtDay(v)},
                    {label: "Solar", stroke: "#d9af1f", width: 1.6, fill: "rgba(232,197,71,0.18)",
                     value: (u, v) => v == null ? "--" : v.toFixed(1) + " kWh"}],
-          axes: [{space: 80, values: (u, splits) => splits.map(fmtDay)},
-                 {label: "Solar (kWh/day)"}],
-        });
-        const pvPlot = new uPlot(pvOpts(), pvData, pvEl);
+          axes: [lay.xaxis, {label: "Solar (kWh/day)"}],
+          hooks: lay.hooks,
+        }, pvData, pvEl);
+        if (pvStrips.length) lay.cursor.line = Strips.cursorLine(pvPlot);
         let pvPending = false;
         window.addEventListener("resize", () => {
           if (!pvPending) { pvPending = true; requestAnimationFrame(() => {
-            pvPending = false; pvPlot.setSize({width: pvEl.clientWidth, height: 220});
+            pvPending = false; pvPlot.setSize({width: pvEl.clientWidth, height: PV_HEIGHT + lay.extra});
           }); }
         });
       </script>

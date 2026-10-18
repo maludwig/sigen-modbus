@@ -192,8 +192,10 @@ not.
 sigen db daily [--from DATE] [--to DATE]
 ```
 Stores each finished day's energy in `daily_energy` (solar, the house, the battery in and out, the
-grid in and out, and the flows between them), so a month or a year is one `SUM`. Without dates: the
-days not stored yet; with them, that range, recomputed. `poll` does this by itself every 10 minutes.
+grid in and out, and the flows between them), so a month or a year is one `SUM`. With the config's
+`site` and `array`, it also stores the day's clear-sky model energy (`clear_sky_kwh`), which the
+all-time page compares the day's solar with. Without dates: the days not stored yet; with them, that
+range, recomputed. `poll` does this by itself every 10 minutes.
 
 ```
 sigen db query "SELECT * FROM readings ORDER BY id DESC LIMIT 10" [--json] [--max-rows 1000] [--max-width 80]
@@ -251,7 +253,9 @@ or any day. A window that reaches now is topped up every 15 s with only the newe
 (`/data/<chart>.json?since=…`, which your own code can use too). Times show in your browser's time
 zone. Opening the page also fetches that window's satellite data in the background (`sigen
 satellite`, see below). **Daily totals** (`/daily`) shows a day's totals and every flow;
-**All-time** (`/all-time`) a Sankey of every finished day in `daily_energy` added up.
+**All-time** (`/all-time`) each finished day's solar as a line, with a strip under it per day (solar
+as a share of its clear-sky model, the radar's rain, NOAA's sun through the cloud), and a Sankey of
+every finished day in `daily_energy` added up.
 It listens on every interface, so a phone on the same network can open
 `http://<this computer's IP>:8050/` (printed at start; Windows Firewall asks the first time).
 Read-only. `--reload` restarts it when its code changes, and re-reads changed page templates.
@@ -306,7 +310,7 @@ northern US). Both are free with no key. What each source is, its quirks and its
 [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md).
 
 ```
-sigen satellite [--day 2026-10-10 | --start "2026-10-10 06:00" --end "…"] [--km 200]
+sigen satellite [--day 2026-10-10 | --start "2026-10-10 06:00" --end "…"] [--km 200] [--record-to-db]
 ```
 Saves NOAA GOES-West cloud data (cloud mask, optical depth, cloud-top height; every 10 minutes)
 for a box around your site, a day at a time, as HDF5 files for your own analysis (comparing the
@@ -314,7 +318,10 @@ clouds with what your panels made, say). GOES-West covers western North
 America and the Pacific. A day takes about a minute and ~210 MB of downloads; re-running only
 fetches what's new. The files go in the config's `satellite.cube_dir`. Each file is updated by
 writing a copy and swapping it in, so readers never see half of one, and only one run at a time
-works in a folder: a second one exits with 7 while the first is still going.
+works in a folder: a second one exits with 7 while the first is still going. With
+`--record-to-db` it also works out, per scan, how much sun gets through the cloud over the house
+and stores it in `satellite_shade` (the dashboard's satellite strips read it from there, and starts
+`sigen satellite --record-to-db` itself for the window you open).
 
 ### The cloud
 
@@ -364,8 +371,9 @@ sigen sync --url http://othermachine:8050 \
   dashboard` (it serves the read-only `/sync/*` endpoints). Nothing on the source is modified.
 - `--start-at` / `--end-at` are UTC ISO 8601; the window is half-open `[start, end)`.
 - `--only-sync` picks what to copy, as one or more kinds (default: all): `weather` (Open-Meteo),
-  `radar` (Environment Canada frames), `heater` (the battery-heater log), and `readings` (the
-  readings and their raw register values, regrouped into fresh polls locally).
+  `radar` (Environment Canada frames), `heater` (the battery-heater log), `satellite` (the per-scan
+  cloud shade), and `readings` (the readings and their raw register values, regrouped into fresh
+  polls locally).
 - `--dry-run` reports what it would import, per kind, and writes nothing.
 
 Only good rows are copied, database ids are reassigned locally, and a row is skipped if this
@@ -497,7 +505,12 @@ Tables:
   increase between this computer's readings at the two midnights, and the flows between solar,
   the battery, the house and the grid. `SELECT sum(solar_kwh) FROM daily_energy WHERE day >=
   '2027-01-01'` is a year's solar. Days add up exactly; a gap in polling moves energy to the day
-  before the gap.
+  before the gap. `clear_sky_kwh` is the clear-sky model's energy for the day (NULL without a
+  `site` and `array`).
+- `satellite_shade`: one row per NOAA GOES-West scan (every 10 minutes): the sun's elevation
+  (`sun_elevation_deg`), the share of sunlight through the cloud where a cloud at the measured top
+  or at 0 / 2 / 5 / 10 km would shade the house (`trans_*`, 0 to 1), and the cloud probability
+  there (`prob_*`, 0 to 1). Written by `sigen satellite --record-to-db`.
 - `battery_heater`: one row per cloud poll of a battery pack's heating status (`sigen poll` with a
   `cloud` section): `polled_at`, `battery` (1 or 2, the pack's place in `cloud.batteries`),
   `heater_on` (NULL on a cloud error), `error`.

@@ -34,8 +34,7 @@ button.help[aria-expanded="true"] { background: #666; color: #fff; }
 /* charts and tables */
 .plot { width: 100%; }
 #sankey { width: 100%; display: block; margin: 12px 0; }
-#pv { width: 100%; margin: 4px 0 0; }
-table { border-collapse: collapse; margin: 10px 0; }
+#pv { width: 100%; margin: 4px 0 0; }table { border-collapse: collapse; margin: 10px 0; }
 td { padding: 3px 14px 3px 0; }
 td.kwh, th.kwh { text-align: right; font-variant-numeric: tabular-nums; }
 table.flows th { text-align: left; padding: 3px 14px 3px 0; border-bottom: 1px solid #ccc; }

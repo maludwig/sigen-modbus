@@ -67,6 +67,7 @@
     </script>
     <script src="{{ uplot }}.iife.min.js"></script>
     <script src="{{ url_for('static', filename='my_sankey.js') }}"></script>
+    <script src="{{ url_for('static', filename='strips.js') }}"></script>
     <script src="{{ url_for('static', filename='live_charts.js') }}"></script>
     <script>
       LiveCharts.start({{ env|tojson }});

@@ -9,8 +9,10 @@ Use an editable install (`-e`): a plain `pip install .` copies the code once, an
 won't show up. Without installing at all: `PYTHONPATH=src python -m sigen …`.
 
 The dashboard draws in the browser: `src/sigen/static/live_charts.js` (the charts, with uPlot from
-a CDN; each chart's numbers come from `/data/<name>.json` and are topped up with `?since=`) and
-`my_sankey.js` (the Sankey diagram, no dependencies). Their arithmetic is tested with Node's
+a CDN; each chart's numbers come from `/data/<name>.json` and are topped up with `?since=`),
+`strips.js` (the rows of coloured bars painted under a uPlot chart: the string-power chart's radar /
+satellite / PV strips and the all-time page's per-day strips) and `my_sankey.js` (the Sankey
+diagram, no dependencies); `dashboard.css` styles every page. Their arithmetic is tested with Node's
 built-in test runner (`node --test tests/js/`); `pytest` runs each file there too when Node is
 installed (`tests/test_js.py`), and skips them when it isn't. No npm packages are needed. The
 package itself draws nothing: matplotlib is only in the `dev` extra, for the notebooks.
@@ -31,6 +33,12 @@ src/sigen/
   poll.py           the poll loop
   weather.py        Open-Meteo and radar fetching, parsing, storing; the background scheduler
   goes.py           NOAA GOES-West satellite cubes
+  goes_shade.py     the cubes → each scan's sun through the cloud over the site (satellite_shade)
+  daily.py          daily_energy: each finished day's totals, flows and clear-sky energy; the all-time sum
+  sync.py           `sigen sync`: copying missing rows from another machine's dashboard
+  glitches.py       the rules that flag a poll's readings as not to be trusted (readings.glitch)
+  cloud.py          the mySigen cloud API client (login, refresh, the LoadHub, battery heating)
+  heater.py         `poll`'s battery-heater job: polls the cloud, stores battery_heater rows
   alerts.py         `poll --alerts`: the in-memory window, the watcher and the ntfy sender
   battery_watch.py  the battery detectors: pure functions over a window of readings
   ntfy.py           posting to ntfy

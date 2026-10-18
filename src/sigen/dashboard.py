@@ -82,6 +82,12 @@ def iso_utc(t: datetime.datetime) -> str:
     return t.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def strips_json(strips) -> List[dict]:
+    """charts.Strip objects as static/strips.js takes them (the page turns the ISO starts into seconds)."""
+    return [{"label": s.label, "starts": [iso_utc(x) for x in s.starts], "length": s.length.total_seconds(),
+             "colours": s.colours} for s in strips]
+
+
 def model_end(end: datetime.datetime, site, after: datetime.timedelta = None) -> datetime.datetime:
     """Where the clear-sky model can stop: `end`, or if the sun had set by then (on `end`'s local day, or before
     sunrise, the day before), `after` (MODEL_AFTER_SUNSET) past that sunset: after that it's 0 till morning. `end`
@@ -224,6 +230,7 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
     def all_time():
         """Every finished day in daily_energy added up: one Sankey of where all the energy has gone (static/my_sankey.js)."""
         energy = sankey = error = pv = None
+        strips, notes = [], []
         conn = None
         try:
             conn = db.connect(url)
@@ -231,6 +238,7 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
                 conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
                 energy = daily_mod.all_time_energy(conn)
                 pv = charts.pv_history(conn, tz)
+                strips, notes = charts.all_time_strips(conn, tz)
         except DatabaseError as e:
             error = f"database: {e}"
         finally:
@@ -239,7 +247,8 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         if energy is not None:
             sankey = charts.sankey(energy)
         return render_template("all_time.html", error=error, tz=str(tz), energy=energy, sankey=sankey, pv=pv,
-                               uplot=UPLOT, drawn=datetime.datetime.now(tz),
+                               strips=strips_json(strips), strip_notes=notes, uplot=UPLOT,
+                               drawn=datetime.datetime.now(tz),
                                span=(f"{energy.first.astimezone(tz):%Y-%m-%d} to {energy.last.astimezone(tz):%Y-%m-%d}"
                                      if energy is not None else ""))
 
@@ -342,10 +351,7 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         if config.site is not None:                      # the satellite strips, from the stored scans (satellite_shade)
             more, note = charts.satellite_strips(charts.satellite_shade_series(conn, start, end))
             strips, notes = strips + more, notes + [note]
-        return {"strips": [{"label": s.label, "starts": [iso_utc(x) for x in s.starts],
-                            "length": s.length.total_seconds(),
-                            "colours": s.colours} for s in strips],
-                "notes": notes}
+        return {"strips": strips_json(strips), "notes": notes}
 
     def load_energy_data(conn, start, end, since):
         """{"first", "last" (the window's first and last plant readings), "house" (kWh), "bars": {load: kWh}}: the

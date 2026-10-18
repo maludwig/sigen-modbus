@@ -175,6 +175,13 @@ def clear_sky_strings(conn, site, array, start: datetime.datetime, end: datetime
     return pvmodel.Model(site, array).strings_clear_sky(times, temp, wind)
 
 
+def day_clear_sky_kwh(conn, site, array, start: datetime.datetime, end: datetime.datetime) -> float:
+    """The whole array's clear-sky model energy over [start, end), kWh (clear_sky_strings summed; 1-minute steps)."""
+    df = clear_sky_strings(conn, site, array, start, end)
+    step_hours = (df.index[1] - df.index[0]).total_seconds() / 3600 if len(df.index) > 1 else 1 / 60
+    return float(df.sum(axis=1).sum()) * step_hours
+
+
 # ---------- smart loads ----------
 def window_of(t: datetime.datetime) -> datetime.datetime:
     return t.replace(minute=t.minute - t.minute % 15, second=0, microsecond=0)
@@ -618,11 +625,14 @@ def sankey(e: DayEnergy) -> dict:
 @dataclass
 class DailyLine:
     """A day-by-day series for a uPlot line on the all-time page: x = seconds since the epoch (local noon of each day),
-    y = the value (kWh). Plus the best day, for the caption."""
+    y = the value (kWh); x_min / x_max = the first day's local midnight and the midnight after the last (the x range,
+    so each day's strip bar shows whole). Plus the best day, for the caption."""
     t: List[int]
     kwh: List[float]
     peak_day: str
     peak_kwh: float
+    x_min: int
+    x_max: int
 
 
 def pv_history(conn, tz, column: str = "solar_kwh") -> Optional[DailyLine]:
@@ -632,10 +642,54 @@ def pv_history(conn, tz, column: str = "solar_kwh") -> Optional[DailyLine]:
         f"SELECT day, {column} FROM daily_energy WHERE {column} IS NOT NULL ORDER BY day").fetchall()]
     if len(rows) < 2:
         return None
-    noon = datetime.time(12)
-    t = [int(datetime.datetime.combine(d, noon, tz).timestamp()) for d, _ in rows]
+    at = lambda d, hour=0: int(datetime.datetime.combine(d, datetime.time(hour), tz).timestamp())
     peak_day, peak_kwh = max(rows, key=lambda r: r[1])
-    return DailyLine(t, [v for _, v in rows], peak_day.strftime("%b ") + str(peak_day.day), peak_kwh)
+    return DailyLine([at(d, 12) for d, _ in rows], [v for _, v in rows], peak_day.strftime("%b ") + str(peak_day.day),
+                     peak_kwh, at(rows[0][0]), at(rows[-1][0] + datetime.timedelta(days=1)))
+
+
+def all_time_strips(conn, tz) -> Tuple[List["Strip"], List[str]]:
+    """The all-time page's per-day strips, one bar per local day (midnight to midnight) over the daily_energy range,
+    painted under its solar line by static/strips.js like the string-power chart's: PV (measured solar / the clear-sky
+    model), Rain (the radar at the site), Sun (NOAA's share of sun through the cloud over the house). A strip with no
+    data at all is left out; a day without data is hatched. Returns (strips, notes)."""
+    days = [d for d, in conn.execute("SELECT day FROM daily_energy ORDER BY day")]
+    if len(days) < 2:
+        return [], []
+    first, last = days[0], days[-1]
+    all_days = [first + datetime.timedelta(days=i) for i in range((last - first).days + 1)]
+    starts = [datetime.datetime.combine(d, datetime.time(), tz) for d in all_days]
+    win_start, win_end = starts[0], datetime.datetime.combine(last + datetime.timedelta(days=1), datetime.time(), tz)
+
+    pv = {d: s / c for d, s, c in conn.execute(
+        "SELECT day, solar_kwh, clear_sky_kwh FROM daily_energy WHERE solar_kwh IS NOT NULL AND clear_sky_kwh > 0")}
+    rain = {d: float(mm) for d, mm in conn.execute(
+        "SELECT (frame_at AT TIME ZONE %s)::date, sum(rain_mm_h) * (%s / 3600.0) FROM radar_frames "
+        "WHERE error IS NULL AND frame_at >= %s AND frame_at < %s GROUP BY 1",
+        (str(tz), RADAR_FRAME.total_seconds(), win_start, win_end))}
+    sun = {d: float(t) for d, t in conn.execute(
+        "SELECT (scan_at AT TIME ZONE %s)::date, avg(trans_0km) FROM satellite_shade WHERE error IS NULL "
+        "AND sun_elevation_deg > %s AND trans_0km IS NOT NULL AND scan_at >= %s AND scan_at < %s GROUP BY 1",
+        (str(tz), SATELLITE_LOW_SUN, win_start, win_end))}
+
+    wettest = max(rain.values(), default=0.0)
+    white, blue = (1.0, 1.0, 1.0), _rgb(PRECIP_COLOURS["rain"])
+    wet = lambda mm: _hex(tuple(w + (mm / wettest if wettest else 0) * (b - w) for w, b in zip(white, blue)))
+    day = datetime.timedelta(days=1)
+    strips, notes = [], []
+    for label, values, colour, note in (
+            ("PV / clear-sky", pv, _ratio_colour,
+             "PV / clear-sky: each day's measured solar as a share of the clear-sky model; black = nothing, white = at "
+             "the model (a clear day), orange = twice it"),
+            ("Rain", rain, wet, f"Rain: the radar at the site, each day's total; white = dry, blue = {wettest:.1f} mm "
+                                "(the wettest day here)"),
+            ("Sun", sun, lambda t: _hex((t, t, t)),
+             f"Sun: NOAA's share of sun through the cloud over the house, each day's mean with the sun over "
+             f"{SATELLITE_LOW_SUN}°; white = clear, black = overcast")):
+        if values:
+            strips.append(Strip(label, starts, day, [colour(values[d]) if d in values else None for d in all_days]))
+            notes.append(note)
+    return strips, (notes + ["hatched = no data that day"] if strips else [])
 
 
 # ---------- strips: rows of coloured bars under the string-power chart ----------

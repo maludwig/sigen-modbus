@@ -448,7 +448,8 @@ def cmd_db_daily(args) -> int:
     conn = db.connect(url)
     try:
         db.check_ready(conn)
-        days = daily.update(conn, _site_tz(config), args.first, args.last, log=print)
+        days = daily.update(conn, _site_tz(config), args.first, args.last,
+                            site=config.site, array=config.array, log=print)
     finally:
         conn.close()
     if days:
@@ -571,7 +572,7 @@ def _background(args, config, url, watcher=None):
     def daily_energy():
         conn = db.connect(url)
         try:
-            daily.update(conn, tz, log=print)
+            daily.update(conn, tz, site=config.site, array=config.array, log=print)
         finally:
             conn.close()
     jobs = [weather.Job("daily energy", daily.CHECK_EVERY, daily_energy)]
