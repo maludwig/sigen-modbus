@@ -129,3 +129,18 @@ def test_validate_remote_ems_mode():
 def test_read_only_register_refuses():
     with pytest.raises(ValueError, match="not writable"):
         BY_NAME["plant_grid_point_maximum_export_limitation"].validate(5)
+
+
+def test_validate_words_is_the_same_allowlist_for_raw_words():
+    soc, mode = BY_NAME["plant_backup_soc"], BY_NAME["plant_remote_ems_control_mode"]
+    assert soc.validate_words([200]) == [200] and mode.validate_words([2]) == [2]
+    refused = [
+        (mode, [1], "not an allowed value"),
+        (soc, [0xFFFF], "above the maximum"),
+        (soc, [1, 2], "16-bit word"),
+        (soc, [70000], "16-bit word"),
+        (BY_NAME["plant_ess_soc"], [500], "not writable"),
+    ]
+    for reg, words, why in refused:
+        with pytest.raises(ValueError, match=why):
+            reg.validate_words(words)

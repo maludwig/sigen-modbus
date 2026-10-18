@@ -236,11 +236,17 @@ def format_summary(
     inverters: dict[int, dict[str, dict]] | None = None,
 ) -> str:
     """The plant summary read, capture and read-json print: modes, alarms, battery, power flows, smart loads and lifetime
-    grid totals, then a section per inverter (unit ID -> readings). Unread modes show "(not readable)"; unread power
-    and energy registers show as 0."""
+    grid totals, then a section per inverter (unit ID -> readings). Anything unread shows "(not readable)", never a
+    0 that looks like a reading."""
     d = derive(readings, now)
-    v = lambda n, default=0: value(readings, n, default)
+    v = lambda n: value(readings, n)
     label = lambda n: readings.get(n, {}).get("label", "(not readable)")
+
+    def show(name: str, spec: str, unit: str = "") -> str:
+        """A register's value formatted with `spec` and `unit`, or "(not readable)"."""
+        x = v(name)
+        return "(not readable)" if x is None else f"{format(x, spec)}{unit}"
+
     lines = [
         title or f"👋 Hello from your SigenStor at {ip}",
         "",
@@ -254,21 +260,22 @@ def format_summary(
         )
     if "battery_total_estimate_kwh" in d:
         lines.append(
-            f"  Battery:           {v('plant_ess_soc'):.1f}%  {d['battery_available_kwh']:.2f} / "
+            f"  Battery:           {show('plant_ess_soc', '.1f', '%')}  {d['battery_available_kwh']:.2f} / "
             f"{d['battery_total_estimate_kwh']:.2f} kWh available / total  "
-            f"({v('plant_ess_rated_energy_capacity'):.2f} kWh nominal)"
+            f"({show('plant_ess_rated_energy_capacity', '.2f', ' kWh')} nominal)"
         )
     else:
         lines.append(
-            f"  Battery:           {v('plant_ess_soc'):.1f}% of "
-            f"{v('plant_ess_rated_energy_capacity'):.2f} kWh nominal"
+            f"  Battery:           {show('plant_ess_soc', '.1f', '%')} of "
+            f"{show('plant_ess_rated_energy_capacity', '.2f', ' kWh')} nominal"
         )
-    if value(readings, "plant_ess_average_cell_temperature") is not None:
-        lines.append(f"  Battery temp:      {v('plant_ess_average_cell_temperature'):.1f} °C")
+    if v("plant_ess_average_cell_temperature") is not None:
+        lines.append(f"  Battery temp:      {show('plant_ess_average_cell_temperature', '.1f', ' °C')}")
     lines += [
-        f"  Solar now:         {v('plant_photovoltaic_power'):6.2f} kW",
-        f"  Battery now:       {v('plant_ess_power'):+6.2f} kW  ({d.get('battery_direction', '?')})",
-        f"  Grid now:          {v('plant_grid_sensor_active_power'):+6.2f} kW  ({d.get('grid_direction', '?')})",
+        f"  Solar now:         {show('plant_photovoltaic_power', '6.2f', ' kW')}",
+        f"  Battery now:       {show('plant_ess_power', '+6.2f', ' kW')}  ({d.get('battery_direction', '?')})",
+        f"  Grid now:          {show('plant_grid_sensor_active_power', '+6.2f', ' kW')}"
+        f"  ({d.get('grid_direction', '?')})",
     ]
     if "house_load_reported_kw" in d:
         lines.append(f"  House load:        {d['house_load_reported_kw']:6.2f} kW")
@@ -276,9 +283,9 @@ def format_summary(
         lines.append(f"  House load (est):  {d['house_load_estimate_kw']:6.2f} kW")
     lines += format_smart_loads(readings, config)
     lines += [
-        f"  Backup reserve:    {v('plant_backup_soc'):.0f}%",
-        f"  Lifetime grid:     {v('plant_accumulated_grid_import_energy'):,.1f} kWh in / "
-        f"{v('plant_accumulated_grid_export_energy'):,.1f} kWh out",
+        f"  Backup reserve:    {show('plant_backup_soc', '.0f', '%')}",
+        f"  Lifetime grid:     {show('plant_accumulated_grid_import_energy', ',.1f', ' kWh')} in / "
+        f"{show('plant_accumulated_grid_export_energy', ',.1f', ' kWh')} out",
     ]
     failed = [n for n, r in readings.items() if "error" in r]
     if failed:

@@ -258,6 +258,24 @@ class Register:
         raw = round(value * self.gain)
         if abs(raw - value * self.gain) > 1e-6:
             raise ValueError(f"{value} has more precision than {self.name} supports (steps of {1 / self.gain:g})")
+        self._check_allowed(raw, value)
+        return encode_int(raw, self.type)
+
+    def validate_words(self, words: list[int]) -> list[int]:
+        """The same allowlist for raw words, as `sigen undo` writes back the
+        journal's before_raw: writable, the register's length, 16-bit words,
+        an allowed value. Returns them unchanged; ValueError with the reason."""
+        if not self.writable:
+            raise ValueError(f"{self.name} ({self.table} {self.address}) is not writable")
+        if len(words) != self.words or any(not isinstance(w, int) or not 0 <= w <= 0xFFFF for w in words):
+            raise ValueError(f"{self.name} takes {self.words} 16-bit word(s), got {words!r}")
+        raw = decode_int(words, self.type)
+        self._check_allowed(raw, raw / self.gain)
+        return list(words)
+
+    def _check_allowed(self, raw: int, value: float) -> None:
+        """The allowlist's value rules (allowed codes, min, max), shared by
+        validate and validate_words; ValueError with the reason."""
         if self.allowed is not None and raw not in self.allowed:
             names = ", ".join(
                 f"{c} ({self.labels.get(c, '?')})" if self.labels else str(c) for c in sorted(self.allowed)
@@ -267,7 +285,6 @@ class Register:
             raise ValueError(f"{self.name}: {value} is below the minimum {self.min}")
         if self.max is not None and value > self.max:
             raise ValueError(f"{self.name}: {value} is above the maximum {self.max}")
-        return encode_int(raw, self.type)
 
 
 def R(*args: Any, **kwargs: Any) -> Register:

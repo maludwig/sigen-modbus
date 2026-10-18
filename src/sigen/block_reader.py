@@ -112,9 +112,9 @@ class BlockReader:
 
     strict=True: any failure raises (ModbusError / ConnectionFailed), so callers store a
     complete snapshot or nothing. strict=False: a block rejected with exception 2 is re-read
-    one register at a time, and unreadable registers get an 'error' entry.
-    Connection problems, and other Modbus exceptions on a block (e.g. 11, wrong unit ID),
-    always raise.
+    one register at a time, and unreadable registers (exception 2 again) get an 'error' entry.
+    Connection problems, and other Modbus exceptions (e.g. 11, wrong unit ID), on a block or
+    on a single register, always raise.
     """
 
     def __init__(
@@ -152,9 +152,12 @@ class BlockReader:
     @staticmethod
     def _one_by_one(client: ModbusClient, block: Block, words: dict[str, list[int]], errors: dict[str, str]) -> None:
         """Fallback for a rejected block: read each register alone, filling `words` or `errors` in place.
-        Any Modbus exception code is recorded, not raised; connection failures still raise."""
+        Exception 2 (this register isn't readable) is recorded; any other Modbus exception, and connection
+        failures, raise, as they would for a block."""
         for reg in block.registers:
             try:
                 words[reg.name] = client.read(reg.table, reg.address, reg.words)
             except ModbusError as e:
+                if e.code != ILLEGAL_DATA_ADDRESS:
+                    raise
                 errors[reg.name] = str(e)

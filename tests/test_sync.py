@@ -327,6 +327,16 @@ def test_a_peer_answer_that_isnt_an_object_is_sync_error(monkeypatch):
         sync._get("http://peer", "/sync/schema")
 
 
+def test_a_good_peer_row_replaces_a_local_error_row(conn, monkeypatch):
+    t = _t(5)
+    conn.execute("INSERT INTO battery_heater (polled_at, battery, error) VALUES (%s, 1, 'timed out')", (t,))
+    body = {"columns": ["polled_at", "battery", "heater_on", "error"], "rows": [[sync.iso(t), 1, True, None]]}
+    monkeypatch.setattr(sync, "_get", lambda url, path, params=None: body)
+    got = sync.sync_standalone(conn, "http://peer", "battery_heater", _t(0), _t(15), dry_run=False, out=lambda m: None)
+    assert got == (1, 0)  # imported, not skipped as "already have it"
+    assert conn.execute("SELECT battery, heater_on, error FROM battery_heater").fetchall() == [(1, True, None)]
+
+
 def test_peer_rows_without_a_key_column_are_sync_error(monkeypatch):
     monkeypatch.setattr(sync, "_get", lambda url, path, params=None: {"columns": ["temperature_2m"], "rows": []})
     with pytest.raises(SyncError, match="lack the key column"):

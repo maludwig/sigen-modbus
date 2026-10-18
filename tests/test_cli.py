@@ -223,6 +223,19 @@ def test_undo_refuses_if_changed_since(run, server, journal):
     assert server.bank.read(247, "holding", 40046, 1) == [300]
 
 
+def test_undo_refuses_journaled_words_the_allowlist_wouldnt_take(run, server, journal):
+    """Undo writes the journal's before_raw words back as they are, but still through the allowlist: an entry whose
+    "before" is all ones (what decode once called "not set") is refused cleanly, where it used to crash."""
+    j = ["--journal", journal]
+    run("set", *net(server), "--backup-soc", 20, "--apply", *j)
+    entries = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    entries[-1]["before_raw"] = [0xFFFF]  # 6553.5 %
+    journal.write_text("".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
+    code, out, _ = run("undo", *net(server), "--apply", *j)
+    assert code == ExitCode.REFUSED and "above the maximum" in out
+    assert server.bank.read(247, "holding", 40046, 1) == [200]  # untouched
+
+
 def test_registers_listing(run):
     code, out, _ = run("registers", "--writable")
     assert code == ExitCode.OK and "--backup-soc" in out and "40031" in out

@@ -87,6 +87,15 @@ def test_summary_without_capacity_registers_falls_back_to_nominal():
     assert "55.4% of 15.06 kWh nominal" in out and "available" not in out
 
 
+def test_summary_shows_unread_values_as_not_readable():
+    readings = load(MIDSOC_DATA)
+    for name in ("plant_photovoltaic_power", "plant_backup_soc", "plant_accumulated_grid_export_energy"):
+        readings[name] = {"error": "timed out"}
+    out = format_summary("192.0.2.1", readings)
+    assert "Solar now:         (not readable)\n" in out  # was "0.00 kW", a believable reading
+    assert "Backup reserve:    (not readable)\n" in out and "kWh in / (not readable) out" in out
+
+
 def test_inverter_lines_survive_a_partial_read():
     from sigen.reading import format_inverter
 

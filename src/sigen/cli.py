@@ -383,12 +383,14 @@ def cmd_undo(args: argparse.Namespace) -> int:
     plan = plan_undo(journal, args.ip, args.port, args.unit_id)
     if plan is None:
         raise NotFound(f"nothing to undo for {args.ip}:{args.port} in {journal.path}")
-    entry, reg, restore, expect = plan
+    entry, reg, restore_words, expect = plan
     print(
         f"Undoing {entry['id']} ({entry['ts']}): {reg.name} {entry['after']} → {entry['before']}",
         file=sys.stderr if args.json else sys.stdout,
     )
-    result = set_register(_connector(args), reg, restore, apply=args.apply, expect_words=expect, undo_of=entry["id"])
+    result = set_register(
+        _connector(args), reg, words=restore_words, apply=args.apply, expect_words=expect, undo_of=entry["id"]
+    )
     return _report(result, args, journal)
 
 

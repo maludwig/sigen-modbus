@@ -129,20 +129,25 @@ class Journal:
 def set_register(
     connect: Callable[[], ModbusClient],
     reg: Register,
-    value: float,
+    value: float | None = None,
     *,
+    words: list[int] | None = None,
     apply: bool,
     expect_words: list[int] | None = None,
     undo_of: str | None = None,
 ) -> WriteResult:
-    """Read → write → read back. Never raises for device problems; returns the outcome."""
+    """Read → write → read back. Never raises for device problems; returns the outcome. The target is a `value`
+    (`sigen set`) or raw `words` (`sigen undo`, the journal's before_raw), never both; either goes through the
+    allowlist."""
+    if (value is None) == (words is None):
+        raise TypeError("set_register takes a value or words, not both or neither")
 
     def result(outcome: str, message: str, **kw: Any) -> WriteResult:
         return WriteResult(reg, outcome, message, undo_of=undo_of, **kw)
 
     # 1. Allowlist
     try:
-        target = reg.validate(value)
+        target = reg.validate(value) if words is None else reg.validate_words(words)
     except ValueError as e:
         return result("refused", str(e))
 
@@ -241,13 +246,14 @@ def _try_read(client: ModbusClient | None, connect: Callable[[], ModbusClient], 
         return None
 
 
-def plan_undo(journal: Journal, ip: str, port: int, unit: int) -> tuple[dict, Register, float | None, list[int]] | None:
-    """Find the write to undo. Returns (entry, register, value_to_restore, expect_words) or None."""
+def plan_undo(journal: Journal, ip: str, port: int, unit: int) -> tuple[dict, Register, list[int], list[int]] | None:
+    """Find the write to undo. Returns (entry, register, words_to_restore, expect_words) or None. Both are the
+    journal's raw words (before_raw, after_raw): a register is just 16-bit words, so undo restores them exactly,
+    with no decode and re-encode in between."""
     entry = journal.last_undoable(ip, port, unit)
     if entry is None:
         return None
     reg = BY_NAME.get(entry["register"])
     if reg is None:
         raise SigenError(f"journal entry {entry['id']} refers to unknown register {entry['register']}")
-    restore, _ = reg.decode(entry["before_raw"])
-    return entry, reg, restore, entry["after_raw"]
+    return entry, reg, entry["before_raw"], entry["after_raw"]

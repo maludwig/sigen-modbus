@@ -258,8 +258,15 @@ def sync_standalone(
     if to_insert and not dry_run:
         collist = ", ".join(f'"{c}"' for c in columns)
         places = ", ".join(["%s"] * len(columns))
+        match = " AND ".join(f'"{k}" = %s' for k in spec.key)
         with db.errors_as(f"importing into {table}"), conn.transaction():
-            conn.cursor().executemany(f'INSERT INTO "{table}" ({collist}) VALUES ({places})', to_insert)
+            cur = conn.cursor()
+            # A good peer row replaces any local error row with its key (only good rows count as present).
+            cur.executemany(
+                f'DELETE FROM "{table}" WHERE NOT ({spec.good}) AND {match}',
+                [[r[i] for i in key_at] for r in to_insert],
+            )
+            cur.executemany(f'INSERT INTO "{table}" ({collist}) VALUES ({places})', to_insert)
     _report(out, table, len(to_insert), skipped, dry_run)
     return len(to_insert), skipped
 
@@ -347,12 +354,14 @@ def _check_manifest(conn: psycopg.Connection, manifest: dict[str, list[str]]) ->
 def _present_keys(
     conn: psycopg.Connection, table: str, spec: Syncable, start: datetime.datetime, end: datetime.datetime
 ) -> set[tuple[Any, ...]]:
-    """The natural keys (canonicalised by _key) of the rows `table` already
-    holds in [start, end), good or not."""
+    """The natural keys (canonicalised by _key) of the GOOD rows `table`
+    already holds in [start, end): a local error row doesn't block the
+    peer's good row with its key (sync_standalone replaces it)."""
     cols = ", ".join(f'"{c}"' for c in spec.key)
     with db.errors_as(f"reading existing {table}"):
         rows = conn.execute(
-            f'SELECT {cols} FROM "{table}" WHERE "{spec.time_column}" >= %s AND "{spec.time_column}" < %s',
+            f'SELECT {cols} FROM "{table}" WHERE ({spec.good}) '
+            f'AND "{spec.time_column}" >= %s AND "{spec.time_column}" < %s',
             (start, end),
         ).fetchall()
     return {tuple(_key(v) for v in row) for row in rows}

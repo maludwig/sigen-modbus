@@ -194,3 +194,21 @@ def test_connection_failure_raises():
 def test_subset_of_registers():
     reader = BlockReader(lambda: None, [BY_NAME["plant_ess_soc"], BY_NAME["plant_backup_soc"]])
     assert spans(reader.plan) == [("input", 30014, 1), ("holding", 40046, 1)]
+
+
+def test_one_by_one_records_exception_2_and_raises_anything_else():
+    reg = BY_NAME["plant_ess_soc"]
+    (block,) = plan_blocks([reg])
+
+    class Refusing:
+        def __init__(self, code):
+            self.code = code
+
+        def read(self, table, address, count):
+            raise ModbusError(4, self.code, address)
+
+    words, errors = {}, {}
+    BlockReader._one_by_one(Refusing(2), block, words, errors)  # this register isn't readable: noted
+    assert words == {} and "exception 2" in errors[reg.name]
+    with pytest.raises(ModbusError):  # e.g. 11, the wrong unit: raises, as it would for a block
+        BlockReader._one_by_one(Refusing(11), block, {}, {})
