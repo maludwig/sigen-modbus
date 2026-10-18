@@ -31,8 +31,9 @@ def readings_from_document(doc: dict) -> dict[str, dict]:
                 "type": spec.get("type", reg.type if reg else "u16"),
                 "gain": spec.get("gain", reg.gain if reg else 1),
             }
-            if reg and reg.unit or spec.get("unit"):
-                entry["unit"] = reg.unit if reg and reg.unit else spec.get("unit")
+            unit = (reg.unit if reg else None) or spec.get("unit")
+            if unit:
+                entry["unit"] = unit
             raw = spec.get("raw")
             if reg and raw is not None and len(raw) == reg.words:
                 entry["value"], label = (reg.decode_text(raw), None) if reg.type == "string" else reg.decode(raw)

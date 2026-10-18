@@ -36,6 +36,11 @@ def where(alerts: Alerts) -> str:
     return f"{alerts.ntfy_server}/{masked(alerts.ntfy_topic)}"
 
 
+def _latin1(text: str) -> str:
+    """`text` as a header value can carry it: latin-1, anything else as "?"."""
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
 @dataclass(frozen=True)
 class Attempt:
     """One try at sending a notification: what was sent and what came back (an alert_log row)."""
@@ -99,8 +104,8 @@ def post(
     timeout: float = TIMEOUT,
 ) -> Attempt:
     """Post `message` to the topic and say how it went; never raises for a network or HTTP failure (that's in the
-    Attempt). Header values must be latin-1, so the title loses anything else; the message body is UTF-8 and may
-    hold anything (°C, emoji)."""
+    Attempt). Header values must be latin-1, so the title, tags and click URL lose anything else ("?"); the message
+    body is UTF-8 and may hold anything (°C, emoji)."""
     if priority is not None and priority not in PRIORITIES:
         raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
     sent = dict(
@@ -115,13 +120,13 @@ def post(
     )
     headers = {"Content-Type": "text/plain; charset=utf-8"}
     if title:
-        headers["Title"] = title.encode("latin-1", "replace").decode("latin-1")
+        headers["Title"] = _latin1(title)
     if priority:
         headers["Priority"] = priority
     if tags:
-        headers["Tags"] = ",".join(tags)
+        headers["Tags"] = _latin1(",".join(tags))
     if click:
-        headers["Click"] = click
+        headers["Click"] = _latin1(click)
     request = urllib.request.Request(
         f"{alerts.ntfy_server}/{alerts.ntfy_topic}", data=message.encode("utf-8"), headers=headers, method="POST"
     )

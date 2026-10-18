@@ -203,6 +203,12 @@ def test_login_rejected(tmp_path, fake_cloud):
         client(tmp_path, fake_cloud).login("me@example.com", "pw")
 
 
+def test_login_with_a_corrupt_token_file(tmp_path, fake_cloud):
+    (tmp_path / "token.json").write_text('{"device_id": "d", "acc')  # half-written
+    with pytest.raises(CloudError, match="can't read the token file"):
+        client(tmp_path, fake_cloud).login("me@example.com", "pw")
+
+
 def test_login_needs_obfuscation_key(tmp_path, fake_cloud):
     c = CloudClient(tmp_path / "token.json", base_url=fake_cloud.url, client_basic=TEST_BASIC)
     with pytest.raises(CloudError, match="obfuscation_key"):

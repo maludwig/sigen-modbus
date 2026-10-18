@@ -55,7 +55,7 @@ def spec_to_words(spec: dict, where: str) -> list[int]:
     try:
         return encode_int(n, rtype)
     except ValueError as e:
-        raise ValueError(f"{where}: {e}")
+        raise ValueError(f"{where}: {e}") from e
 
 
 def read_json_file(path: Path) -> Any:

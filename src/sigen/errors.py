@@ -1,7 +1,9 @@
 """Exit codes and the exceptions that carry them.
 
-Every failure the CLI can report is a SigenError subclass, so `main()` maps
-exceptions to exit codes in exactly one place.
+Almost every failure the CLI reports is a SigenError subclass, and `main()`
+turns each into its class's exit code. A few commands return a code
+themselves instead, e.g. CONNECTION for a failed weather fetch and
+PRECONDITION for a control.py outcome.
 """
 
 from enum import IntEnum
@@ -55,16 +57,19 @@ class ModbusError(SigenError):
 
     def __init__(self, function: int, code: int, address: int | None = None) -> None:
         self.function, self.code, self.address = function, code, address
-        names = {
-            1: "illegal function",
-            2: "illegal data address",
-            3: "illegal data value",
-            4: "device failure",
-            6: "device busy",
-            11: "gateway target failed to respond",
-        }
         where = f" at {address}" if address is not None else ""
-        super().__init__(f"Modbus exception {code} ({names.get(code, 'unknown')}) for function {function}{where}")
+        name = MODBUS_EXCEPTIONS.get(code, "unknown")
+        super().__init__(f"Modbus exception {code} ({name}) for function {function}{where}")
+
+
+MODBUS_EXCEPTIONS = {  # the Modbus exception codes a SigenStor might send, and their standard names
+    1: "illegal function",
+    2: "illegal data address",
+    3: "illegal data value",
+    4: "device failure",
+    6: "device busy",
+    11: "gateway target failed to respond",
+}
 
 
 class PreconditionFailed(SigenError):

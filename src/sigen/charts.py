@@ -28,7 +28,7 @@ from psycopg import sql
 
 from sigen import pvmodel
 from sigen.config import Array, Site
-from sigen.db import SATELLITE_SHADE_VALUES, has_glitch_column, values_table, wide_layout
+from sigen.db import SATELLITE_SHADE_VALUES, has_glitch_column, values_table
 from sigen.goes_shade import SCAN, ShadeSeries
 from sigen.registers import BY_NAME
 
@@ -108,53 +108,22 @@ def reading_values(
 ) -> dict[int, tuple[datetime.datetime, dict[str, float]]]:
     """{reading id: (started_at, {register name: value after the gain})} for the successful readings of `unit` in
     the window (or with these ids), for the registers `names`; a register without a value is left out. The one
-    place to fetch registers over a time window from. Readings of glitched polls are left out.
-
-    Reads the wide table once migration 0004 has switched over, else the long register_values table (until then,
-    even if a backfill has already filled the wide tables). For the long table, two steps on purpose: the readings first, then their values by
-    (reading, address), the primary key. One join filtered by register name makes the planner guess one register
-    and fetch every value those registers ever had (24 h of string data: 16 s instead of well under one)."""
+    place to fetch registers over a time window from (the wide tables, migration 0004 on). Readings of glitched
+    polls are left out."""
     regs = [BY_NAME[n] for n in names]
     gains = {r.name: float(r.gain) for r in regs}
-    if wide_layout(conn):
-        where, params = _between(start, end, "t.started_at")
-        if ids is not None:
-            where, params = where + " AND t.reading_id = ANY(%s)", [*params, list(ids)]
-        where += _good(conn, "r")
-        query = sql.SQL(
-            "SELECT t.reading_id, t.started_at, {} FROM {} t JOIN readings r ON r.id = t.reading_id "
-            "WHERE r.unit_id = %s" + where + " ORDER BY t.started_at"
-        ).format(
-            sql.SQL(", ").join(sql.Identifier("t", n) for n in names), sql.Identifier(values_table(regs[0].device))
-        )
-        return {
-            rid: (t, {n: v / gains[n] for n, v in zip(names, values) if v is not None})
-            for rid, t, *values in conn.execute(query, [unit, *params])
-        }
+    where, params = _between(start, end, "t.started_at")
     if ids is not None:
-        readings = conn.execute(
-            "SELECT id, started_at FROM readings WHERE id = ANY(%s) ORDER BY started_at", (list(ids),)
-        ).fetchall()
-    else:
-        where, params = _between(start, end)
-        readings = conn.execute(
-            f"SELECT id, started_at FROM readings WHERE unit_id = %s AND error IS NULL{where}"
-            f"{_good(conn)} ORDER BY started_at",
-            [unit, *params],
-        ).fetchall()
-    by_address = {r.address: r.name for r in regs}
-    out = {rid: (t, {}) for rid, t in readings}
-    if out:
-        # A range of the primary key (reading_id, address) rather than a list of ids: one index range scan.
-        # Other units' readings in the range don't have these addresses; failed readings have no values.
-        for rid, address, value in conn.execute(
-            "SELECT reading_id, address, value FROM register_values "
-            "WHERE reading_id BETWEEN %s AND %s AND address = ANY(%s)",
-            (min(r[0] for r in readings), max(r[0] for r in readings), list(by_address)),
-        ):
-            if rid in out:
-                out[rid][1][by_address[address]] = value / gains[by_address[address]]
-    return out
+        where, params = where + " AND t.reading_id = ANY(%s)", [*params, list(ids)]
+    where += _good(conn, "r")
+    query = sql.SQL(
+        "SELECT t.reading_id, t.started_at, {} FROM {} t JOIN readings r ON r.id = t.reading_id "
+        "WHERE r.unit_id = %s" + where + " ORDER BY t.started_at"
+    ).format(sql.SQL(", ").join(sql.Identifier("t", n) for n in names), sql.Identifier(values_table(regs[0].device)))
+    return {
+        rid: (t, {n: v / gains[n] for n, v in zip(names, values) if v is not None})
+        for rid, t, *values in conn.execute(query, [unit, *params])
+    }
 
 
 # ---------- strings ----------
@@ -179,11 +148,6 @@ class StringData:
             (a + b) / 2 * (t1 - t0).total_seconds() / 3600
             for a, b, t0, t1 in zip(total, total[1:], self.times, self.times[1:])
         )
-
-
-def _hours_per_row(frame: pd.DataFrame) -> float:
-    """The spacing of a regular time index, in hours (to turn a sum of kW rows into kWh)."""
-    return (frame.index[1] - frame.index[0]).total_seconds() / 3600
 
 
 def string_readings(
@@ -830,12 +794,10 @@ class DailyLine:
 def pv_history(conn: psycopg.Connection, tz: datetime.tzinfo, column: str = "solar_kwh") -> DailyLine | None:
     """Each finished day's solar generation (daily_energy.`column`, kWh) as a uPlot series for the all-time page. None
     with fewer than two days. Each day is stamped at local noon, so its date reads the same in any browser's zone."""
-    rows = [
-        (d, float(v))
-        for d, v in conn.execute(
-            f"SELECT day, {column} FROM daily_energy WHERE {column} IS NOT NULL ORDER BY day"
-        ).fetchall()
-    ]
+    query = sql.SQL("SELECT day, {c} FROM daily_energy WHERE {c} IS NOT NULL ORDER BY day").format(
+        c=sql.Identifier(column)
+    )
+    rows = [(d, float(v)) for d, v in conn.execute(query).fetchall()]
     if len(rows) < 2:
         return None
     at = lambda d, hour=0: int(datetime.datetime.combine(d, datetime.time(hour), tz).timestamp())

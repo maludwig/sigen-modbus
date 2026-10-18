@@ -76,6 +76,14 @@ test("every chart the dashboard serves data for has a spec, and their builds run
   }
 });
 
+test("battery temps: the coolest cluster's note skips gaps (null isn't 0 °C)", () => {
+  const cols = {"coolest cluster": [null, 12.5, 10.2, null]};
+  const store = {main: {t: every15(4), cols}, aux: {air: L.emptyTable()}, meta: {}, side: null};
+  assert.equal(L.CHARTS.battery_temps.build(store).note, "Coolest cluster: low 10.2 °C, now 10.2 °C.");
+  cols["coolest cluster"] = [null, null];
+  assert.equal(L.CHARTS.battery_temps.build({...store, main: {t: every15(2), cols}}).note, "");
+});
+
 test("string power: a clear-sky model per string behind it, the strips, and both kWh", () => {
   const t = [0, 3600, 7200];
   const store = {main: {t, cols: {1: [1, 2, 1], 2: [0, 0, 0], 3: [0, 0, 0], 4: [0, 0, 0]}}, meta: {faces: {1: "SE"}},

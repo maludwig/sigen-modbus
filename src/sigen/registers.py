@@ -33,8 +33,8 @@ def encode_int(n: int, rtype: str) -> list[int]:
     """Integer -> 16-bit words. Raises ValueError if it doesn't fit."""
     try:
         packed = struct.pack(_TYPE_FMT[rtype], n)
-    except struct.error:
-        raise ValueError(f"{n} doesn't fit in {rtype}")
+    except struct.error as e:
+        raise ValueError(f"{n} doesn't fit in {rtype}") from e
     return list(struct.unpack(f">{TYPE_WORDS[rtype]}H", packed))
 
 
@@ -178,6 +178,10 @@ class Register:
     device: str = "plant"  # "plant" (unit 247) or "inverter" (its own unit ID)
     count: int | None = None  # words, for type "string" only
 
+    def __post_init__(self) -> None:
+        if self.type == "string" and not self.count:
+            raise ValueError(f"{self.name}: a string register needs count=")
+
     @property
     def words(self) -> int:
         """How many 16-bit words to read: `count` for strings, else by type."""
@@ -187,11 +191,6 @@ class Register:
     def stored(self) -> bool:
         """Kept in the database? Strings (model, serial, firmware) are display only."""
         return self.type != "string"
-
-    @property
-    def function(self) -> int:
-        """Modbus read function code: 4 for input registers, 3 for holding."""
-        return 4 if self.table == "input" else 3
 
     # --- decoding ---
     def decode(self, words: list[int]) -> tuple[float | None, str | None]:
@@ -240,9 +239,9 @@ class Register:
                 return by_slug[slug(text)]
         try:
             return float(text)
-        except ValueError:
+        except ValueError as e:
             options = ", ".join(self.choices()) if self.labels else "a number"
-            raise ValueError(f"'{text}' isn't valid for {self.name}; use {options}")
+            raise ValueError(f"'{text}' isn't valid for {self.name}; use {options}") from e
 
     def choices(self) -> list[str]:
         """Allowed label slugs for coded registers (for --help and error messages)."""

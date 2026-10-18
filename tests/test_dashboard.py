@@ -49,6 +49,9 @@ def test_parse_window():
     utc = datetime.UTC
     assert end.astimezone(utc) - start.astimezone(utc) == datetime.timedelta(hours=72)  # real hours, not wall clock
     assert start == datetime.datetime(2026, 10, 30, 11, 0, tzinfo=denver)  # 11:00 MDT = 10:00 MST + 72 h
+    late = datetime.datetime(2026, 10, 12, 3, 0, tzinfo=datetime.UTC)  # still 10-11 in Edmonton (21:00)
+    start, _, live, _ = dashboard.parse_window({}, TZ, late)
+    assert (start, live) == (datetime.datetime(2026, 10, 11, tzinfo=TZ), True)
     for bad in (
         {"day": "10/09/2026"},
         {"hours": "x"},

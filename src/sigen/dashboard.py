@@ -190,8 +190,8 @@ def parse_window(
         name, value, per_hour, unit = ("hours", hours, 1, "h") if hours else ("minutes", minutes, 60, "min")
         try:
             n = float(value)
-        except ValueError:
-            raise BadWindow(f"{name}={value!r} isn't a number")
+        except ValueError as e:
+            raise BadWindow(f"{name}={value!r} isn't a number") from e
         if not 0 < n <= MAX_HOURS * per_hour:
             raise BadWindow(f"{name} must be between 0 and {MAX_HOURS * per_hour}")
         # exactly that long, across a daylight-saving change too: subtracted in UTC (on a local time, Python subtracts
@@ -202,10 +202,10 @@ def parse_window(
     if day:
         try:
             date = datetime.date.fromisoformat(day)
-        except ValueError:
-            raise BadWindow(f"day={day!r} isn't a date like 2026-10-11")
+        except ValueError as e:
+            raise BadWindow(f"day={day!r} isn't a date like 2026-10-11") from e
     else:
-        date = now.date()
+        date = now.astimezone(tz).date()
     start = datetime.datetime(date.year, date.month, date.day, tzinfo=tz)
     end = start + datetime.timedelta(days=1)
     live = start <= now < end
@@ -338,9 +338,9 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
             start, end, _, _ = parse_window(request.args if request.args else default, tz)
             return start.astimezone(utc), end.astimezone(utc), None
         try:
-            start = datetime.datetime.fromisoformat(since[:-1] + "+00:00" if since.endswith("Z") else since)
-        except ValueError:  # (Python 3.9's fromisoformat doesn't take "Z" itself)
-            raise BadWindow(f"since={since!r} isn't an ISO 8601 time like 2026-10-14T03:01:30.997599Z")
+            start = datetime.datetime.fromisoformat(since)
+        except ValueError as e:
+            raise BadWindow(f"since={since!r} isn't an ISO 8601 time like 2026-10-14T03:01:30.997599Z") from e
         if start.tzinfo is None:
             raise BadWindow(f"since={since!r} needs its timezone, e.g. Z for UTC")
         start, end = start.astimezone(utc), datetime.datetime.now(utc)
@@ -426,9 +426,8 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
         fetch_satellite(start, end)  # in the background: these are the cubes there are now
         strip, note = charts.precipitation_strip(charts.precipitation(conn, start, end))
         strips, notes = [strip], [note]
-        if (
-            config.array is not None and config.site is not None
-        ):  # measured PV vs the clear-sky model, nearest the chart
+        # measured PV vs the clear-sky model, nearest the chart
+        if config.array is not None and config.site is not None:
             clear_sky = charts.clear_sky_strings(conn, config.site, config.array, start, end)
             pv_strip, pv_note = charts.measured_strip(charts.string_readings(conn, start, end), clear_sky)
             strips, notes = [pv_strip] + strips, [pv_note] + notes

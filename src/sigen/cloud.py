@@ -134,7 +134,7 @@ class CloudClient:
         try:
             return Tokens(json.loads(self.token_file.read_text(encoding="utf-8")))
         except (OSError, ValueError) as e:
-            raise CloudError(f"can't read the token file {self.token_file}: {e}")
+            raise CloudError(f"can't read the token file {self.token_file}: {e}") from e
 
     def _save(self, tokens: Tokens) -> None:
         """Write the token file via a temp file and os.replace, making its
@@ -145,9 +145,10 @@ class CloudClient:
         os.replace(tmp, self.token_file)  # atomic: never leaves a half-written token file
 
     def _device_id(self) -> str:
-        """A stable per-install id, kept in the token file (made once)."""
+        """A stable per-install id, kept in the token file (made once).
+        CloudError if the token file is there but unreadable."""
         if self.token_file.exists():
-            dev = Tokens(json.loads(self.token_file.read_text(encoding="utf-8"))).device_id
+            dev = self.load().device_id
             if dev:
                 return dev
         return uuid.uuid4().hex
@@ -167,7 +168,7 @@ class CloudClient:
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode("utf-8", "replace")
         except (urllib.error.URLError, OSError) as e:
-            raise CloudError(f"couldn't reach the Sigen cloud at {url}: {getattr(e, 'reason', e)}")
+            raise CloudError(f"couldn't reach the Sigen cloud at {url}: {getattr(e, 'reason', e)}") from e
 
     def _headers(self, access_token: str | None = None, form: bool = False) -> dict:
         """The web app's request headers. form=True is the OAuth token POST
@@ -214,8 +215,8 @@ class CloudClient:
         status, text = self._request("POST", f"{self.base_url}/{TOKEN_PATH}", self._headers(form=True), data)
         try:
             body = json.loads(text)
-        except ValueError:
-            raise CloudError(f"the token endpoint returned HTTP {status}, not JSON: {text[:200]}")
+        except ValueError as e:
+            raise CloudError(f"the token endpoint returned HTTP {status}, not JSON: {text[:200]}") from e
         if status >= 400:
             raise CloudError(f"the token endpoint returned HTTP {status}: {json.dumps(_redact(body))[:300]}")
         return body
@@ -318,8 +319,8 @@ class CloudClient:
             )
         try:
             body = json.loads(text)
-        except ValueError:
-            raise CloudError(f"{path} returned HTTP {status}, not JSON: {text[:200]}")
+        except ValueError as e:
+            raise CloudError(f"{path} returned HTTP {status}, not JSON: {text[:200]}") from e
         if status >= 400 or body.get("code") not in (0, None):
             raise CloudError(f"{path}: HTTP {status}, API code {body.get('code')}, {body.get('msg')!r}")
         return body.get("data")

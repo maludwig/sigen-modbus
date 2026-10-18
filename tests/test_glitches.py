@@ -288,6 +288,7 @@ def test_0007_flags_the_history_as_judge_would(conn):
         "0009_timestamp_brin",
         "0010_satellite_shade",
         "0011_daily_clear_sky",
+        "0012_drop_register_values_v1",
     ]
     flags = {rid: g for rid, g in conn.execute("SELECT id, glitch FROM readings")}
     for name, (p, i) in polls.items():

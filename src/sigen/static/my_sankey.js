@@ -120,16 +120,17 @@
   const sum = (xs) => xs.reduce((a, b) => a + b, 0);
 
   /**
-   * The largest kWh-to-pixel scale at which every column's cards (each
+   * The largest kWh-to-pixel scale at which every column's slots (each
    * max(kwh × scale, minNode) tall, gap apart) fit `height`; 0 if even the
-   * minimum-height cards don't.
+   * minimum-height slots don't.
    * @param {{kwh: number}[][]} columns  each column's nodes
    * @param {number} height  CSS px
    * @param {{minNode: number, gap: number}} o  CSS px, as in SankeyOptions
    * @returns {number}  CSS px per kWh
    */
   function fitScale(columns, height, o) {
-    const used = (nodes, s) => sum(nodes.map((n) => Math.max(n.kwh * s, o.minNode))) + o.gap * Math.max(nodes.length - 1, 0);
+    const used = (nodes, s) => sum(nodes.map((n) => Math.max(n.kwh * s, o.minNode)))
+                               + o.gap * Math.max(nodes.length - 1, 0);
     const fits = (s) => columns.every((nodes) => used(nodes, s) <= height + 1e-9);
     const full = columns.filter((nodes) => nodes.length)
       .map((nodes) => (height - o.gap * (nodes.length - 1)) / sum(nodes.map((n) => n.kwh)));
@@ -315,7 +316,7 @@
                            o.barWidth);
     for (const n of l.nodes) {
       ctx.fillStyle = n.colour;                                   // the bar: plain, sharp, over the bands' ends
-      ctx.fillRect(n.side === "left" ? n.x + n.w - o.barWidth : n.x, n.barY, o.barWidth, Math.max(n.barH, o.minBand));
+      ctx.fillRect(n.side === "left" ? n.x + n.w - o.barWidth : n.x, n.barY, o.barWidth, n.barH);  // ≥ one band
       label(ctx, n, size, o);
     }
     return l;

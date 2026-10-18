@@ -3,7 +3,16 @@ import json
 import pytest
 
 from conftest import REPO
-from sigen.registers import BY_NAME, PLANT_REGISTERS, WRITABLE, decode_int, decode_string, encode_int, encode_string
+from sigen.registers import (
+    BY_NAME,
+    PLANT_REGISTERS,
+    WRITABLE,
+    Register,
+    decode_int,
+    decode_string,
+    encode_int,
+    encode_string,
+)
 
 
 def _fake_data_strings():
@@ -48,6 +57,12 @@ def test_encode_rejects_overflow():
         encode_int(70000, "u16")
     with pytest.raises(ValueError):
         encode_int(-1, "u32")
+
+
+def test_a_string_register_needs_its_count():
+    with pytest.raises(ValueError, match="needs count="):
+        Register("model", "input", 30500, "string")
+    assert Register("model", "input", 30500, "string", count=15).words == 15
 
 
 def test_string_round_trip():

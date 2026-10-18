@@ -356,12 +356,12 @@ def swap_in(tmp: Path, path: Path, tries: int = SWAP_TRIES, wait: float = SWAP_W
         try:
             os.replace(tmp, path)
             return
-        except PermissionError:
+        except PermissionError as e:
             if attempt == tries - 1:
                 raise SigenError(
                     f"couldn't replace {path.name}: something has it open; the new scans are in "
                     f"{tmp.name}, and the next run starts over from {path.name}"
-                )
+                ) from e
             time.sleep(wait)
 
 
@@ -409,7 +409,7 @@ def claim_pid_file(cube_dir: Path, pid: int | None = None) -> Path:
     for _ in range(2):
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
+        except FileExistsError as e:
             try:
                 owner = int(path.read_text(encoding="ascii").strip() or 0)
                 age = time.time() - path.stat().st_mtime
@@ -419,7 +419,7 @@ def claim_pid_file(cube_dir: Path, pid: int | None = None) -> Path:
                 raise PreconditionFailed(
                     f"sigen satellite is already running (process {owner}, {path}); "
                     "it will pick up everything this run would have"
-                )
+                ) from e
             path.unlink(missing_ok=True)
             continue
         with os.fdopen(fd, "w", encoding="ascii") as f:

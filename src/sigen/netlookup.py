@@ -17,6 +17,7 @@ Elsewhere (macOS, …) every function here raises PlatformNotSupported.
 """
 
 import ctypes
+import functools
 import json
 import re
 import shutil
@@ -65,7 +66,7 @@ def neighbours(
     try:
         out = run(["ip", "-4", "-j", "neigh", "show"], capture_output=True, text=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError) as e:
-        raise PlatformNotSupported(f"`ip -4 -j neigh show` failed: {e}")
+        raise PlatformNotSupported(f"`ip -4 -j neigh show` failed: {e}") from e
     table = {}
     for entry in json.loads(out or "[]"):
         if "dst" not in entry:
@@ -152,11 +153,19 @@ def _linux_find(
 
 
 # ---------- Windows ----------
+@functools.cache
+def _send_arp() -> Callable:
+    """iphlpapi's SendARP with its argument types set, made once (a sweep
+    calls it from up to 64 threads)."""
+    send_arp = ctypes.WinDLL("iphlpapi").SendARP
+    send_arp.argtypes = [ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    return send_arp
+
+
 def _windows_mac_for_ip(ip: str) -> str | None:
     """mac_for_ip() on Windows: one SendARP call, blocking ~10 ms on an
     answer and up to ~3 s without one. None if nothing answered."""
-    send_arp = ctypes.WinDLL("iphlpapi").SendARP
-    send_arp.argtypes = [ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    send_arp = _send_arp()
     dest = struct.unpack("<I", socket.inet_aton(ip))[0]  # same bytes as network order
     buf = (ctypes.c_ubyte * 8)()
     length = ctypes.c_ulong(6)

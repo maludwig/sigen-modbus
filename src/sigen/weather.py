@@ -207,7 +207,8 @@ def parse_frames(response: Response) -> list[datetime.datetime]:
 def feature_info_params(site: Site, layer: str, frame: datetime.datetime) -> dict[str, object]:
     """WMS GetFeatureInfo query for one layer at one frame: a 3x3 image of the
     box around the site (lat,lon, as WMS 1.3.0 wants), read at its centre."""
-    box = f"{site.latitude - RADAR_BOX},{site.longitude - RADAR_BOX},{site.latitude + RADAR_BOX},{site.longitude + RADAR_BOX}"
+    lat, lon = site.latitude, site.longitude
+    box = f"{lat - RADAR_BOX},{lon - RADAR_BOX},{lat + RADAR_BOX},{lon + RADAR_BOX}"
     return {
         "service": "WMS",
         "version": "1.3.0",

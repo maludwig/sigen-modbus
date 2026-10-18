@@ -97,8 +97,8 @@ def parse_iso(text: str) -> datetime.datetime:
     """An ISO 8601 instant (a trailing Z is fine) as an aware UTC datetime; naive input is taken as UTC."""
     try:
         dt = datetime.datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
-    except ValueError:
-        raise SyncError(f"not an ISO 8601 time: {text!r} (e.g. 2026-10-17T16:02:15.010474Z)")
+    except ValueError as e:
+        raise SyncError(f"not an ISO 8601 time: {text!r} (e.g. 2026-10-17T16:02:15.010474Z)") from e
     return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
 
 
@@ -446,9 +446,11 @@ def _get(peer_url: str, path: str, params: dict[str, str] | None = None) -> dict
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             body = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        raise SyncError(f"the peer at {full} returned HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:200]}")
+        raise SyncError(
+            f"the peer at {full} returned HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:200]}"
+        ) from e
     except (urllib.error.URLError, OSError, ValueError) as e:
-        raise SyncError(f"couldn't reach the peer at {full}: {getattr(e, 'reason', e)}")
+        raise SyncError(f"couldn't reach the peer at {full}: {getattr(e, 'reason', e)}") from e
     if not isinstance(body, dict):
         raise SyncError(f"the peer at {full} sent a JSON {type(body).__name__}, not an object")
     if body.get("error"):

@@ -73,7 +73,8 @@ def test_migrate_creates_everything_and_is_idempotent(run, config, conn):
     assert code == ExitCode.OK and "0001_initial" in out and "0002_units" in out and "0003_weather" in out
     assert "0004_wide_values" in out and "0005_alert_log" in out and "0006_daily_energy" in out
     assert "0007_glitch" in out and "0008_battery_heater" in out and "0009_timestamp_brin" in out
-    assert "0010_satellite_shade" in out and "0011_daily_clear_sky" in out and "Applied 11 migration" in out
+    assert "0010_satellite_shade" in out and "0011_daily_clear_sky" in out
+    assert "0012_drop_register_values_v1" in out and "Applied 12 migration" in out
     assert conn.execute("SELECT count(*) FROM register_meta").fetchone()[0] == len(db.STORED_REGISTERS)
     assert conn.execute(
         "SELECT name, type, gain, unit, device FROM register_meta WHERE address = 30005"
@@ -128,6 +129,7 @@ def test_0002_upgrades_existing_readings(conn):
         "0009_timestamp_brin",
         "0010_satellite_shade",
         "0011_daily_clear_sky",
+        "0012_drop_register_values_v1",
     ]
     assert conn.execute("SELECT unit_id, poll_id FROM readings WHERE id = %s", (rid,)).fetchone() == (247, rid)
     assert conn.execute(
@@ -165,6 +167,19 @@ def test_failed_migration_leaves_nothing_behind(conn):
 def at_0003(conn):
     """A database exactly as migrations 0001-0003 left it (register_meta synced)."""
     db.migrate(conn, db.load_migrations()[:3])
+
+
+def until_0011(conn):
+    """Migrate up to 0011, the last with register_values (the view) and register_values_v1, so the tests can compare
+    them; the labels applied."""
+    return db.migrate(conn, db.load_migrations()[:11])
+
+
+def migrate_0012(conn):
+    """Apply 0012 and check it took the view and register_values_v1 away."""
+    assert db.migrate(conn) == ["0012_drop_register_values_v1"]
+    gone = conn.execute("SELECT to_regclass('register_values'), to_regclass('register_values_v1')").fetchone()
+    assert gone == (None, None)
 
 
 def old_reading(conn, unit_id, values, when):
@@ -209,7 +224,7 @@ def test_0004_moves_every_value(conn):
     old_reading(conn, 247, [(30014, 880)], when + datetime.timedelta(minutes=5))  # an early, partial reading
     before = sorted(conn.execute("SELECT reading_id, address, value FROM register_values").fetchall())
 
-    assert db.migrate(conn) == [
+    assert until_0011(conn) == [
         "0004_wide_values",
         "0005_alert_log",
         "0006_daily_energy",
@@ -221,6 +236,7 @@ def test_0004_moves_every_value(conn):
     ]
     assert sorted(conn.execute("SELECT reading_id, address, value FROM register_values").fetchall()) == before
     assert sorted(conn.execute("SELECT reading_id, address, value FROM register_values_v1").fetchall()) == before
+    migrate_0012(conn)
     assert conn.execute("SELECT count(*) FROM raw_plant_register_values").fetchone()[0] == 4
     assert conn.execute("SELECT count(*) FROM raw_inverter_register_values").fetchone()[0] == 3
     rid, k = plant[1], 1
@@ -308,7 +324,7 @@ def test_backfill_runs_while_poll_writes_then_migrate_copies_the_rest(conn):
     )  # a failed one
     before = sorted(conn.execute("SELECT reading_id, address, value FROM register_values").fetchall())
 
-    assert db.migrate(conn) == [
+    assert until_0011(conn) == [
         "0004_wide_values",
         "0005_alert_log",
         "0006_daily_energy",
@@ -321,6 +337,8 @@ def test_backfill_runs_while_poll_writes_then_migrate_copies_the_rest(conn):
     assert rows() == (4, 4) and db.wide_layout(conn)
     assert sorted(conn.execute("SELECT reading_id, address, value FROM register_values").fetchall()) == before
     assert sorted(conn.execute("SELECT reading_id, address, value FROM register_values_v1").fetchall()) == before
+    migrate_0012(conn)
+    assert rows() == (4, 4) and db.wide_layout(conn)
     db.check_ready(conn)
 
 
@@ -486,6 +504,23 @@ def test_query_error_is_exit_10(run, config):
 
 
 # ---------- poll ----------
+def stored(conn, rid):
+    """A reading's stored values as {register name: value before the gain}, from whichever wide table has its row;
+    {} if neither does."""
+    for device in db.DEVICES:
+        cur = conn.execute(f"SELECT * FROM {db.values_table(device)} WHERE reading_id = %s", (rid,))
+        row = cur.fetchone()
+        if row is not None:
+            names = [c.name for c in cur.description]
+            return {n: v for n, v in zip(names, row) if v is not None and n not in ("reading_id", "started_at")}
+    return {}
+
+
+def value_rows(conn):
+    """How many rows the two wide tables hold together."""
+    return sum(conn.execute(f"SELECT count(*) FROM {db.values_table(d)}").fetchone()[0] for d in db.DEVICES)
+
+
 @pytest.mark.fresh_schema
 def test_poll_refuses_before_migrate(run, config, full_server):
     code, _, err = run("poll", *net(full_server), "--config", config, "--count", 1)
@@ -498,19 +533,15 @@ def test_poll_stores_every_register(run, config, conn, full_server, quick_polls)
     assert code == ExitCode.OK and "2 stored, 0 failed" in out
     code, out, _ = run("db", "status", "--config", config)
     assert code == ExitCode.OK and "Value rows:    2 plant, 0 inverter (one per successful reading)\n" in out
-    assert conn.execute("SELECT count(*) FROM register_values").fetchone()[0] == 2 * len(PLANT_REGISTERS)  # the view
     rows = conn.execute(
         "SELECT id, host(ip_addr), started_at, ended_at, version, error FROM readings ORDER BY id"
     ).fetchall()
     assert len(rows) == 2
     for rid, ip, started, ended, version, error in rows:
         assert ip == "127.0.0.1" and error is None and ended >= started
-        n = conn.execute("SELECT count(*) FROM register_values WHERE reading_id = %s", (rid,)).fetchone()[0]
-        assert n == len(PLANT_REGISTERS)
-    battery = conn.execute(
-        "SELECT value FROM register_values WHERE reading_id = %s AND address = 30037", (rows[0][0],)
-    ).fetchone()[0]
-    assert battery == -1859  # decoded s32, before the gain
+        assert len(stored(conn, rid)) == len(PLANT_REGISTERS)  # every register, none NULL
+    battery = next(r.name for r in PLANT_REGISTERS if r.address == 30037)
+    assert stored(conn, rows[0][0])[battery] == -1859  # decoded s32, before the gain
 
 
 def test_poll_records_connection_failures_and_continues(run, config, conn):
@@ -521,7 +552,7 @@ def test_poll_records_connection_failures_and_continues(run, config, conn):
     assert code == ExitCode.OK and "FAILED" in err
     ((rid, error),) = conn.execute("SELECT id, error FROM readings").fetchall()
     assert "couldn't connect" in error
-    assert conn.execute("SELECT count(*) FROM register_values").fetchone()[0] == 0
+    assert value_rows(conn) == 0
 
 
 def test_poll_stops_on_rejected_register(run, config, conn, server):
@@ -532,7 +563,7 @@ def test_poll_stops_on_rejected_register(run, config, conn, server):
     assert code == ExitCode.MODBUS and "Stopping" in err
     ((error,),) = conn.execute("SELECT error FROM readings").fetchall()
     assert "Modbus exception 2" in error
-    assert conn.execute("SELECT count(*) FROM register_values").fetchone()[0] == 0
+    assert value_rows(conn) == 0
 
 
 def url_of(config):
@@ -586,15 +617,14 @@ def test_poll_takes_a_reading_per_unit(run, config, conn, tmp_path, both_server,
     run("db", "migrate", "--config", f)
     code, out, err = run("poll", *net(both_server), "--config", f, "--count", 2, "--interval", 1)
     assert code == ExitCode.OK and "4 stored, 0 failed" in out and "units 247 (plant), 1 (inverter)" in err
-    rows = conn.execute("""SELECT r.poll_id, r.unit_id, count(v.address) FROM readings r
-                           LEFT JOIN register_values v ON v.reading_id = r.id
-                           GROUP BY r.id ORDER BY r.id""").fetchall()
-    stored = {device: sum(1 for r in db.STORED_REGISTERS if r.device == device) for device in ("plant", "inverter")}
-    assert [(u, n) for _, u, n in rows] == [(247, stored["plant"]), (1, stored["inverter"])] * 2
-    assert rows[0][0] == rows[1][0] != rows[2][0] == rows[3][0]  # one poll_id per tick
-    pv1 = conn.execute("""SELECT v.value FROM register_values v JOIN readings r ON r.id = v.reading_id
-                          WHERE r.unit_id = 1 AND v.address = 31027 LIMIT 1""").fetchone()[0]
-    assert pv1 == 2941  # PV1 294.1 V, before the gain
+    rows = conn.execute("SELECT id, poll_id, unit_id FROM readings ORDER BY id").fetchall()
+    per_device = {d: sum(1 for r in db.STORED_REGISTERS if r.device == d) for d in ("plant", "inverter")}
+    assert [(u, len(stored(conn, rid))) for rid, _, u in rows] == [
+        (247, per_device["plant"]),
+        (1, per_device["inverter"]),
+    ] * 2
+    assert rows[0][1] == rows[1][1] != rows[2][1] == rows[3][1]  # one poll_id per tick
+    assert stored(conn, rows[1][0])["inverter_pv1_voltage"] == 2941  # PV1 294.1 V, before the gain
 
 
 @pytest.mark.fresh_schema

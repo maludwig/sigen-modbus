@@ -219,7 +219,7 @@ class Config:
             )
         return self.alerts
 
-    def require_cloud(self) -> "Cloud":
+    def require_cloud(self) -> Cloud:
         """The cloud section, or ConfigError if the config has none."""
         if self.cloud is None:
             raise ConfigError(
@@ -284,14 +284,15 @@ def load_config(path: Path | None) -> Config:
     ConfigError (exit 2), naming the key at fault."""
     if path is None:
         return Config()
+    path = Path(path)  # callers may pass a str
     try:
         doc = read_json_file(path)
-    except FileNotFoundError:
-        raise NotFound(f"config file {path} doesn't exist")
+    except FileNotFoundError as e:
+        raise NotFound(f"config file {path} doesn't exist") from e
     except OSError as e:
-        raise NotFound(f"can't read config file {path}: {e}")
+        raise NotFound(f"can't read config file {path}: {e}") from e
     except ValueError as e:
-        raise ConfigError(f"{path} isn't valid JSON: {e}")
+        raise ConfigError(f"{path} isn't valid JSON: {e}") from e
     if not isinstance(doc, dict):
         raise ConfigError(f"{path}: expected a JSON object at the top level")
     known = {"smart_loads", "database", "devices", "site", "alerts", "array", "satellite", "cloud", *COMMAND_SETTINGS}
@@ -318,14 +319,14 @@ def load_config(path: Path | None) -> Config:
         if ip is not None:
             try:
                 ip = str(ipaddress.IPv4Address(ip))
-            except (ipaddress.AddressValueError, ValueError):
-                raise ConfigError(f"{where}.ip: {ip!r} isn't an IPv4 address")
+            except (ipaddress.AddressValueError, ValueError) as e:
+                raise ConfigError(f"{where}.ip: {ip!r} isn't an IPv4 address") from e
         mac = spec.get("mac")
         if mac is not None:
             try:
                 mac = normalize_mac(str(mac))
             except ValueError as e:
-                raise ConfigError(f"{where}.mac: {e}")
+                raise ConfigError(f"{where}.mac: {e}") from e
         devices[name] = Device(ip=ip, mac=mac, units=tuple(units))
 
     database_url = test_database_url = None
@@ -367,11 +368,11 @@ def load_config(path: Path | None) -> Config:
         cloud=_cloud(path, doc["cloud"]) if "cloud" in doc else None,
         commands={c: _command_settings(path, c, doc[c]) for c in COMMAND_SETTINGS if c in doc},
         origin=str(path),
-        path=Path(path),
+        path=path,
     )
 
 
-def _cloud(path: Path, spec: Any) -> "Cloud":
+def _cloud(path: Path, spec: Any) -> Cloud:
     """The "cloud" section: token_file (required, a path relative to the config folder); base_url, app_base_url,
     station_id, batteries (all optional); and the app's two static constants, obfuscation_key and client_basic
     (optional, kept here instead of in the code so they are not committed -- login needs both, refresh needs
@@ -408,7 +409,7 @@ def _cloud(path: Path, spec: Any) -> "Cloud":
         if value is not None and not _is_text(value):
             raise ConfigError(f"{path}: cloud.{name} must be a non-empty string")
     return Cloud(
-        token_file=Path(path).resolve().parent / token_file.strip(),
+        token_file=path.resolve().parent / token_file.strip(),
         base_url=base_url.rstrip("/"),
         app_base_url=app_base_url.rstrip("/"),
         station_id=station.strip() if station else None,
@@ -444,7 +445,7 @@ def _command_settings(path: Path, command: str, spec: Any) -> dict[str, Any]:
         elif not _is_text(value):
             raise ConfigError(f"{path}: {where} must be a non-empty string, got {value!r}")
         else:
-            out[name] = Path(path).resolve().parent / value.strip() if kind[0] == "dir" else value.strip()
+            out[name] = path.resolve().parent / value.strip() if kind[0] == "dir" else value.strip()
     return out
 
 
@@ -455,7 +456,7 @@ def _cube_dir(path: Path, spec: Any) -> Path:
     cube_dir = spec.get("cube_dir", str(DEFAULT_CUBE_DIR))
     if not _is_text(cube_dir):
         raise ConfigError(f'{path}: satellite.cube_dir must be a directory, e.g. "captures/satellite/cubes"')
-    return Path(path).resolve().parent / cube_dir.strip()
+    return path.resolve().parent / cube_dir.strip()
 
 
 NTFY_TOPIC = re.compile(r"[-_A-Za-z0-9]{1,64}")  # what ntfy accepts as a topic name
@@ -555,7 +556,7 @@ def _site(path: Path, spec: Any) -> Site:
         raise ConfigError(f'{path}: site.timezone must be an IANA name like "America/Edmonton", got {timezone!r}')
     try:
         ZoneInfo(timezone)  # the shape is right; is it a zone this computer knows (a typo isn't)?
-    except (ZoneInfoNotFoundError, ValueError):
-        raise ConfigError(f"{path}: site.timezone {timezone!r} isn't a time zone this computer knows (a typo?)")
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        raise ConfigError(f"{path}: site.timezone {timezone!r} isn't a time zone this computer knows (a typo?)") from e
     altitude = _number(path, "site.altitude_m", spec["altitude_m"], -500, 9000) if "altitude_m" in spec else None
     return Site(float(spec["latitude"]), float(spec["longitude"]), timezone, altitude)

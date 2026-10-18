@@ -214,10 +214,13 @@ def _print_settings(config: Config, shown: list[tuple[str, str, str]]) -> None:
         err(f"  {option:<{width}}  {text:<{vwidth}}  {source}")
 
 
-def _connector(args: argparse.Namespace, unit: int | None = None) -> Callable[[], ModbusClient]:
-    """A ModbusClient factory for --ip, --port and --timeout, talking to
-    `unit` (default: --unit-id); BlockReader and set_register call it."""
-    return functools.partial(ModbusClient, args.ip, args.port, args.unit_id if unit is None else unit, args.timeout)
+def _connector(args: argparse.Namespace, unit: int | None = None, ip: str | None = None) -> Callable[[], ModbusClient]:
+    """A ModbusClient factory for --port and --timeout, talking to `unit`
+    (default: --unit-id) at `ip` (default: --ip; poll passes the address it
+    follows the device to); BlockReader and set_register call it."""
+    return functools.partial(
+        ModbusClient, args.ip if ip is None else ip, args.port, args.unit_id if unit is None else unit, args.timeout
+    )
 
 
 def _inverter_units(config: Config) -> tuple[int, ...]:
@@ -304,9 +307,12 @@ def cmd_read_json(args: argparse.Namespace) -> int:
     try:
         doc = read_json_file(path)
     except OSError as e:
-        raise NotFound(f"can't read {path}: {e}")
+        raise NotFound(f"can't read {path}: {e}") from e
     except ValueError as e:  # bad JSON, or bytes that aren't UTF-8/UTF-16
         err(f"error: {path} isn't valid JSON: {e}")
+        return ExitCode.ERROR
+    if not isinstance(doc, dict):
+        err(f"error: {path} isn't a sigen dump: expected a JSON object, got a {type(doc).__name__}")
         return ExitCode.ERROR
     readings = readings_from_document(doc)
     source = doc.get("source", {})
@@ -332,7 +338,11 @@ def cmd_read_json(args: argparse.Namespace) -> int:
     for unit, unit_readings in sorted(inverters.items()):
         print("\n" + "\n".join(format_inverter(unit, unit_readings)))
     if not args.summary_only:
-        print(format_table(readings, config, title=f"Plant (unit {doc.get('unit_id', 247)})" if inverters else ""))
+        print(
+            format_table(
+                readings, config, title=f"Plant (unit {doc.get('unit_id', PLANT_UNIT_ID)})" if inverters else ""
+            )
+        )
         for unit, unit_readings in sorted(inverters.items()):
             print(format_table(unit_readings, config, title=f"Inverter (unit {unit})"))
     return ExitCode.OK
@@ -466,12 +476,6 @@ def cmd_db_status(args: argparse.Namespace) -> int:
             "Value rows:    "
             + ", ".join(f"{n:,} {device}" for device, n in s["value_rows"].items())
             + " (one per successful reading)"
-        )
-    else:
-        print(
-            f"Values:        {s['register_values']:,}"
-            if s["register_values_exact"]
-            else f"Values:        ~{s['register_values']:,} (estimate)"
         )
     last = s["last_reading"]
     if last:
@@ -642,84 +646,124 @@ def cmd_db_query(args: argparse.Namespace) -> int:
     return ExitCode.OK
 
 
-def cmd_poll(args: argparse.Namespace) -> int:
-    """`sigen poll`: settle the settings (command line, config, default),
-    check them, set up MAC following, the background jobs, alerts and the
-    cloud heater poller, then hand over to sigen.poll.run. USAGE for a bad
-    combination or an address that won't resolve."""
-    config = _config(args)
-    _print_settings(config, _settings(args, config, "poll", POLL_SETTINGS))
-    url = config.require_database_url()
+def _poll_arg_error(args: argparse.Namespace) -> str | None:
+    """The first impossible combination of poll options, or None."""
+    if not 0 <= args.offset < args.interval:
+        return f"--offset must be at least 0 and less than --interval ({args.interval:g})"
+    if args.capture_open_meteo_weather and not args.weather:
+        return "--capture-open-meteo-weather needs --weather"
+    if args.capture_radar and not args.radar:
+        return "--capture-radar needs --radar"
+    return None
+
+
+def _poll_ip(args: argparse.Namespace, config: Config) -> str | None:
+    """The inverter's IP, from --ip or the config, resolved (readings.ip_addr
+    is INET, so store the address itself); None, after saying why, if
+    there's no address or it won't resolve."""
     inverter = config.devices.get("inverter")
     target = args.ip or (inverter.ip if inverter else None)
     if not target:
         err(f"error: give --ip, or set devices.inverter.ip in the config ({config.origin})")
-        return ExitCode.USAGE
+        return None
     try:
-        ip = socket.gethostbyname(target)  # readings.ip_addr is INET: store the address itself
+        return socket.gethostbyname(target)
     except OSError as e:
         err(f"error: can't resolve {target}: {e}")
-        return ExitCode.USAGE
-    rediscover = None
-    if inverter and inverter.mac:
-        try:
-            netlookup.require_supported()  # say so now, not hours later at the first outage
-        except PlatformNotSupported as e:
-            err(
-                f"warning: {e}; polling without following the inverter's MAC (devices.inverter.mac), so if "
-                f"its IP changes, polling keeps failing until it's restarted with the new IP"
-            )
-        else:
-            mac = inverter.mac
+        return None
 
-            def rediscover(current_ip: str) -> str | None:
-                if netlookup.mac_for_ip(current_ip) == mac:
-                    return current_ip
-                return netlookup.find_ip_for_mac(mac, local_hosts())
 
-    if not 0 <= args.offset < args.interval:
-        err(f"error: --offset must be at least 0 and less than --interval ({args.interval:g})")
-        return ExitCode.USAGE
-    if args.capture_open_meteo_weather and not args.weather:
-        err("error: --capture-open-meteo-weather needs --weather")
-        return ExitCode.USAGE
-    if args.capture_radar and not args.radar:
-        err("error: --capture-radar needs --radar")
-        return ExitCode.USAGE
-    watcher = alert_store = None
-    if args.alerts:
-        alert_config = config.require_alerts()
-        alert_store = weather.Store(url, err)  # the sender's own connection
-        tz = ZoneInfo(config.site.timezone) if config.site else None  # else this computer's
-        watcher = alerts.Watcher(
-            alerts.Sender(alert_config, alert_store, out=print, err=err), tz=tz, out=print, err=err
+def _mac_follower(mac: str | None) -> Callable[[str], str | None] | None:
+    """poll.run's rediscover callback: keep the IP while the inverter's MAC
+    still answers there, else sweep the LAN for it. None without a MAC, or
+    where netlookup can't work, which it warns about now, not hours later
+    at the first outage."""
+    if not mac:
+        return None
+    try:
+        netlookup.require_supported()
+    except PlatformNotSupported as e:
+        err(
+            f"warning: {e}; polling without following the inverter's MAC (devices.inverter.mac), so if "
+            f"its IP changes, polling keeps failing until it's restarted with the new IP"
         )
-    background, store = _background(args, config, url, watcher)
-    cloud_heater = None
-    if args.cloud and config.cloud is not None:
-        cloud_heater = heater.HeaterPoller.from_config(config.cloud, url, out=print, err=err)
-    units = {args.unit_id: "plant", **{u: "inverter" for u in _inverter_units(config)}}
+        return None
+
+    def rediscover(current_ip: str) -> str | None:
+        if netlookup.mac_for_ip(current_ip) == mac:
+            return current_ip
+        return netlookup.find_ip_for_mac(mac, local_hosts())
+
+    return rediscover
+
+
+def _alert_watcher(
+    args: argparse.Namespace, config: Config, url: str
+) -> tuple[alerts.Watcher | None, weather.Store | None]:
+    """With --alerts, the watcher and the sender's own store connection,
+    which the caller closes; else (None, None)."""
+    if not args.alerts:
+        return None, None
+    alert_config = config.require_alerts()
+    store = weather.Store(url, err)
+    tz = ZoneInfo(config.site.timezone) if config.site else None  # else this computer's
+    sender = alerts.Sender(alert_config, store, out=print, err=err)
+    return alerts.Watcher(sender, tz=tz, out=print, err=err), store
+
+
+def _poll_banner(
+    args: argparse.Namespace, ip: str, units: dict[int, str], url: str, mac: str | None, cloud_heater: bool
+) -> str:
+    """The one-line "Polling ..." summary: what, how often, into where, and
+    the extras that are on. mac is the MAC being followed, if any."""
     extras = [
         what
         for what, on in (
             ("Open-Meteo hourly and every 15 min", args.weather),
             ("radar every 6 min", args.radar),
             ("alerts" + ("" if args.weather else " (no --weather: outside air unknown)"), args.alerts),
-            ("the batteries' cloud heater status", cloud_heater is not None),
+            ("the batteries' cloud heater status", cloud_heater),
         )
         if on
     ]
-    print(
+    return (
         f"Polling {ip}:{args.port} units {', '.join(f'{u} ({d})' for u, d in units.items())} every "
         f"{args.interval:g}s"
         + (f", {args.offset:g}s past the boundary" if args.offset else "")
         + f" into {db.redact(url)} (Ctrl+C to stop)"
-        + (f"; following MAC {inverter.mac}" if rediscover else "")
-        + (f"; also {' and '.join(extras)}" if extras else ""),
-        file=sys.stderr,
+        + (f"; following MAC {mac}" if mac else "")
+        + (f"; also {' and '.join(extras)}" if extras else "")
     )
-    connector_for = lambda address, unit: functools.partial(ModbusClient, address, args.port, unit, args.timeout)
+
+
+def cmd_poll(args: argparse.Namespace) -> int:
+    """`sigen poll`: settle the settings (command line, config, default),
+    check them, set up MAC following, alerts, the background jobs and the
+    cloud heater poller, then hand over to sigen.poll.run. USAGE for a bad
+    combination or an address that won't resolve."""
+    config = _config(args)
+    _print_settings(config, _settings(args, config, "poll", POLL_SETTINGS))
+    if problem := _poll_arg_error(args):
+        err(f"error: {problem}")
+        return ExitCode.USAGE
+    url = config.require_database_url()
+    ip = _poll_ip(args, config)
+    if ip is None:
+        return ExitCode.USAGE
+    inverter = config.devices.get("inverter")
+    mac = inverter.mac if inverter else None
+    rediscover = _mac_follower(mac)
+    units = {args.unit_id: "plant", **{u: "inverter" for u in _inverter_units(config)}}
+    watcher, alert_store = _alert_watcher(args, config, url)
+    store = None
     try:
+        background, store = _background(args, config, url, watcher)
+        cloud_heater = None
+        if args.cloud and config.cloud is not None:
+            cloud_heater = heater.HeaterPoller.from_config(config.cloud, url, out=print, err=err)
+        following = mac if rediscover else None
+        print(_poll_banner(args, ip, units, url, following, cloud_heater is not None), file=sys.stderr)
+        connector_for = lambda address, unit: _connector(args, unit, ip=address)
         return poll.run(
             connector_for=connector_for,
             ip=ip,
@@ -783,7 +827,7 @@ def _background(
     return weather.Background(jobs, err), store
 
 
-def _weather_store(args: argparse.Namespace, config: Config) -> weather.Store:
+def _weather_store(config: Config) -> weather.Store:
     """For `weather` / `radar --record-to-db`: a Store, after checking the schema is ready."""
     url = config.require_database_url()
     conn = db.connect(url)
@@ -800,7 +844,7 @@ def cmd_weather(args: argparse.Namespace) -> int:
     stored, else CONNECTION if a fetch failed."""
     config = _config(args)
     site = config.require_site()
-    store = _weather_store(args, config) if args.record_to_db else None
+    store = _weather_store(config) if args.record_to_db else None
     code = ExitCode.OK
     try:
         for resolution in args.resolution:
@@ -824,7 +868,7 @@ def cmd_radar(args: argparse.Namespace) -> int:
     could be stored, else CONNECTION if a fetch failed."""
     config = _config(args)
     site = config.require_site()
-    store = _weather_store(args, config) if args.record_to_db else None
+    store = _weather_store(config) if args.record_to_db else None
     try:
         rows, added = weather.record_radar(site, store, args.capture)
     finally:
@@ -850,8 +894,10 @@ def _local_time(text: str, timezone: str, what: str) -> datetime.datetime:
         if when.tzinfo is not None:
             return when.astimezone(ZoneInfo(timezone))
         return when.replace(tzinfo=ZoneInfo(timezone))
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"{what} {text!r} isn't a date/time like 2026-10-10 or 2026-10-10 13:00")
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            f"{what} {text!r} isn't a date/time like 2026-10-10 or 2026-10-10 13:00"
+        ) from e
 
 
 def cmd_satellite(args: argparse.Namespace) -> int:
@@ -890,45 +936,50 @@ def cmd_satellite(args: argparse.Namespace) -> int:
         + f", into {cube_dir}"
     )
     conn = db.connect(config.require_database_url()) if args.record_to_db else None
-    if conn is not None:
-        db.check_ready(conn)  # fail early if the schema isn't ready
-    pid_file = goes.claim_pid_file(cube_dir)  # another run still going: exit 7
-    error = None
     try:
-        goes.build_cubes(
-            lat=site.latitude,
-            lon=site.longitude,
-            timezone=site.timezone,
-            start=start,
-            end=end,
-            cube_dir=cube_dir,
-            products=args.products,
-            km=args.km,
-            satellite=args.satellite,
-            sector=args.sector,
-            workers=args.workers,
-            daylight_minutes=daylight,
-            log=print,
-        )
-        series = (
-            goes_shade.shade_between(cube_dir, site.latitude, site.longitude, site.timezone, start, end, args.satellite)
-            if conn is not None
-            else None
-        )
-    except Exception as e:  # a build / shade failure: record it (if storing), then report
-        if conn is None:
-            raise
-        error, series = str(e), None
+        if conn is not None:
+            db.check_ready(conn)  # fail early if the schema isn't ready
+        pid_file = goes.claim_pid_file(cube_dir)  # another run still going: exit 7
+        error = None
+        try:
+            goes.build_cubes(
+                lat=site.latitude,
+                lon=site.longitude,
+                timezone=site.timezone,
+                start=start,
+                end=end,
+                cube_dir=cube_dir,
+                products=args.products,
+                km=args.km,
+                satellite=args.satellite,
+                sector=args.sector,
+                workers=args.workers,
+                daylight_minutes=daylight,
+                log=print,
+            )
+            series = (
+                goes_shade.shade_between(
+                    cube_dir, site.latitude, site.longitude, site.timezone, start, end, args.satellite
+                )
+                if conn is not None
+                else None
+            )
+        except Exception as e:  # a build / shade failure: record it (if storing), then report
+            if conn is None:
+                raise
+            error, series = str(e), None
+        finally:
+            goes.release_pid_file(pid_file)
+        if conn is not None:
+            added = db.insert_satellite_shade(conn, datetime.datetime.now(datetime.UTC), series, error=error)
+            if error is not None:
+                err(f"error: satellite run failed: {error}")
+                return ExitCode.CONNECTION
+            print(f"{added} scan(s) stored")
+        return ExitCode.OK
     finally:
-        goes.release_pid_file(pid_file)
-    if conn is not None:
-        added = db.insert_satellite_shade(conn, datetime.datetime.now(datetime.UTC), series, error=error)
-        conn.close()
-        if error is not None:
-            err(f"error: satellite run failed: {error}")
-            return ExitCode.CONNECTION
-        print(f"{added} scan(s) stored")
-    return ExitCode.OK
+        if conn is not None:
+            conn.close()
 
 
 def _ntfy_server(text: str) -> str:
@@ -1024,7 +1075,7 @@ def socket_ip(name: str) -> str:
     try:
         return socket.gethostbyname(name)
     except OSError as e:
-        raise NotFound(f"can't resolve {name}: {e}")
+        raise NotFound(f"can't resolve {name}: {e}") from e
 
 
 def _positive(kind: Callable[[str], float], minimum: float) -> Callable[[str], float]:
@@ -1034,8 +1085,8 @@ def _positive(kind: Callable[[str], float], minimum: float) -> Callable[[str], f
     def parse(text: str) -> float:
         try:
             value = kind(text)
-        except ValueError:
-            raise argparse.ArgumentTypeError(f"'{text}' isn't a number")
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(f"'{text}' isn't a number") from e
         if value < minimum:
             raise argparse.ArgumentTypeError(f"must be at least {minimum}")
         return value

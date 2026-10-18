@@ -105,6 +105,14 @@ def test_send(fake_ntfy):
         ntfy.send(alerts, "x", priority="loud")
 
 
+def test_headers_outside_latin1_are_replaced_not_raised(fake_ntfy):
+    a = ntfy.post(Alerts(TOPIC, fake_ntfy.url), "x", title="Cold ❄", tags=["❄"], click="https://example.com/❄")
+    assert a.ok
+    (req,) = fake_ntfy.requests
+    headers = req["headers"]
+    assert (headers["Title"], headers["Tags"], headers["Click"]) == ("Cold ?", "?", "https://example.com/?")
+
+
 def test_post_says_how_it_went(fake_ntfy, hangs_up):
     fake_ntfy.status = 429
     a = ntfy.post(Alerts(TOPIC, fake_ntfy.url), "x")

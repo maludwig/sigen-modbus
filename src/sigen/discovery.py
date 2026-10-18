@@ -7,17 +7,20 @@ import socket
 import sys
 from collections.abc import Callable
 
-from sigen.errors import SigenError
+from sigen.errors import ConnectionFailed, SigenError
 from sigen.modbus import ModbusClient
 from sigen.registers import BY_NAME, EMS_MODES
 
 
 def local_subnet() -> ipaddress.IPv4Network:
-    """The /24 around this computer's LAN address (the interface used to reach the internet)."""
+    """The /24 around this computer's LAN address (the interface used to reach the internet). ConnectionFailed
+    without a route out (the network is down), which is when a MAC search runs."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))  # UDP "connect" sends nothing; it just picks the interface
         ip = s.getsockname()[0]
+    except OSError as e:
+        raise ConnectionFailed(f"can't tell this computer's LAN address (is the network up?): {e}") from e
     finally:
         s.close()
     return ipaddress.ip_network(f"{ip}/24", strict=False)
@@ -50,7 +53,7 @@ def parse_ip_range(text: str) -> list[str]:
             return [str(ipaddress.IPv4Address(i)) for i in range(int(start), int(end) + 1)]
         return [str(ipaddress.IPv4Address(text))]
     except ValueError as e:
-        raise argparse.ArgumentTypeError(f"invalid range '{text}': {e}")
+        raise argparse.ArgumentTypeError(f"invalid range '{text}': {e}") from e
 
 
 def _port_open(ip: str, port: int, timeout: float) -> str | None:

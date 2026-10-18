@@ -31,7 +31,7 @@ import psycopg
 
 from sigen import db, glitches, weather
 from sigen.block_reader import BlockReader
-from sigen.errors import ConnectionFailed, DatabaseError, ExitCode, ModbusError
+from sigen.errors import ConnectionFailed, DatabaseError, ExitCode, ModbusError, SigenError
 from sigen.registers import REGISTERS_BY_DEVICE
 
 TRANSIENT_MODBUS_CODES = {6}  # "device busy": worth another try next interval
@@ -250,9 +250,14 @@ def run(
 def _rediscover(rediscover: Callable[[str], str | None], ip: str, err: Callable[[str], None]) -> str | None:
     """Ask `rediscover` where the device is now, after repeated connection
     failures at `ip`, and say what it found. Returns its answer: the new IP,
-    the same one, or None if it's not on the network."""
+    the same one, or None if it's not on the network or the lookup failed (it
+    runs during an outage, when the network itself may be down)."""
     err(f"{ip} keeps failing to connect; looking the device up by its MAC…")
-    new_ip = rediscover(ip)
+    try:
+        new_ip = rediscover(ip)
+    except (SigenError, OSError) as e:
+        err(f"  the lookup failed ({e}); will keep trying the same IP")
+        return None
     if new_ip is None:
         err("  not found on the network; will keep trying the same IP")
     elif new_ip == ip:

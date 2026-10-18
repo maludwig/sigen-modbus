@@ -308,6 +308,13 @@ def test_read_json_rejects_garbage(run, tmp_path):
     assert code == ExitCode.ERROR and "isn't valid JSON" in err
 
 
+def test_read_json_rejects_a_list(run, tmp_path):
+    f = tmp_path / "list.json"
+    f.write_text("[1, 2]", encoding="utf-8")
+    code, _, err = run("read-json", "--data-file", f)
+    assert code == ExitCode.ERROR and "expected a JSON object, got a list" in err
+
+
 # ---------- capture ----------
 def test_capture_writes_utf8_file(run, midsoc_server, tmp_path):
     import re

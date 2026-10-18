@@ -7,9 +7,8 @@ Tables (created by the numbered SQL files in sigen/migrations/):
     raw_plant_register_values, raw_inverter_register_values (since 0004)
                        one row per successful reading: reading_id, started_at, then one column per
                        register, named like it, decoded by type but before the gain. Views
-                       plant_/inverter_register_values scale them (column <name>_<unit>), and the
-                       view register_values keeps the old (reading_id, address, value) shape.
-    register_values_v1 the table register_values was until 0004 (kept until a later migration)
+                       plant_/inverter_register_values scale them (column <name>_<unit>). (The old
+                       register_values table, kept as register_values_v1 by 0004, went in 0012.)
     register_meta      address -> name, type, gain, unit, device; kept in sync with sigen.registers
     open_meteo_weather one row per Open-Meteo fetch: the latest period at 60 or 15 minutes (sigen.weather)
     radar_frames       Environment Canada radar at the site, one good row per 6-minute frame
@@ -100,7 +99,7 @@ def connect(url: str) -> psycopg.Connection:
     try:
         return psycopg.connect(url, autocommit=True, connect_timeout=10)
     except psycopg.Error as e:
-        raise DatabaseError(f"can't connect to {redact(url)}: {_message(e)}", transient=True)
+        raise DatabaseError(f"can't connect to {redact(url)}: {_message(e)}", transient=True) from e
 
 
 def _message(e: Exception) -> str:
@@ -115,7 +114,7 @@ def errors_as(what: str) -> Iterator[None]:
     try:
         yield
     except psycopg.Error as e:
-        raise DatabaseError(f"{what}: {_message(e)}", transient=isinstance(e, psycopg.OperationalError))
+        raise DatabaseError(f"{what}: {_message(e)}", transient=isinstance(e, psycopg.OperationalError)) from e
 
 
 @contextmanager
@@ -304,15 +303,10 @@ def plan_meta_sync(
 
 
 def wide_layout(conn: psycopg.Connection) -> bool:
-    """Whether migration 0004 has switched over: register_values is then a view over the wide tables. (The wide
-    tables alone don't say so: the backfill script creates them, and fills them, while register_values is still
-    the table poll writes to.)"""
-    return conn.execute(
-        "SELECT coalesce((SELECT relkind = 'v' FROM pg_class WHERE oid = to_regclass('register_values')), false)"
-    ).fetchone()[0]
-
-
-_wide = wide_layout
+    """Whether migration 0004 has switched over to the wide tables. (The tables alone don't say so: the backfill
+    script creates them, and fills them, while register_values is still the table poll writes to.) Only the
+    migration-0004 tests ask now: every reader assumes the wide tables."""
+    return 4 in applied_migrations(conn)
 
 
 def has_glitch_column(conn: psycopg.Connection) -> bool:
@@ -336,20 +330,15 @@ def _columns(conn: psycopg.Connection) -> dict[str, dict[str, str]]:
 
 
 def _plan(conn: psycopg.Connection) -> MetaPlan:
-    """plan_meta_sync against the database's register_meta, checking for stored
-    values in the long table before 0004 and the wide tables after."""
+    """plan_meta_sync against the database's register_meta, checking the wide
+    tables for stored values (none before 0004: they don't exist yet)."""
     meta = {
         a: (n, t, g, u, d)
         for a, n, t, g, u, d in conn.execute("SELECT address, name, type, gain, unit, device FROM register_meta")
     }
-    wide = _wide(conn)
-    columns = _columns(conn) if wide else {}
+    columns = _columns(conn)
 
     def has_values(address: int) -> bool:
-        if not wide:  # before 0004: the long table
-            return conn.execute(
-                "SELECT EXISTS (SELECT 1 FROM register_values WHERE address = %s)", (address,)
-            ).fetchone()[0]
         name, device = meta[address][0], meta[address][4]
         if device not in DEVICES or name not in columns[device]:
             return False
@@ -447,15 +436,13 @@ def status(conn: psycopg.Connection, migrations: Sequence[Migration] | None = No
             out["ready"], out["problem"] = False, str(e)
         total, failed = conn.execute("SELECT count(*), count(error) FROM readings").fetchone()
         out["readings"], out["failed_readings"] = total, failed
-        if _wide(conn):  # since 0004: one row per successful reading, per device
-            out["value_rows"] = {
-                d: conn.execute(f"SELECT count(*) FROM {values_table(d)}").fetchone()[0] for d in DEVICES
+        if conn.execute("SELECT to_regclass(%s)", (values_table("plant"),)).fetchone()[0] is not None:  # 0004
+            out["value_rows"] = {  # one row per successful reading, per device
+                d: conn.execute(sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(values_table(d)))).fetchone()[
+                    0
+                ]
+                for d in DEVICES
             }
-        else:
-            estimate = conn.execute(
-                "SELECT greatest(reltuples, 0)::bigint FROM pg_class WHERE oid = 'register_values'::regclass"
-            ).fetchone()[0]
-            out["register_values"], out["register_values_exact"] = _row_count(conn, "register_values", estimate)
         out["last_reading"] = conn.execute(
             "SELECT id, started_at, ended_at, error FROM readings ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
@@ -490,7 +477,7 @@ def status(conn: psycopg.Connection, migrations: Sequence[Migration] | None = No
 
 
 # Each table's row time: when its rows were written, or the nearest thing it has. A table not
-# listed here has no such column (register_meta, register_values_v1).
+# listed here has no such column (register_meta).
 ROW_TIMES = {
     "readings": "started_at",
     "raw_plant_register_values": "started_at",
@@ -531,7 +518,7 @@ def _row_count(conn: psycopg.Connection, table: str, estimate: int) -> tuple[int
     (pg_class.reltuples, 0 until the table is analyzed: hence an exact count below the threshold)."""
     if estimate >= LARGE_TABLE_ROWS:
         return estimate, False
-    return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0], True
+    return conn.execute(sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table))).fetchone()[0], True
 
 
 def table_sizes(conn: psycopg.Connection) -> list[TableSize]:
@@ -549,7 +536,9 @@ def table_sizes(conn: psycopg.Connection) -> list[TableSize]:
             out.append(TableSize(name, total, *_row_count(conn, name, estimate), None, None))
             continue
         rows, last_day = conn.execute(
-            f"SELECT count(*), count(*) FILTER (WHERE {column} > now() - interval '24 hours') FROM {name}"
+            sql.SQL("SELECT count(*), count(*) FILTER (WHERE {} > now() - interval '24 hours') FROM {}").format(
+                sql.Identifier(column), sql.Identifier(name)
+            )
         ).fetchone()
         out.append(TableSize(name, total, rows, True, column, last_day))
     return out
@@ -645,12 +634,12 @@ def insert_reading(
                     (ip, unit_id, poll_id, started_at, ended_at, __version__, error, glitch),
                 ).fetchone()[0]
             if values:
-                query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                insert = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
                     sql.Identifier(values_table(devices.pop())),
                     sql.SQL(", ").join(map(sql.Identifier, ["reading_id", "started_at", *columns])),
                     sql.SQL(", ").join([sql.Placeholder()] * (len(columns) + 2)),
                 )
-                conn.execute(query, [reading_id, started_at, *(value for _, value in values)])
+                conn.execute(insert, [reading_id, started_at, *(value for _, value in values)])
     return reading_id
 
 
@@ -664,12 +653,12 @@ def insert_open_meteo(conn: psycopg.Connection, row: WeatherRow) -> int:
     bad = [c for c in columns if not COLUMN_NAME.match(c)]
     if bad:
         raise ValueError(f"not column names: {bad}")
-    query = sql.SQL("INSERT INTO open_meteo_weather ({}) VALUES ({}) RETURNING id").format(
+    insert = sql.SQL("INSERT INTO open_meteo_weather ({}) VALUES ({}) RETURNING id").format(
         sql.SQL(", ").join(map(sql.Identifier, columns)), sql.SQL(", ").join([sql.Placeholder()] * len(columns))
     )
     with errors_as("storing the Open-Meteo row failed"):
         return conn.execute(
-            query, [row.fetched_at, row.resolution_minutes, row.valid_at, *row.values.values(), row.error]
+            insert, [row.fetched_at, row.resolution_minutes, row.valid_at, *row.values.values(), row.error]
         ).fetchone()[0]
 
 
@@ -782,24 +771,27 @@ def insert_satellite_shade(
     """Store a sigen.goes_shade.ShadeSeries, one row per scan (NaN -> NULL), one good row per scan (ON CONFLICT).
     With `error` set, store a single failed-run row (scan_at NULL) instead. Returns how many good rows were added."""
     columns = ["fetched_at", "scan_at", "sun_elevation_deg", *SATELLITE_SHADE_VALUES, "error"]
-    query = (
-        f"INSERT INTO satellite_shade ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))}) "
-        "ON CONFLICT (scan_at) WHERE error IS NULL DO NOTHING"
-    )
-    clean = lambda v: None if v is None or (isinstance(v, float) and math.isnan(v)) else v
+    insert = sql.SQL(
+        "INSERT INTO satellite_shade ({}) VALUES ({}) ON CONFLICT (scan_at) WHERE error IS NULL DO NOTHING"
+    ).format(sql.SQL(", ").join(map(sql.Identifier, columns)), sql.SQL(", ").join([sql.Placeholder()] * len(columns)))
     added = 0
     with errors_as("storing satellite shade failed"):
         with conn.transaction():
             if error is not None:
-                conn.execute(query, [fetched_at, None, None, *([None] * len(SATELLITE_SHADE_VALUES)), error])
+                conn.execute(insert, [fetched_at, None, None, *([None] * len(SATELLITE_SHADE_VALUES)), error])
             elif series is not None:
                 for i, scan_at in enumerate(series.times):
                     row = [
                         fetched_at,
                         scan_at,
-                        clean(series.sun_elevation[i]),
-                        *[clean(series.column(c)[i]) for c in SATELLITE_SHADE_VALUES],
+                        _nan_to_null(series.sun_elevation[i]),
+                        *[_nan_to_null(series.column(c)[i]) for c in SATELLITE_SHADE_VALUES],
                         None,
                     ]
-                    added += conn.execute(query, row).rowcount
+                    added += conn.execute(insert, row).rowcount
     return added
+
+
+def _nan_to_null(value: float | None) -> float | None:
+    """NaN (numpy's "no value") as None, so it's stored as NULL."""
+    return None if value is None or (isinstance(value, float) and math.isnan(value)) else value
