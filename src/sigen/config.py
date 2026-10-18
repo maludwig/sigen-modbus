@@ -37,6 +37,9 @@ A relative capture directory is relative to the config file's folder.
 Which file: get_config() takes --config if given, else the file named by $SIGEN_CONFIG, else the
 nearest config.json in the current directory or above it (the repo's, from anywhere inside it).
 With none of them the config is empty, and a command that needs a section says where it looked.
+
+`sigen config show/get/set/unset` (sigen.config_edit) reads and changes the file safely: secrets masked, and every
+change checked by parse_config before it's written.
 """
 
 import ipaddress
@@ -262,14 +265,18 @@ def find_config(start: Path | None = None) -> Path | None:
     return None
 
 
-def get_config(path: Path | None = None) -> Config:
-    """The config to use: `path` (--config) if given, else the file named by $SIGEN_CONFIG,
-    else the nearest config.json in the current directory or above it. With none of those, an
-    empty Config whose origin says where it looked. A named file that's missing is exit 9."""
+def config_path(path: Path | None = None) -> Path | None:
+    """Which file get_config reads: `path` (--config) if given, else the file named by $SIGEN_CONFIG, else the
+    nearest config.json in the current directory or above it; None with none of those."""
     if path is None and os.environ.get(CONFIG_ENV, "").strip():
         path = Path(os.environ[CONFIG_ENV].strip())
-    if path is None:
-        path = find_config()
+    return Path(path) if path is not None else find_config()
+
+
+def get_config(path: Path | None = None) -> Config:
+    """The config to use: the file config_path picks, read and checked. With no file, an
+    empty Config whose origin says where it looked. A named file that's missing is exit 9."""
+    path = config_path(path)
     if path is None:
         return Config(
             origin=f"no config file: no --config, ${CONFIG_ENV} isn't set, and there's no "
@@ -285,6 +292,12 @@ def load_config(path: Path | None) -> Config:
     if path is None:
         return Config()
     path = Path(path)  # callers may pass a str
+    return parse_config(read_config_document(path), path)
+
+
+def read_config_document(path: Path) -> dict[str, Any]:
+    """The config file's JSON object, unchecked (`sigen config` edits a file whose values may be wrong). NotFound
+    (exit 9) if it's missing or unreadable; ConfigError (exit 2) if it isn't a JSON object."""
     try:
         doc = read_json_file(path)
     except FileNotFoundError as e:
@@ -295,6 +308,12 @@ def load_config(path: Path | None) -> Config:
         raise ConfigError(f"{path} isn't valid JSON: {e}") from e
     if not isinstance(doc, dict):
         raise ConfigError(f"{path}: expected a JSON object at the top level")
+    return doc
+
+
+def parse_config(doc: dict[str, Any], path: Path) -> Config:
+    """Check a config document (as read from `path`, which relative paths in it are relative to) and build the
+    Config; ConfigError (exit 2) naming the key at fault. Reads no files."""
     known = {"smart_loads", "database", "devices", "site", "alerts", "array", "satellite", "cloud", *COMMAND_SETTINGS}
     unknown = set(doc) - known
     if unknown:

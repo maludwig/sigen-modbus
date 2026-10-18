@@ -168,6 +168,23 @@ def test_linux_find_gives_up_once_everything_settled():
     assert found is None and 1.0 <= waited < 1.2  # not the full timeout: nothing left to wait for
 
 
+def test_linux_find_waits_a_moment_for_entries_the_kernel_hasnt_made_yet():
+    ip = "192.168.1.120"
+    tables = [(0, {}), (0.3, {ip: ("INCOMPLETE", None)}), (0.6, {ip: ("REACHABLE", INVERTER_MAC)})]
+    found, waited, _ = linux_lookup(netlookup._linux_find, tables, INVERTER_MAC, [ip])
+    assert found == ip and 0.6 <= waited < 0.8
+    found, waited, _ = linux_lookup(netlookup._linux_find, [(0, {})], INVERTER_MAC, [ip])
+    assert found is None and 1.0 <= waited < 1.2  # never appeared: given up after the grace, not the timeout
+
+
+def test_neighbours_bad_json_is_a_lookup_failure():
+    def run(argv, **kw):
+        return subprocess.CompletedProcess(argv, 0, stdout="not json")
+
+    with pytest.raises(PlatformNotSupported, match="didn't print JSON"):
+        netlookup.neighbours(run)
+
+
 def test_find_ip_for_mac_with_a_stand_in_lookup():
     table = {"10.0.0.1": "00:11:22:33:44:55", "10.0.0.7": INVERTER_MAC}
     ips = [f"10.0.0.{i}" for i in range(1, 20)]

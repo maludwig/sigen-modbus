@@ -32,6 +32,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from sigen.errors import PlatformNotSupported
 
 LINUX_TIMEOUT = 8.0  # a STALE entry's re-check: 5 s of DELAY, then unicast probes
+ABSENT_GRACE = 1.0  # how long after a poke an address missing from the neighbour table still counts as pending
 CONFIRMED = {"REACHABLE", "PERMANENT", "NOARP"}
 PENDING = {"INCOMPLETE", "DELAY", "PROBE"}
 
@@ -67,8 +68,12 @@ def neighbours(
         out = run(["ip", "-4", "-j", "neigh", "show"], capture_output=True, text=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError) as e:
         raise PlatformNotSupported(f"`ip -4 -j neigh show` failed: {e}") from e
+    try:
+        entries = json.loads(out or "[]")
+    except ValueError as e:
+        raise PlatformNotSupported(f"`ip -4 -j neigh show` didn't print JSON: {e}") from e
     table = {}
-    for entry in json.loads(out or "[]"):
+    for entry in entries:
         if "dst" not in entry:
             continue
         mac = entry.get("lladdr")
@@ -134,11 +139,13 @@ def _linux_find(
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> str | None:
-    """The first of `ips` confirmed (REACHABLE) to have `mac`; a STALE match only counts once the kernel has
-    re-checked it."""
+    """The first of `ips` confirmed (REACHABLE) to have `mac` (already normalized, as normalize_mac gives it); a
+    STALE match only counts once the kernel has re-checked it. An address with no entry yet counts as pending for
+    ABSENT_GRACE seconds, in case the kernel is slow to add the entries the poke asked for."""
     ips = list(ips)
     poke(ips)
-    deadline = monotonic() + timeout
+    start = monotonic()
+    deadline = start + timeout
     while True:
         table = neigh()
         for ip in ips:
@@ -146,6 +153,8 @@ def _linux_find(
             if found == mac and _confirmed(state):
                 return ip
         waiting = PENDING | {"STALE"}  # still being resolved or re-checked
+        if monotonic() < start + ABSENT_GRACE:
+            waiting = waiting | {"absent"}
         unsettled = [ip for ip in ips if _has_flag(table.get(ip, ("absent",))[0], waiting)]
         if not unsettled or monotonic() >= deadline:
             return None

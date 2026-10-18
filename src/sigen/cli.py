@@ -53,6 +53,7 @@ from zoneinfo import ZoneInfo
 from sigen import (
     __version__,
     alerts,
+    config_edit,
     daily,
     dashboard,
     db,
@@ -67,11 +68,21 @@ from sigen import (
 )
 from sigen.block_reader import BlockReader
 from sigen.cloud import CloudClient
-from sigen.config import CONFIG_ENV, CONFIG_NAME, NTFY_SERVER, Cloud, Config, get_config
+from sigen.config import (
+    CONFIG_ENV,
+    CONFIG_NAME,
+    NTFY_SERVER,
+    Cloud,
+    Config,
+    config_path,
+    get_config,
+    parse_config,
+    read_config_document,
+)
 from sigen.control import DEFAULT_JOURNAL, Journal, WriteResult, plan_undo, set_register
 from sigen.data_io import build_document, capture_filename, read_json_file, save_document
 from sigen.discovery import local_hosts, parse_ip_range, scan
-from sigen.errors import ExitCode, NotFound, PlatformNotSupported, SigenError
+from sigen.errors import ConfigError, ExitCode, NotFound, PlatformNotSupported, SigenError
 from sigen.fake_server import FakeSigenServer
 from sigen.modbus import DEFAULT_PORT, DEFAULT_TIMEOUT, ModbusClient
 from sigen.reading import (
@@ -1144,6 +1155,82 @@ def _cloud_client(args: argparse.Namespace) -> tuple[CloudClient, Cloud]:
     return CloudClient.from_config(cloud), cloud
 
 
+def _config_file(args: argparse.Namespace) -> Path:
+    """The file `sigen config` works on: --config, else $SIGEN_CONFIG, else the nearest config.json. Not loaded
+    first, so a file with a bad value can still be fixed. NotFound (exit 9) with none."""
+    path = config_path(args.config)
+    if path is None:
+        raise NotFound(f"no config file: give --config FILE, set ${CONFIG_ENV}, or run where a {CONFIG_NAME} is")
+    return path
+
+
+def cmd_config_show(args: argparse.Namespace) -> int:
+    """`sigen config show`: the whole file as JSON with its secrets masked, then (on stderr) whether it passes
+    sigen's checks. USAGE if it doesn't."""
+    path = _config_file(args)
+    doc = read_config_document(path)
+    print(json.dumps(config_edit.mask("", doc), indent=2, ensure_ascii=False))
+    try:
+        parse_config(doc, path)
+    except ConfigError as e:
+        err(f"{path}: has a problem: {e}")
+        return ExitCode.USAGE
+    err(f"{path}: OK")
+    return ExitCode.OK
+
+
+def cmd_config_get(args: argparse.Namespace) -> int:
+    """`sigen config get KEY`: one value (a string bare, else JSON; a section as JSON), a secret masked unless
+    --reveal. NOT_FOUND if the key isn't set."""
+    path = _config_file(args)
+    value = config_edit.get(read_config_document(path), args.key)
+    if value is config_edit.MISSING:
+        err(f"error: {args.key} isn't set in {path}")
+        return ExitCode.NOT_FOUND
+    print(config_edit.shown(value if args.reveal else config_edit.mask(args.key, value)))
+    return ExitCode.OK
+
+
+def cmd_config_set(args: argparse.Namespace) -> int:
+    """`sigen config set KEY VALUE` (or --stdin): set one value; see _change for the checks and the write."""
+    if args.stdin == (args.value is not None):
+        err("error: give VALUE, or --stdin to read it from standard input (one, not both)")
+        return ExitCode.USAGE
+    text = sys.stdin.readline().rstrip("\r\n") if args.stdin else args.value
+    if args.key in config_edit.SECRETS and not args.stdin:
+        err("note: a secret on the command line stays in your shell history; --stdin keeps it out")
+    path = _config_file(args)
+    doc = read_config_document(path)
+    return _change(args, path, doc, config_edit.set_value(doc, args.key, config_edit.parse_value(text, args.string)))
+
+
+def cmd_config_unset(args: argparse.Namespace) -> int:
+    """`sigen config unset KEY`: remove one value or section; see _change."""
+    path = _config_file(args)
+    doc = read_config_document(path)
+    return _change(args, path, doc, config_edit.unset(doc, args.key))
+
+
+def _change(args: argparse.Namespace, path: Path, doc: dict, new: dict) -> int:
+    """Check the changed document `new` with sigen's own rules (ConfigError, exit 2, and nothing written if it
+    fails), then write it (backup first), saying what changed with secrets masked. DRY_RUN with --dry-run."""
+    before, after = (config_edit.shown(config_edit.mask(args.key, config_edit.get(d, args.key))) for d in (doc, new))
+    if new == doc:
+        print(f"{args.key} is already {after}; nothing to write")
+        return ExitCode.OK
+    try:
+        parse_config(new, path)
+    except ConfigError as e:
+        raise ConfigError(f"{e}; nothing written") from e
+    change = f"{args.key}: {before} -> {after}"
+    if args.dry_run:
+        print(f"{change} (checked; dry run, not written)")
+        return ExitCode.DRY_RUN
+    backup = config_edit.write_document(path, new)
+    print(f"{change}\nWritten to {path} (the old file is {backup.name}).")
+    return ExitCode.OK
+
+
 def cmd_cloud_login(args: argparse.Namespace) -> int:
     """`sigen cloud login`: prompt for the username, password and any
     emailed code, log in once (no retries), and save the tokens to
@@ -1522,6 +1609,71 @@ def build_parser() -> argparse.ArgumentParser:
     clq.add_argument("--device-type", type=int, default=4, help="2 AIO, 3 inverter, 4 battery, 8 gateway (default: 4)")
     clq.add_argument("--json", action="store_true", help="print the raw JSON")
     clq.set_defaults(func=cmd_cloud_query)
+
+    cf = sub.add_parser(
+        "config",
+        formatter_class=fmt,
+        epilog=EXIT_CODE_HELP,
+        help="show, read and change the config file (secrets masked, every change checked)",
+        description="Read and change the config file without hand-editing its JSON. Keys are dotted paths "
+        "(poll.interval, devices.inverter.ip, smart_loads.0.name). A VALUE is JSON (15, true, "
+        '\'{"ip": "192.168.1.100"}\'); anything that isn\'t JSON is a string, so `site.timezone America/Edmonton` '
+        "needs no quotes. A change is checked with the same rules sigen loads the file by, and refused (exit 2) "
+        "before anything is written; then the file is replaced atomically, after a copy of the old one to "
+        "<name>.bak, keeping its owner and mode. Secrets (database passwords, the ntfy topic, the cloud's keys) "
+        "are masked in everything printed.",
+    )
+    cfsub = cf.add_subparsers(dest="config_command", required=True, metavar="CONFIG_COMMAND")
+    config_file_help = (
+        f"the config file (default: the file named by ${CONFIG_ENV}, else the nearest {CONFIG_NAME} "
+        "in the current directory or above it)"
+    )
+    cfs = cfsub.add_parser(
+        "show",
+        formatter_class=fmt,
+        epilog=EXIT_CODE_HELP,
+        help="print the whole file, secrets masked, and whether it passes the checks",
+        description="Print the config file as JSON with its secrets masked; then, on stderr, whether it passes "
+        "sigen's checks (exit 2 and the problem if it doesn't).",
+    )
+    cfg = cfsub.add_parser(
+        "get",
+        formatter_class=fmt,
+        epilog=EXIT_CODE_HELP,
+        help="print one value or section",
+        description="Print one value (a string bare, anything else as JSON) or a whole section. A secret is "
+        "masked unless --reveal. Exit 9 if the key isn't set.",
+    )
+    cfg.add_argument("key", metavar="KEY", help="e.g. poll.interval, or a section like poll")
+    cfg.add_argument("--reveal", action="store_true", help="print secrets as they are")
+    cfst = cfsub.add_parser(
+        "set",
+        formatter_class=fmt,
+        epilog=EXIT_CODE_HELP,
+        help="set one value (checked before it's written)",
+        description="Set KEY to VALUE, making any missing sections on the way. Refused (exit 2), with nothing "
+        "written, if the result wouldn't load. Prints the old and the new value (secrets masked).",
+    )
+    cfst.add_argument("key", metavar="KEY", help="e.g. poll.interval")
+    cfst.add_argument("value", metavar="VALUE", nargs="?", help="JSON, else a string; leave out with --stdin")
+    cfst.add_argument(
+        "--stdin", action="store_true", help="read VALUE from the first line of standard input (for secrets)"
+    )
+    cfst.add_argument("--string", action="store_true", help="take VALUE as a string even if it looks like JSON")
+    cfu = cfsub.add_parser(
+        "unset",
+        formatter_class=fmt,
+        epilog=EXIT_CODE_HELP,
+        help="remove one value or section (checked before it's written)",
+        description="Remove KEY (a value, a list item or a whole section). Refused (exit 2), with nothing "
+        "written, if the result wouldn't load.",
+    )
+    cfu.add_argument("key", metavar="KEY", help="e.g. poll.radar")
+    for cp, func in ((cfs, cmd_config_show), (cfg, cmd_config_get), (cfst, cmd_config_set), (cfu, cmd_config_unset)):
+        cp.add_argument("--config", metavar="FILE", type=Path, help=config_file_help)
+        if cp in (cfst, cfu):
+            cp.add_argument("--dry-run", action="store_true", help="check and show the change, write nothing (exit 8)")
+        cp.set_defaults(func=func)
 
     sy = sub.add_parser(
         "sync",
