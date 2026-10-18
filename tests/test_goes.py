@@ -1,5 +1,6 @@
 """sigen.goes, sigen.goes_shade and `sigen satellite`, with NOAA faked: synthetic full-disk files on disk, a fake
 bucket listing."""
+
 import datetime
 import json
 import math
@@ -18,9 +19,13 @@ from sigen.errors import ConnectionFailed, ExitCode, PreconditionFailed, SigenEr
 from sigen.weather import Response
 
 LAT, LON, TZ = 51.0443, -114.0631, "America/Edmonton"
-PROJECTION = {"semi_major_axis": np.array([6378137.0]), "semi_minor_axis": np.array([6356752.31414]),
-              "perspective_point_height": np.array([35786023.0]), "longitude_of_projection_origin": np.array([-137.0])}
-STEP = 56e-6                          # radians, ~2 km at the sub-satellite point
+PROJECTION = {
+    "semi_major_axis": np.array([6378137.0]),
+    "semi_minor_axis": np.array([6356752.31414]),
+    "perspective_point_height": np.array([35786023.0]),
+    "longitude_of_projection_origin": np.array([-137.0]),
+}
+STEP = 56e-6  # radians, ~2 km at the sub-satellite point
 NY, NX = 80, 120
 KM = 50
 UTC = datetime.timezone.utc
@@ -35,7 +40,7 @@ def write_scan(path, value, shift=0.0):
     """A small 'full-disk' file around the site: scan angles, projection, three 2-D variables and a 1-D one."""
     x0, y0 = site_angles()
     x = x0 + shift + STEP * (np.arange(NX) - NX // 2)
-    y = y0 - STEP * (np.arange(NY) - NY // 2)                   # rows run north to south, like the real files
+    y = y0 - STEP * (np.arange(NY) - NY // 2)  # rows run north to south, like the real files
     rng = np.random.default_rng(value)
     with h5py.File(path, "w") as f:
         for name, axis in (("x", x), ("y", y)):
@@ -43,21 +48,28 @@ def write_scan(path, value, shift=0.0):
             d.attrs["scale_factor"], d.attrs["add_offset"] = np.array([1.0]), np.array([0.0])
         proj = f.create_dataset("goes_imager_projection", data=np.int32(0))
         proj.attrs.update(PROJECTION)
-        acm = f.create_dataset("ACM", data=rng.integers(0, 4, (NY, NX), dtype=np.uint8), chunks=(16, NX),
-                               compression="gzip")
+        acm = f.create_dataset(
+            "ACM", data=rng.integers(0, 4, (NY, NX), dtype=np.uint8), chunks=(16, NX), compression="gzip"
+        )
         acm.attrs["flag_values"] = np.array([0, 1, 2, 3], dtype=np.uint8)
         acm.attrs["NAME"] = "dropped: netCDF bookkeeping"
-        prob = f.create_dataset("Cloud_Probabilities", data=rng.integers(0, 65535, (NY, NX), dtype=np.uint16),
-                                chunks=(8, NX), compression="gzip")
+        prob = f.create_dataset(
+            "Cloud_Probabilities",
+            data=rng.integers(0, 65535, (NY, NX), dtype=np.uint16),
+            chunks=(8, NX),
+            compression="gzip",
+        )
         prob.attrs["scale_factor"], prob.attrs["_FillValue"] = np.array([1.5e-5]), np.array([65535], np.uint16)
         f.create_dataset("DQF", data=np.full((NY, NX), value, dtype=np.uint8))
-        f.create_dataset("band_id", data=np.array([14], dtype=np.uint8))   # not 2-D: not stored
+        f.create_dataset("band_id", data=np.array([14], dtype=np.uint8))  # not 2-D: not stored
     return path
 
 
 def key_for(product, t):
-    return (f"ABI-L2-{product}/{t:%Y}/{t.timetuple().tm_yday:03d}/{t:%H}/"
-            f"OR_ABI-L2-{product}-M6_G18_s{t:%Y}{t.timetuple().tm_yday:03d}{t:%H%M%S}0_e0_c0.nc")
+    return (
+        f"ABI-L2-{product}/{t:%Y}/{t.timetuple().tm_yday:03d}/{t:%H}/"
+        f"OR_ABI-L2-{product}-M6_G18_s{t:%Y}{t.timetuple().tm_yday:03d}{t:%H%M%S}0_e0_c0.nc"
+    )
 
 
 class FakeBucket:
@@ -72,7 +84,7 @@ class FakeBucket:
 
     def lister(self, satellite, prefix):
         self.listed.append(prefix)
-        return [(k, 1000) for k in reversed(self.files) if k.startswith(prefix)]       # deliberately unsorted
+        return [(k, 1000) for k in reversed(self.files) if k.startswith(prefix)]  # deliberately unsorted
 
     def opener(self, url):
         key = url.split(".amazonaws.com/", 1)[1]
@@ -83,9 +95,20 @@ DAY_SCANS = [datetime.datetime(2026, 10, 10, h, m, 22, tzinfo=UTC) for h, m in (
 
 
 def build(tmp_path, bucket, **kw):
-    params = dict(lat=LAT, lon=LON, timezone=TZ, start=datetime.datetime(2026, 10, 10, 6, tzinfo=UTC),
-                  end=datetime.datetime(2026, 10, 11, 6, tzinfo=UTC), cube_dir=tmp_path / "cubes", km=KM,
-                  products=["ACM"], workers=1, daylight_minutes=None, lister=bucket.lister, opener=bucket.opener)
+    params = dict(
+        lat=LAT,
+        lon=LON,
+        timezone=TZ,
+        start=datetime.datetime(2026, 10, 10, 6, tzinfo=UTC),
+        end=datetime.datetime(2026, 10, 11, 6, tzinfo=UTC),
+        cube_dir=tmp_path / "cubes",
+        km=KM,
+        products=["ACM"],
+        workers=1,
+        daylight_minutes=None,
+        lister=bucket.lister,
+        opener=bucket.opener,
+    )
     params.update(kw)
     return goes.build_cubes(**params)
 
@@ -93,18 +116,23 @@ def build(tmp_path, bucket, **kw):
 # ---------- names, times, listing ----------
 def test_scan_start_and_nanoseconds():
     t = goes.scan_start("ABI-L2-ACMF/2026/283/19/OR_ABI-L2-ACMF-M6_G18_s20262831900224_e2026_c2026.nc")
-    assert t == datetime.datetime(2026, 10, 10, 19, 0, 22, tzinfo=UTC)          # day 283 of 2026; tenths ignored
-    assert goes.nanoseconds(t) == int(t.timestamp()) * 10 ** 9
+    assert t == datetime.datetime(2026, 10, 10, 19, 0, 22, tzinfo=UTC)  # day 283 of 2026; tenths ignored
+    assert goes.nanoseconds(t) == int(t.timestamp()) * 10**9
     with pytest.raises(ValueError):
         goes.scan_start("no-time-here.nc")
 
 
 def listing(keys, token=None):
     contents = "".join(f"<Contents><Key>{k}</Key><Size>{s}</Size></Contents>" for k, s in keys)
-    more = f"<IsTruncated>true</IsTruncated><NextContinuationToken>{token}</NextContinuationToken>" if token \
+    more = (
+        f"<IsTruncated>true</IsTruncated><NextContinuationToken>{token}</NextContinuationToken>"
+        if token
         else "<IsTruncated>false</IsTruncated>"
-    return Response(200, f'<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{contents}{more}'
-                         f"</ListBucketResult>")
+    )
+    return Response(
+        200,
+        f'<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{contents}{more}' f"</ListBucketResult>",
+    )
 
 
 def test_list_keys_follows_pages_and_fails_cleanly():
@@ -114,6 +142,7 @@ def test_list_keys_follows_pages_and_fails_cleanly():
     def get(url, params):
         asked.append(params.get("continuation-token"))
         return pages[params.get("continuation-token")]
+
     assert goes.list_keys("18", "ABI-L2-ACMF/2026/283/19/", get) == [("a.nc", 1), ("b.nc", 2)]
     assert asked == [None, "T"]
     with pytest.raises(ConnectionFailed, match="HTTP 503"):
@@ -132,7 +161,7 @@ def test_sun_rise_set_close_to_pvlib():
     # pvlib's SPA for the site that day: 13:51:41 and 00:55:56 UTC
     assert abs(sunrise - datetime.datetime(2026, 10, 10, 13, 51, 41, tzinfo=UTC)) < datetime.timedelta(minutes=2)
     assert abs(sunset - datetime.datetime(2026, 10, 11, 0, 55, 56, tzinfo=UTC)) < datetime.timedelta(minutes=2)
-    assert goes.sun_rise_set(datetime.date(2026, 12, 21), 80.0, 0.0) is None          # polar night
+    assert goes.sun_rise_set(datetime.date(2026, 12, 21), 80.0, 0.0) is None  # polar night
     assert goes.in_daylight(datetime.datetime(2026, 12, 21, 3, tzinfo=UTC), 80.0, 0.0, "UTC", 60)
 
 
@@ -147,7 +176,7 @@ def test_build_cubes_cuts_the_box_in_time_order(tmp_path):
     with h5py.File(write_scan(tmp_path / "ref.nc", 0), "r") as ref:
         rows, cols = goes.box_window(goes.FixedGrid.from_netcdf(ref), LAT, LON, KM)
     with h5py.File(path, "r") as cube:
-        assert sorted(k for k in cube) == ["ACM", "Cloud_Probabilities", "DQF", "time", "x", "y"]   # no band_id
+        assert sorted(k for k in cube) == ["ACM", "Cloud_Probabilities", "DQF", "time", "x", "y"]  # no band_id
         assert list(cube["time"][:]) == [goes.nanoseconds(t) for t in sorted(DAY_SCANS)]
         assert (cube.attrs["row0"], cube.attrs["col0"]) == (rows.start, cols.start)
         assert cube.attrs["center_lat"] == LAT and cube.attrs["box_half_km"] == KM
@@ -161,12 +190,12 @@ def test_build_cubes_cuts_the_box_in_time_order(tmp_path):
                 assert np.array_equal(cube["Cloud_Probabilities"][i], src["Cloud_Probabilities"][rows, cols])
                 assert int(src["DQF"][0, 0]) == n
     (again,) = build(tmp_path, bucket)
-    assert again.added == 0                                    # already there: nothing fetched
+    assert again.added == 0  # already there: nothing fetched
 
 
 def test_daylight_skips_night_scans(tmp_path):
     (result,) = build(tmp_path, FakeBucket(tmp_path, DAY_SCANS), daylight_minutes=60)
-    assert (result.scans, result.added) == (2, 2)               # 01:00 MDT is out; 13:00 and 13:10 MDT are in
+    assert (result.scans, result.added) == (2, 2)  # 01:00 MDT is out; 13:00 and 13:10 MDT are in
 
 
 def test_a_shifted_grid_is_refused(tmp_path):
@@ -185,49 +214,51 @@ def cube_of(tmp_path):
 
 def test_a_failed_append_leaves_the_cube_as_it_was(tmp_path, monkeypatch):
     bucket = FakeBucket(tmp_path, DAY_SCANS)
-    build(tmp_path, bucket, end=datetime.datetime(2026, 10, 10, 12, tzinfo=UTC))      # just the 07:00 scan
+    build(tmp_path, bucket, end=datetime.datetime(2026, 10, 10, 12, tzinfo=UTC))  # just the 07:00 scan
     before = cube_of(tmp_path).read_bytes()
     real = goes.append_box
 
     def append_box(path, box, t0, *rest):
-        assert path.name.endswith(".h5.tmp")                   # never the cube itself
-        if t0 == DAY_SCANS[1]:                                 # 19:10, after 19:00 went into the copy
+        assert path.name.endswith(".h5.tmp")  # never the cube itself
+        if t0 == DAY_SCANS[1]:  # 19:10, after 19:00 went into the copy
             raise RuntimeError("disk full")
         real(path, box, t0, *rest)
+
     monkeypatch.setattr(goes, "append_box", append_box)
     with pytest.raises(RuntimeError, match="disk full"):
         build(tmp_path, bucket)
-    assert cube_of(tmp_path).read_bytes() == before            # 19:00 isn't half-in: the copy was dropped
+    assert cube_of(tmp_path).read_bytes() == before  # 19:00 isn't half-in: the copy was dropped
     assert sorted(p.name for p in (tmp_path / "cubes").iterdir()) == ["goes18_ACMF_2026-10-10.h5"]
 
 
 def test_a_network_failure_keeps_the_scans_before_it(tmp_path):
     bucket = FakeBucket(tmp_path, DAY_SCANS)
-    broken = key_for("ACMF", DAY_SCANS[1])                     # 19:10: the last in time order
+    broken = key_for("ACMF", DAY_SCANS[1])  # 19:10: the last in time order
 
     def opener(url):
         if url.endswith(broken):
             raise OSError("connection reset")
         return bucket.opener(url)
+
     with pytest.raises(ConnectionFailed, match="connection reset"):
         build(tmp_path, bucket, opener=opener)
-    with h5py.File(cube_of(tmp_path), "r") as cube:            # 07:00 and 19:00 are whole: swapped in
+    with h5py.File(cube_of(tmp_path), "r") as cube:  # 07:00 and 19:00 are whole: swapped in
         assert list(cube["time"][:]) == [goes.nanoseconds(t) for t in sorted(DAY_SCANS)[:2]]
     (result,) = build(tmp_path, bucket)
-    assert result.added == 1                                   # the next run only fetches 19:10
+    assert result.added == 1  # the next run only fetches 19:10
 
 
 def test_swap_in_waits_for_a_reader(tmp_path):
     path, tmp = tmp_path / "c.h5", tmp_path / "c.h5.tmp"
     path.write_bytes(b"old")
     tmp.write_bytes(b"new")
-    reader = open(path, "rb")                                  # on Windows, an open file can't be replaced
+    reader = open(path, "rb")  # on Windows, an open file can't be replaced
     closer = threading.Timer(0.2, reader.close)
     closer.start()
     goes.swap_in(tmp, path, tries=100, wait=0.02)
     closer.join()
     assert path.read_bytes() == b"new" and not tmp.exists()
-    if sys.platform == "win32":                                # held for good: it gives up, and says where the scans are
+    if sys.platform == "win32":  # held for good: it gives up, and says where the scans are
         tmp.write_bytes(b"newer")
         with open(path, "rb"):
             with pytest.raises(SigenError, match="c.h5.tmp"):
@@ -248,17 +279,17 @@ def test_process_alive():
 
 def test_one_run_at_a_time(tmp_path):
     pid_file = tmp_path / goes.PID_FILE
-    other = os.getppid()                                       # alive: whatever started this test process
+    other = os.getppid()  # alive: whatever started this test process
     pid_file.write_text(f"{other}\n", encoding="ascii")
     with pytest.raises(PreconditionFailed, match=rf"already running \(process {other}"):
         goes.claim_pid_file(tmp_path)
     old = time.time() - goes.PID_STALE.total_seconds() - 60
-    os.utime(pid_file, (old, old))                             # too old to trust: the number may be someone else's
+    os.utime(pid_file, (old, old))  # too old to trust: the number may be someone else's
     assert goes.claim_pid_file(tmp_path) == pid_file and pid_file.read_text().strip() == str(os.getpid())
-    for stale in (f"{dead_pid()}\n", "", "not a pid"):        # a finished run, or a half-written file
+    for stale in (f"{dead_pid()}\n", "", "not a pid"):  # a finished run, or a half-written file
         pid_file.write_text(stale, encoding="ascii")
         assert goes.claim_pid_file(tmp_path) == pid_file
-    goes.release_pid_file(pid_file, pid=other)                # not that process's: stays
+    goes.release_pid_file(pid_file, pid=other)  # not that process's: stays
     assert pid_file.exists()
     goes.release_pid_file(pid_file)
     assert not pid_file.exists()
@@ -266,31 +297,33 @@ def test_one_run_at_a_time(tmp_path):
 
 # ---------- the shade series ----------
 def test_cloud_transmission_and_toward_sun():
-    assert goes_shade.cloud_transmission(0.0, 0.5) == pytest.approx(1.0)        # no cloud: all of it
+    assert goes_shade.cloud_transmission(0.0, 0.5) == pytest.approx(1.0)  # no cloud: all of it
     thick = goes_shade.cloud_transmission(np.array([1.0, 10.0, 100.0]), 0.5)
-    assert 1 > thick[0] > thick[1] > thick[2] > 0                               # thicker lets less through
-    lat, lon = goes_shade.toward_sun(LAT, LON, 180.0, 111.2)                    # 111.2 km due south
+    assert 1 > thick[0] > thick[1] > thick[2] > 0  # thicker lets less through
+    lat, lon = goes_shade.toward_sun(LAT, LON, 180.0, 111.2)  # 111.2 km due south
     assert lat == pytest.approx(LAT - 1) and lon == pytest.approx(LON)
 
 
 def test_shade_day_samples_the_cubes(tmp_path):
-    build(tmp_path, FakeBucket(tmp_path, DAY_SCANS))                            # ACMF only, three scans
+    build(tmp_path, FakeBucket(tmp_path, DAY_SCANS))  # ACMF only, three scans
     day = datetime.date(2026, 10, 10)
     s = goes_shade.shade_day(tmp_path / "cubes", LAT, LON, day)
     assert s.times == [t + goes_shade.SAMPLE_DELAY for t in sorted(DAY_SCANS)]
-    assert "prob_0km" in s.columns and "trans_0km" not in s.columns           # no CODF cube: no sun through cloud
+    assert "prob_0km" in s.columns and "trans_0km" not in s.columns  # no CODF cube: no sun through cloud
     assert all(math.isnan(v) for v in s.column("trans_top"))
-    with h5py.File(cube_of(tmp_path), "r") as cube:                             # overhead: the 3×3 around the site
+    with h5py.File(cube_of(tmp_path), "r") as cube:  # overhead: the 3×3 around the site
         grid = goes.FixedGrid(dict(cube.attrs), cube["x"][:], cube["y"][:])
         row, col = grid.pixel(LAT, LON)
-        raw = cube["Cloud_Probabilities"][1, row - 1:row + 2, col - 1:col + 2]
+        raw = cube["Cloud_Probabilities"][1, row - 1 : row + 2, col - 1 : col + 2]
         expected = goes_shade.decode(raw, cube["Cloud_Probabilities"].attrs)
     assert s.column("prob_0km")[1] == pytest.approx(np.nanmean(expected))
     # 01:00 MDT: the sun is down, so only the pixel overhead is sampled
     assert not math.isnan(s.column("prob_0km")[0]) and math.isnan(s.column("prob_2km")[0])
     assert s.sun_elevation[0] < 0 < s.sun_elevation[1]
     window = goes_shade.shade_between(tmp_path / "cubes", LAT, LON, TZ, DAY_SCANS[2], DAY_SCANS[1])  # 19:00 to 19:10
-    assert window.times == [DAY_SCANS[2] + goes_shade.SAMPLE_DELAY] and window.column("prob_0km") == [s.column("prob_0km")[1]]
+    assert window.times == [DAY_SCANS[2] + goes_shade.SAMPLE_DELAY] and window.column("prob_0km") == [
+        s.column("prob_0km")[1]
+    ]
     assert goes_shade.shade_day(tmp_path / "cubes", LAT, LON, day + datetime.timedelta(days=1)).times == []
 
 
@@ -307,16 +340,44 @@ def test_cli_builds_a_day(run, tmp_path, site_config, monkeypatch):
     monkeypatch.setattr(goes, "list_keys", bucket.lister)
     real_fetch = goes.fetch_box
     monkeypatch.setattr(goes, "fetch_box", lambda *a, opener=None: real_fetch(*a, opener=bucket.opener))
-    code, out, err = run("satellite", "--config", site_config, "--day", "2026-10-10", "--all-day", "--km", KM,
-                         "--workers", 1, "--products", "ACM", "--cube-dir", tmp_path / "c")
+    code, out, err = run(
+        "satellite",
+        "--config",
+        site_config,
+        "--day",
+        "2026-10-10",
+        "--all-day",
+        "--km",
+        KM,
+        "--workers",
+        1,
+        "--products",
+        "ACM",
+        "--cube-dir",
+        tmp_path / "c",
+    )
     assert code == ExitCode.OK and "ACMF: 3 scans, 3 added" in out and "America/Edmonton" in err
     # The local day 2026-10-10 MDT is 06:00Z to 06:00Z next day: listed hour by hour.
     assert bucket.listed[0] == "ABI-L2-ACMF/2026/283/06/" and len(bucket.listed) == 24
     assert (tmp_path / "c" / "goes18_ACMF_2026-10-10.h5").exists()
-    assert not (tmp_path / "c" / goes.PID_FILE).exists()                       # released at the end
-    code, _, err = run("satellite", "--config", site_config, "--day", "2026-10-10", "--all-day", "--km", KM,
-                       "--workers", 1, "--products", "ACM")                    # no --cube-dir: next to the config
-    assert code == ExitCode.OK and (tmp_path / "captures" / "satellite" / "cubes" / "goes18_ACMF_2026-10-10.h5").exists()
+    assert not (tmp_path / "c" / goes.PID_FILE).exists()  # released at the end
+    code, _, err = run(
+        "satellite",
+        "--config",
+        site_config,
+        "--day",
+        "2026-10-10",
+        "--all-day",
+        "--km",
+        KM,
+        "--workers",
+        1,
+        "--products",
+        "ACM",
+    )  # no --cube-dir: next to the config
+    assert (
+        code == ExitCode.OK and (tmp_path / "captures" / "satellite" / "cubes" / "goes18_ACMF_2026-10-10.h5").exists()
+    )
 
 
 def test_cli_refuses_while_another_run_is_going(run, tmp_path, site_config):
@@ -324,7 +385,7 @@ def test_cli_refuses_while_another_run_is_going(run, tmp_path, site_config):
     (tmp_path / "c" / goes.PID_FILE).write_text(f"{os.getppid()}\n", encoding="ascii")
     code, _, err = run("satellite", "--config", site_config, "--day", "2026-10-10", "--cube-dir", tmp_path / "c")
     assert code == ExitCode.PRECONDITION and "already running" in err
-    assert (tmp_path / "c" / goes.PID_FILE).read_text().strip() == str(os.getppid())   # not ours to remove
+    assert (tmp_path / "c" / goes.PID_FILE).read_text().strip() == str(os.getppid())  # not ours to remove
 
 
 def test_cli_usage_and_network_errors(run, tmp_path, site_config, monkeypatch):
@@ -332,11 +393,12 @@ def test_cli_usage_and_network_errors(run, tmp_path, site_config, monkeypatch):
     assert code == ExitCode.USAGE and "--start and --end together" in err
     code, _, err = run("satellite", "--config", site_config, "--day", "10/10/2026")
     assert code == ExitCode.USAGE and "isn't a date" in err
-    code, _, err = run("satellite", "--day", "2026-10-10")                     # the test config has no site
+    code, _, err = run("satellite", "--day", "2026-10-10")  # the test config has no site
     assert code == ExitCode.USAGE and "no site" in err
 
     def unreachable(satellite, prefix):
         raise ConnectionFailed("listing failed: no response")
+
     monkeypatch.setattr(goes, "list_keys", unreachable)
     code, _, err = run("satellite", "--config", site_config, "--day", "2026-10-10", "--cube-dir", tmp_path / "c")
     assert code == ExitCode.CONNECTION and "listing failed" in err

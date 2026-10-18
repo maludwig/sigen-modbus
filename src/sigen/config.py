@@ -38,6 +38,7 @@ Which file: get_config() takes --config if given, else the file named by $SIGEN_
 nearest config.json in the current directory or above it (the repo's, from anywhere inside it).
 With none of them the config is empty, and a command that needs a section says where it looked.
 """
+
 import ipaddress
 import os
 import re
@@ -53,9 +54,16 @@ SMART_LOAD_SLOTS = range(1, 25)
 # Each command's settings: name -> kind ("bool"; "number", low, high; "integer", low, high; "text"; "dir": a
 # directory, relative to the config file's folder). The names are the command's options without the dashes.
 COMMAND_SETTINGS: Dict[str, Dict[str, tuple]] = {
-    "poll": {"interval": ("number", 1, 86400), "offset": ("number", 0, 86400), "weather": ("bool",),
-             "radar": ("bool",), "alerts": ("bool",), "cloud": ("bool",),
-             "capture_open_meteo_weather": ("dir",), "capture_radar": ("dir",)},
+    "poll": {
+        "interval": ("number", 1, 86400),
+        "offset": ("number", 0, 86400),
+        "weather": ("bool",),
+        "radar": ("bool",),
+        "alerts": ("bool",),
+        "cloud": ("bool",),
+        "capture_open_meteo_weather": ("dir",),
+        "capture_radar": ("dir",),
+    },
     "dashboard": {"host": ("text",), "port": ("integer", 1, 65535), "reload": ("bool",)},
 }
 
@@ -63,43 +71,43 @@ COMMAND_SETTINGS: Dict[str, Dict[str, tuple]] = {
 @dataclass(frozen=True)
 class Device:
     ip: Optional[str] = None
-    mac: Optional[str] = None      # normalised, e.g. "02:ab:cd:ef:00:01"
-    units: Tuple[int, ...] = ()    # inverter Modbus unit IDs behind this IP (the plant is always 247)
+    mac: Optional[str] = None  # normalised, e.g. "02:ab:cd:ef:00:01"
+    units: Tuple[int, ...] = ()  # inverter Modbus unit IDs behind this IP (the plant is always 247)
 
 
 @dataclass(frozen=True)
 class Site:
     latitude: float
     longitude: float
-    timezone: str                  # IANA name, e.g. "America/Edmonton"
+    timezone: str  # IANA name, e.g. "America/Edmonton"
     altitude_m: Optional[float] = None
 
 
 @dataclass(frozen=True)
 class Panel:
-    kw: float                      # rated (STC) power of one panel
-    gamma_pct_per_c: float         # power temperature coefficient, % per °C (negative)
-    mount: str                     # pvlib SAPM cell-temperature parameter set, e.g. "close_mount_glass_glass"
+    kw: float  # rated (STC) power of one panel
+    gamma_pct_per_c: float  # power temperature coefficient, % per °C (negative)
+    mount: str  # pvlib SAPM cell-temperature parameter set, e.g. "close_mount_glass_glass"
 
 
 @dataclass(frozen=True)
 class Face:
-    tilt: float                    # degrees from horizontal
-    azimuth: float                 # degrees clockwise from true north
+    tilt: float  # degrees from horizontal
+    azimuth: float  # degrees clockwise from true north
 
 
 @dataclass(frozen=True)
 class PVString:
     panels: int
-    face: str                      # a key of Array.faces
+    face: str  # a key of Array.faces
 
 
 @dataclass(frozen=True)
 class Array:
     panel: Panel
-    albedo: float                  # ground reflectance
+    albedo: float  # ground reflectance
     faces: Dict[str, Face]
-    strings: Dict[int, PVString]   # PV input number (1 = PV1) -> its string
+    strings: Dict[int, PVString]  # PV input number (1 = PV1) -> its string
 
     def kw(self, string: int) -> float:
         return self.strings[string].panels * self.panel.kw
@@ -111,7 +119,7 @@ DEFAULT_CUBE_DIR = Path("captures/satellite/cubes")
 
 @dataclass(frozen=True)
 class Alerts:
-    ntfy_topic: str = field(repr=False)        # repr=False: anyone who knows it can read and send
+    ntfy_topic: str = field(repr=False)  # repr=False: anyone who knows it can read and send
     ntfy_server: str = DEFAULT_NTFY_SERVER
 
 
@@ -125,30 +133,31 @@ class Cloud:
     NOT here. The app's two static constants -- the password key and the OAuth client credential -- live here rather
     than in the code, so they are not committed to the public repo; they are "public" (the same for every install,
     extractable from the app) but kept out of the source on purpose. `sigen cloud login` creates the token file."""
-    token_file: Path                           # absolute (resolved against the config folder)
-    base_url: str = DEFAULT_CLOUD_BASE_URL      # the region's API host (api-us, api-eu, …)
-    app_base_url: str = DEFAULT_CLOUD_APP_URL   # the region's web-app host, sent as origin/referer (app-us, …)
-    station_id: Optional[str] = None           # for device queries, e.g. the heater poll
-    batteries: Tuple[str, ...] = ()            # battery pack SNs to poll, e.g. ("110AXX1234000A", "110AXX1234000B")
-    obfuscation_key: Optional[str] = None      # the app's static 16-byte AES password key; needed only by login
-    client_basic: Optional[str] = None         # the app's OAuth client Basic credential (base64); login + refresh
+
+    token_file: Path  # absolute (resolved against the config folder)
+    base_url: str = DEFAULT_CLOUD_BASE_URL  # the region's API host (api-us, api-eu, …)
+    app_base_url: str = DEFAULT_CLOUD_APP_URL  # the region's web-app host, sent as origin/referer (app-us, …)
+    station_id: Optional[str] = None  # for device queries, e.g. the heater poll
+    batteries: Tuple[str, ...] = ()  # battery pack SNs to poll, e.g. ("110AXX1234000A", "110AXX1234000B")
+    obfuscation_key: Optional[str] = None  # the app's static 16-byte AES password key; needed only by login
+    client_basic: Optional[str] = None  # the app's OAuth client Basic credential (base64); login + refresh
 
 
 @dataclass(frozen=True)
 class Config:
-    smart_load_names: Dict[int, str] = field(default_factory=dict)   # slot -> name
-    database_url: Optional[str] = field(default=None, repr=False)    # repr=False: holds a password
-    devices: Dict[str, Device] = field(default_factory=dict)          # "inverter", "loadhub", …
+    smart_load_names: Dict[int, str] = field(default_factory=dict)  # slot -> name
+    database_url: Optional[str] = field(default=None, repr=False)  # repr=False: holds a password
+    devices: Dict[str, Device] = field(default_factory=dict)  # "inverter", "loadhub", …
     site: Optional[Site] = None
-    test_database_url: Optional[str] = field(default=None, repr=False)   # only tests/test_db.py uses it
+    test_database_url: Optional[str] = field(default=None, repr=False)  # only tests/test_db.py uses it
     alerts: Optional[Alerts] = None
     array: Optional[Array] = None
-    satellite_cube_dir: Optional[Path] = None   # satellite.cube_dir, absolute; None without a config file
-    cloud: Optional["Cloud"] = None              # the "cloud" section; None without one
-    commands: Dict[str, Dict[str, Any]] = field(default_factory=dict)   # "poll" -> {"weather": True, …} (as given)
+    satellite_cube_dir: Optional[Path] = None  # satellite.cube_dir, absolute; None without a config file
+    cloud: Optional["Cloud"] = None  # the "cloud" section; None without one
+    commands: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # "poll" -> {"weather": True, …} (as given)
     # Where it came from, for messages: the file, "--no-config", or where get_config looked.
     origin: Optional[str] = field(default=None, compare=False)
-    path: Optional[Path] = field(default=None, compare=False)        # the file, if it came from one
+    path: Optional[Path] = field(default=None, compare=False)  # the file, if it came from one
 
     def _from(self) -> str:
         return f" ({self.origin})" if self.origin else ""
@@ -160,40 +169,49 @@ class Config:
 
     def require_database_url(self) -> str:
         if not self.database_url:
-            raise ConfigError(f'the config has no database URL{self._from()}; '
-                              f'add "database": {{"url": "postgresql://…"}}')
+            raise ConfigError(
+                f"the config has no database URL{self._from()}; " f'add "database": {{"url": "postgresql://…"}}'
+            )
         return self.database_url
 
     def require_site(self) -> Site:
         if self.site is None:
-            raise ConfigError(f'the config has no site{self._from()}; add "site": {{"latitude": …, '
-                              f'"longitude": …, "timezone": "America/Edmonton"}}')
+            raise ConfigError(
+                f'the config has no site{self._from()}; add "site": {{"latitude": …, '
+                f'"longitude": …, "timezone": "America/Edmonton"}}'
+            )
         return self.site
 
     def require_alerts(self) -> Alerts:
         if self.alerts is None:
-            raise ConfigError(f'the config has no alerts{self._from()}; add "alerts": {{"ntfy_topic": "…"}} '
-                              f'(a long random name: on a public ntfy server anyone who knows it can read it)')
+            raise ConfigError(
+                f'the config has no alerts{self._from()}; add "alerts": {{"ntfy_topic": "…"}} '
+                f"(a long random name: on a public ntfy server anyone who knows it can read it)"
+            )
         return self.alerts
 
     def require_cloud(self) -> "Cloud":
         if self.cloud is None:
-            raise ConfigError(f'the config has no cloud section{self._from()}; add '
-                              f'"cloud": {{"token_file": "scratch/cloud_token.json", "station_id": "…"}}, '
-                              f'then run `sigen cloud login`')
+            raise ConfigError(
+                f"the config has no cloud section{self._from()}; add "
+                f'"cloud": {{"token_file": "scratch/cloud_token.json", "station_id": "…"}}, '
+                f"then run `sigen cloud login`"
+            )
         return self.cloud
 
     def require_array(self) -> Array:
         if self.array is None:
-            raise ConfigError(f'the config has no array{self._from()}; add "array": {{"panel": …, "albedo": …, '
-                              f'"faces": …, "strings": …}} (see the README\'s config example)')
+            raise ConfigError(
+                f'the config has no array{self._from()}; add "array": {{"panel": …, "albedo": …, '
+                f'"faces": …, "strings": …}} (see the README\'s config example)'
+            )
         return self.array
 
     def register_alias(self, register_name: str) -> Optional[str]:
         """'plant_smart_load_7_power' -> 'Basement Plugs', if slot 7 is named."""
         prefix = "plant_smart_load_"
         if register_name.startswith(prefix):
-            slot = register_name[len(prefix):].split("_", 1)[0]
+            slot = register_name[len(prefix) :].split("_", 1)[0]
             if slot.isdigit():
                 return self.smart_load_names.get(int(slot))
         return None
@@ -222,8 +240,10 @@ def get_config(path: Optional[Path] = None) -> Config:
     if path is None:
         path = find_config()
     if path is None:
-        return Config(origin=f"no config file: no --config, ${CONFIG_ENV} isn't set, and there's no "
-                             f"{CONFIG_NAME} in {Path.cwd()} or above it")
+        return Config(
+            origin=f"no config file: no --config, ${CONFIG_ENV} isn't set, and there's no "
+            f"{CONFIG_NAME} in {Path.cwd()} or above it"
+        )
     return load_config(path)
 
 
@@ -240,8 +260,7 @@ def load_config(path: Optional[Path]) -> Config:
         raise ConfigError(f"{path} isn't valid JSON: {e}")
     if not isinstance(doc, dict):
         raise ConfigError(f"{path}: expected a JSON object at the top level")
-    known = {"smart_loads", "database", "devices", "site", "alerts", "array", "satellite", "cloud",
-             *COMMAND_SETTINGS}
+    known = {"smart_loads", "database", "devices", "site", "alerts", "array", "satellite", "cloud", *COMMAND_SETTINGS}
     unknown = set(doc) - known
     if unknown:
         raise ConfigError(f"{path}: unknown key(s) {', '.join(sorted(unknown))}; known: {', '.join(sorted(known))}")
@@ -255,9 +274,11 @@ def load_config(path: Optional[Path]) -> Config:
         if not isinstance(spec, dict) or not spec or set(spec) - {"ip", "mac", "units"}:
             raise ConfigError(f'{where} must be {{"ip": "…", "mac": "…", "units": [1]}} (any of them)')
         units = spec.get("units", [])
-        if (not isinstance(units, list)
-                or any(isinstance(u, bool) or not isinstance(u, int) or not 1 <= u <= 246 for u in units)
-                or len(set(units)) != len(units)):
+        if (
+            not isinstance(units, list)
+            or any(isinstance(u, bool) or not isinstance(u, int) or not 1 <= u <= 246 for u in units)
+            or len(set(units)) != len(units)
+        ):
             raise ConfigError(f"{where}.units must be a list of distinct unit IDs from 1 to 246, got {units!r}")
         ip = spec.get("ip")
         if ip is not None:
@@ -300,14 +321,20 @@ def load_config(path: Optional[Path]) -> Config:
         if slot in names:
             raise ConfigError(f"{where}: slot {slot} is named twice")
         names[slot] = name.strip()
-    return Config(smart_load_names=names, database_url=database_url, devices=devices,
-                  site=_site(path, doc["site"]) if "site" in doc else None, test_database_url=test_database_url,
-                  alerts=_alerts(path, doc["alerts"]) if "alerts" in doc else None,
-                  array=_array(path, doc["array"]) if "array" in doc else None,
-                  satellite_cube_dir=_cube_dir(path, doc.get("satellite", {})),
-                  cloud=_cloud(path, doc["cloud"]) if "cloud" in doc else None,
-                  commands={c: _command_settings(path, c, doc[c]) for c in COMMAND_SETTINGS if c in doc},
-                  origin=str(path), path=Path(path))
+    return Config(
+        smart_load_names=names,
+        database_url=database_url,
+        devices=devices,
+        site=_site(path, doc["site"]) if "site" in doc else None,
+        test_database_url=test_database_url,
+        alerts=_alerts(path, doc["alerts"]) if "alerts" in doc else None,
+        array=_array(path, doc["array"]) if "array" in doc else None,
+        satellite_cube_dir=_cube_dir(path, doc.get("satellite", {})),
+        cloud=_cloud(path, doc["cloud"]) if "cloud" in doc else None,
+        commands={c: _command_settings(path, c, doc[c]) for c in COMMAND_SETTINGS if c in doc},
+        origin=str(path),
+        path=Path(path),
+    )
 
 
 def _cloud(path: Path, spec) -> "Cloud":
@@ -315,10 +342,16 @@ def _cloud(path: Path, spec) -> "Cloud":
     station_id, batteries (all optional); and the app's two static constants, obfuscation_key and client_basic
     (optional, kept here instead of in the code so they are not committed -- login needs both, refresh needs
     client_basic)."""
-    if not isinstance(spec, dict) or "token_file" not in spec or set(spec) - {
-            "token_file", "base_url", "app_base_url", "station_id", "batteries", "obfuscation_key", "client_basic"}:
-        raise ConfigError(f'{path}: "cloud" must be {{"token_file": "scratch/cloud_token.json"}}, optionally with '
-                          f'"base_url", "app_base_url", "station_id", "batteries", "obfuscation_key", "client_basic"')
+    if (
+        not isinstance(spec, dict)
+        or "token_file" not in spec
+        or set(spec)
+        - {"token_file", "base_url", "app_base_url", "station_id", "batteries", "obfuscation_key", "client_basic"}
+    ):
+        raise ConfigError(
+            f'{path}: "cloud" must be {{"token_file": "scratch/cloud_token.json"}}, optionally with '
+            f'"base_url", "app_base_url", "station_id", "batteries", "obfuscation_key", "client_basic"'
+        )
     token_file = spec["token_file"]
     if not isinstance(token_file, str) or not token_file.strip():
         raise ConfigError(f"{path}: cloud.token_file must be a non-empty string")
@@ -327,23 +360,28 @@ def _cloud(path: Path, spec) -> "Cloud":
         raise ConfigError(f'{path}: cloud.base_url must be a URL like "{DEFAULT_CLOUD_BASE_URL}", got {base_url!r}')
     app_base_url = spec.get("app_base_url", DEFAULT_CLOUD_APP_URL)
     if not isinstance(app_base_url, str) or not re.match(r"^https?://", app_base_url):
-        raise ConfigError(f'{path}: cloud.app_base_url must be a URL like "{DEFAULT_CLOUD_APP_URL}", got '
-                          f'{app_base_url!r}')
+        raise ConfigError(
+            f'{path}: cloud.app_base_url must be a URL like "{DEFAULT_CLOUD_APP_URL}", got ' f"{app_base_url!r}"
+        )
     station = spec.get("station_id")
     if station is not None and (not isinstance(station, str) or not station.strip()):
         raise ConfigError(f"{path}: cloud.station_id must be a non-empty string")
     batteries = spec.get("batteries", [])
-    if (not isinstance(batteries, list) or any(not isinstance(b, str) or not b.strip() for b in batteries)):
+    if not isinstance(batteries, list) or any(not isinstance(b, str) or not b.strip() for b in batteries):
         raise ConfigError(f"{path}: cloud.batteries must be a list of pack SN strings")
     for name in ("obfuscation_key", "client_basic"):
         value = spec.get(name)
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ConfigError(f"{path}: cloud.{name} must be a non-empty string")
-    return Cloud(token_file=Path(path).resolve().parent / token_file.strip(), base_url=base_url.rstrip("/"),
-                 app_base_url=app_base_url.rstrip("/"),
-                 station_id=station.strip() if station else None, batteries=tuple(batteries),
-                 obfuscation_key=spec["obfuscation_key"].strip() if spec.get("obfuscation_key") else None,
-                 client_basic=spec["client_basic"].strip() if spec.get("client_basic") else None)
+    return Cloud(
+        token_file=Path(path).resolve().parent / token_file.strip(),
+        base_url=base_url.rstrip("/"),
+        app_base_url=app_base_url.rstrip("/"),
+        station_id=station.strip() if station else None,
+        batteries=tuple(batteries),
+        obfuscation_key=spec["obfuscation_key"].strip() if spec.get("obfuscation_key") else None,
+        client_basic=spec["client_basic"].strip() if spec.get("client_basic") else None,
+    )
 
 
 def _command_settings(path: Path, command: str, spec) -> Dict[str, Any]:
@@ -353,8 +391,9 @@ def _command_settings(path: Path, command: str, spec) -> Dict[str, Any]:
         raise ConfigError(f'{path}: "{command}" must be an object of settings, e.g. {{"{next(iter(kinds))}": …}}')
     unknown = set(spec) - set(kinds)
     if unknown:
-        raise ConfigError(f"{path}: {command}: unknown setting(s) {', '.join(sorted(unknown))}; "
-                          f"known: {', '.join(kinds)}")
+        raise ConfigError(
+            f"{path}: {command}: unknown setting(s) {', '.join(sorted(unknown))}; " f"known: {', '.join(kinds)}"
+        )
     out = {}
     for name, value in spec.items():
         kind, where = kinds[name], f"{command}.{name}"
@@ -381,12 +420,12 @@ def _cube_dir(path: Path, spec) -> Path:
         raise ConfigError(f'{path}: "satellite" must be {{"cube_dir": "captures/satellite/cubes"}}')
     cube_dir = spec.get("cube_dir", str(DEFAULT_CUBE_DIR))
     if not isinstance(cube_dir, str) or not cube_dir.strip():
-        raise ConfigError(f"{path}: satellite.cube_dir must be a directory, e.g. \"captures/satellite/cubes\"")
+        raise ConfigError(f'{path}: satellite.cube_dir must be a directory, e.g. "captures/satellite/cubes"')
     return Path(path).resolve().parent / cube_dir.strip()
 
 
-NTFY_TOPIC = re.compile(r"[-_A-Za-z0-9]{1,64}")      # what ntfy accepts as a topic name
-NTFY_SERVER = re.compile(r"https?://[^/\s]+/?")       # a server's base URL, e.g. https://ntfy.sh
+NTFY_TOPIC = re.compile(r"[-_A-Za-z0-9]{1,64}")  # what ntfy accepts as a topic name
+NTFY_SERVER = re.compile(r"https?://[^/\s]+/?")  # a server's base URL, e.g. https://ntfy.sh
 
 
 def _alerts(path: Path, spec) -> Alerts:
@@ -414,20 +453,27 @@ def _array(path: Path, spec) -> Array:
         raise ConfigError(f"{path}: {shape}")
     p = spec["panel"]
     if not isinstance(p, dict) or set(p) != {"kw", "gamma_pct_per_c", "mount"}:
-        raise ConfigError(f'{path}: array.panel must be {{"kw": 0.5, "gamma_pct_per_c": -0.28, '
-                          f'"mount": "close_mount_glass_glass"}}')
+        raise ConfigError(
+            f'{path}: array.panel must be {{"kw": 0.5, "gamma_pct_per_c": -0.28, '
+            f'"mount": "close_mount_glass_glass"}}'
+        )
     if not isinstance(p["mount"], str) or not p["mount"]:
         raise ConfigError(f"{path}: array.panel.mount must be a pvlib SAPM parameter set name")
-    panel = Panel(_number(path, "array.panel.kw", p["kw"], 0.01, 5),
-                  _number(path, "array.panel.gamma_pct_per_c", p["gamma_pct_per_c"], -2, 0), p["mount"])
+    panel = Panel(
+        _number(path, "array.panel.kw", p["kw"], 0.01, 5),
+        _number(path, "array.panel.gamma_pct_per_c", p["gamma_pct_per_c"], -2, 0),
+        p["mount"],
+    )
     faces = {}
     if not isinstance(spec["faces"], dict) or not spec["faces"]:
         raise ConfigError(f'{path}: array.faces must be {{"name": {{"tilt": 20, "azimuth": 180}}, …}}')
     for name, f in spec["faces"].items():
         if not isinstance(f, dict) or set(f) != {"tilt", "azimuth"}:
             raise ConfigError(f'{path}: array.faces.{name} must be {{"tilt": …, "azimuth": …}}')
-        faces[name] = Face(_number(path, f"array.faces.{name}.tilt", f["tilt"], 0, 90),
-                           _number(path, f"array.faces.{name}.azimuth", f["azimuth"], 0, 360))
+        faces[name] = Face(
+            _number(path, f"array.faces.{name}.tilt", f["tilt"], 0, 90),
+            _number(path, f"array.faces.{name}.azimuth", f["azimuth"], 0, 360),
+        )
     strings = {}
     if not isinstance(spec["strings"], dict) or not spec["strings"]:
         raise ConfigError(f'{path}: array.strings must be {{"1": {{"panels": 9, "face": "…"}}, …}}')
@@ -446,10 +492,15 @@ def _array(path: Path, spec) -> Array:
 
 
 def _site(path: Path, spec) -> Site:
-    shape = ('"site" must be {"latitude": 51.04, "longitude": -114.06, "timezone": "America/Edmonton"}, optionally '
-             'with "altitude_m"')
-    if not isinstance(spec, dict) or not {"latitude", "longitude", "timezone"} <= set(spec) \
-            or set(spec) - {"latitude", "longitude", "timezone", "altitude_m"}:
+    shape = (
+        '"site" must be {"latitude": 51.04, "longitude": -114.06, "timezone": "America/Edmonton"}, optionally '
+        'with "altitude_m"'
+    )
+    if (
+        not isinstance(spec, dict)
+        or not {"latitude", "longitude", "timezone"} <= set(spec)
+        or set(spec) - {"latitude", "longitude", "timezone", "altitude_m"}
+    ):
         raise ConfigError(f"{path}: {shape}")
     for key, limit in (("latitude", 90), ("longitude", 180)):
         value = spec[key]

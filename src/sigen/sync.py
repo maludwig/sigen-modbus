@@ -22,6 +22,7 @@ Rules, so a sync is always safe to re-run:
 
 The window is half-open [start, end), both UTC.
 """
+
 import datetime
 import ipaddress
 import json
@@ -48,6 +49,7 @@ class Syncable:
     """A standalone table sigen can copy: the column a window filters on, the self-assigned id (dropped on import, so
     the local database makes its own), the natural key that means "already have this row", and a predicate that
     selects the good rows (the only ones worth copying)."""
+
     time_column: str
     identity: str
     key: Tuple[str, ...]
@@ -69,7 +71,7 @@ STANDALONE_KINDS: Dict[str, List[str]] = {
     "satellite": ["satellite_shade"],
 }
 READINGS_KIND = "readings"
-KINDS: List[str] = [*STANDALONE_KINDS, READINGS_KIND]      # every selectable kind, in a stable order
+KINDS: List[str] = [*STANDALONE_KINDS, READINGS_KIND]  # every selectable kind, in a stable order
 
 
 def resolve_kinds(selected: Optional[List[str]]) -> List[str]:
@@ -122,7 +124,9 @@ def export_rows(conn, table: str, start: datetime.datetime, end: datetime.dateti
         rows = conn.execute(
             f'SELECT {collist} FROM "{table}" '
             f'WHERE ({spec.good}) AND "{spec.time_column}" >= %s AND "{spec.time_column}" < %s '
-            f'ORDER BY "{spec.time_column}"', (start, end)).fetchall()
+            f'ORDER BY "{spec.time_column}"',
+            (start, end),
+        ).fetchall()
     return {"table": table, "columns": columns, "rows": [[_jsonable(v) for v in row] for row in rows]}
 
 
@@ -133,14 +137,19 @@ def export_readings(conn, start: datetime.datetime, end: datetime.datetime) -> d
     with db.errors_as("exporting readings"):
         readings = conn.execute(
             f'SELECT id, poll_id, {", ".join(READING_COLS)} FROM readings '
-            f'WHERE error IS NULL AND started_at >= %s AND started_at < %s ORDER BY poll_id, started_at',
-            (start, end)).fetchall()
+            f"WHERE error IS NULL AND started_at >= %s AND started_at < %s ORDER BY poll_id, started_at",
+            (start, end),
+        ).fetchall()
         raw: Dict[str, Dict[int, list]] = {}
         for table in (RAW_PLANT, RAW_INVERTER):
             collist = ", ".join(f'"{c}"' for c in manifest[table])
-            raw[table] = {row[0]: list(row[1:]) for row in conn.execute(
-                f'SELECT reading_id, {collist} FROM "{table}" WHERE started_at >= %s AND started_at < %s',
-                (start, end))}
+            raw[table] = {
+                row[0]: list(row[1:])
+                for row in conn.execute(
+                    f'SELECT reading_id, {collist} FROM "{table}" WHERE started_at >= %s AND started_at < %s',
+                    (start, end),
+                )
+            }
     polls: Dict[int, List[dict]] = {}
     for row in readings:
         reading_id, poll_id = row[0], row[1]
@@ -157,9 +166,14 @@ def export_readings(conn, start: datetime.datetime, end: datetime.datetime) -> d
 
 
 def _columns(conn, table: str) -> List[str]:
-    return [r[0] for r in conn.execute(
-        "SELECT column_name FROM information_schema.columns "
-        "WHERE table_schema = current_schema() AND table_name = %s ORDER BY ordinal_position", (table,))]
+    return [
+        r[0]
+        for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s ORDER BY ordinal_position",
+            (table,),
+        )
+    ]
 
 
 def _register_columns(conn, table: str) -> List[str]:
@@ -182,12 +196,15 @@ def check_schema(conn, peer_url: str) -> None:
         raise SchemaNotReady("the local database isn't fully migrated; run `sigen db migrate` first")
     remote = {int(v): c for v, c in _get(peer_url, "/sync/schema").get("applied", {}).items()}
     if remote != code:
-        raise SchemaNotReady(f"the peer at {peer_url} is on a different set of migrations; bring both to the same "
-                             f"version with `sigen db migrate` before syncing")
+        raise SchemaNotReady(
+            f"the peer at {peer_url} is on a different set of migrations; bring both to the same "
+            f"version with `sigen db migrate` before syncing"
+        )
 
 
-def sync_kind(conn, peer_url: str, kind: str, start, end, dry_run: bool,
-              out: Callable[[str], None] = print) -> Tuple[int, int]:
+def sync_kind(
+    conn, peer_url: str, kind: str, start, end, dry_run: bool, out: Callable[[str], None] = print
+) -> Tuple[int, int]:
     """Sync one kind; returns (imported, already-present)."""
     if kind == READINGS_KIND:
         return sync_readings(conn, peer_url, start, end, dry_run, out)
@@ -198,8 +215,9 @@ def sync_kind(conn, peer_url: str, kind: str, start, end, dry_run: bool,
     return imported, present
 
 
-def sync_standalone(conn, peer_url: str, table: str, start, end, dry_run: bool,
-                    out: Callable[[str], None] = print) -> Tuple[int, int]:
+def sync_standalone(
+    conn, peer_url: str, table: str, start, end, dry_run: bool, out: Callable[[str], None] = print
+) -> Tuple[int, int]:
     """Pull a standalone `table` for [start, end) and insert the rows we don't already have."""
     spec = SYNCABLE[table]
     body = _get(peer_url, "/sync/rows", {"table": table, "start": iso(start), "end": iso(end)})
@@ -214,7 +232,7 @@ def sync_standalone(conn, peer_url: str, table: str, start, end, dry_run: bool,
         if key in have:
             skipped += 1
             continue
-        have.add(key)                                    # don't import the same key twice within one batch
+        have.add(key)  # don't import the same key twice within one batch
         to_insert.append([fn(v) for fn, v in zip(coerce, row)])
     if to_insert and not dry_run:
         collist = ", ".join(f'"{c}"' for c in columns)
@@ -225,15 +243,16 @@ def sync_standalone(conn, peer_url: str, table: str, start, end, dry_run: bool,
     return len(to_insert), skipped
 
 
-def sync_readings(conn, peer_url: str, start, end, dry_run: bool,
-                  out: Callable[[str], None] = print) -> Tuple[int, int]:
+def sync_readings(
+    conn, peer_url: str, start, end, dry_run: bool, out: Callable[[str], None] = print
+) -> Tuple[int, int]:
     """Pull the readings cluster for [start, end): a fresh local poll_id per poll, the database assigning reading
     ids, raw rows relinked by nesting. Whole window in one transaction."""
     body = _get(peer_url, "/sync/readings", {"start": iso(start), "end": iso(end)})
     manifest = body["columns"]
     _check_manifest(conn, manifest)
     have = _present_reading_keys(conn, start, end)
-    counts = [0, 0]                                      # [imported, already-present]
+    counts = [0, 0]  # [imported, already-present]
 
     def process():
         for poll in body["polls"]:
@@ -262,47 +281,67 @@ def _insert_reading(conn, reading: dict, poll_id: int, manifest: Dict[str, List[
     new_id = conn.execute(
         "INSERT INTO readings (ip_addr, started_at, ended_at, version, error, unit_id, poll_id, glitch) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-        (ipaddress.ip_address(reading["ip_addr"]), started_at, parse_iso(reading["ended_at"]), reading["version"],
-         reading["error"], reading["unit_id"], poll_id, reading["glitch"])).fetchone()[0]
+        (
+            ipaddress.ip_address(reading["ip_addr"]),
+            started_at,
+            parse_iso(reading["ended_at"]),
+            reading["version"],
+            reading["error"],
+            reading["unit_id"],
+            poll_id,
+            reading["glitch"],
+        ),
+    ).fetchone()[0]
     for table in (RAW_PLANT, RAW_INVERTER):
         if table in reading:
             cols = manifest[table]
             collist = ", ".join(f'"{c}"' for c in cols)
             places = ", ".join(["%s"] * len(cols))
-            conn.execute(f'INSERT INTO "{table}" (reading_id, started_at, {collist}) VALUES (%s, %s, {places})',
-                         [new_id, started_at, *reading[table]])
+            conn.execute(
+                f'INSERT INTO "{table}" (reading_id, started_at, {collist}) VALUES (%s, %s, {places})',
+                [new_id, started_at, *reading[table]],
+            )
             break
 
 
 def _check_manifest(conn, manifest: Dict[str, List[str]]) -> None:
     for table in (RAW_PLANT, RAW_INVERTER):
         if manifest.get(table) != _register_columns(conn, table):
-            raise SyncError(f"the peer's {table} columns don't match this database's -- both must be on the same "
-                            f"migrations (they passed the schema check, so this shouldn't happen)")
+            raise SyncError(
+                f"the peer's {table} columns don't match this database's -- both must be on the same "
+                f"migrations (they passed the schema check, so this shouldn't happen)"
+            )
 
 
 def _present_keys(conn, table: str, spec: Syncable, start, end) -> set:
     cols = ", ".join(f'"{c}"' for c in spec.key)
     with db.errors_as(f"reading existing {table}"):
-        rows = conn.execute(f'SELECT {cols} FROM "{table}" '
-                            f'WHERE "{spec.time_column}" >= %s AND "{spec.time_column}" < %s',
-                            (start, end)).fetchall()
+        rows = conn.execute(
+            f'SELECT {cols} FROM "{table}" ' f'WHERE "{spec.time_column}" >= %s AND "{spec.time_column}" < %s',
+            (start, end),
+        ).fetchall()
     return {tuple(_key(v) for v in row) for row in rows}
 
 
 def _present_reading_keys(conn, start, end) -> set:
     with db.errors_as("reading existing readings"):
-        rows = conn.execute("SELECT unit_id, started_at FROM readings WHERE started_at >= %s AND started_at < %s",
-                            (start, end)).fetchall()
+        rows = conn.execute(
+            "SELECT unit_id, started_at FROM readings WHERE started_at >= %s AND started_at < %s", (start, end)
+        ).fetchall()
     return {(unit_id, _key(started_at)) for unit_id, started_at in rows}
 
 
 def _coercers(conn, table: str, columns: List[str]) -> List[Callable]:
     """One coercer per column: JSON hands timestamps back as ISO strings and inet as plain strings, so turn those
     into the types the local schema stores; every other type comes back ready to insert."""
-    types = {r[0]: r[1] for r in conn.execute(
-        "SELECT column_name, data_type FROM information_schema.columns "
-        "WHERE table_schema = current_schema() AND table_name = %s", (table,))}
+    types = {
+        r[0]: r[1]
+        for r in conn.execute(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s",
+            (table,),
+        )
+    }
 
     def to_ts(value):
         return None if value is None else parse_iso(value)
@@ -339,8 +378,10 @@ def _key(value):
 
 
 def _report(out: Callable[[str], None], what: str, imported: int, skipped: int, dry_run: bool) -> None:
-    out(f"  {what}: {imported} to import, {skipped} already present"
-        + (" (dry run, nothing written)" if dry_run else ""))
+    out(
+        f"  {what}: {imported} to import, {skipped} already present"
+        + (" (dry run, nothing written)" if dry_run else "")
+    )
 
 
 def _get(peer_url: str, path: str, params: Optional[dict] = None) -> dict:

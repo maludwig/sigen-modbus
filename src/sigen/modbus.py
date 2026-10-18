@@ -4,6 +4,7 @@ Supports function 03 (read holding), 04 (read input), 06 (write single register)
 and 16 (write multiple registers). Errors are raised as sigen.errors exceptions
 so callers get a meaningful exit code.
 """
+
 import socket
 import struct
 from typing import List
@@ -18,12 +19,13 @@ DEFAULT_TIMEOUT = 3.0
 class ModbusClient:
     """Use as a context manager so the socket is always closed:
 
-        with ModbusClient("192.168.1.100") as c:
-            words = c.read("input", 30014, 1)
+    with ModbusClient("192.168.1.100") as c:
+        words = c.read("input", 30014, 1)
     """
 
-    def __init__(self, host: str, port: int = DEFAULT_PORT, unit: int = PLANT_UNIT_ID,
-                 timeout: float = DEFAULT_TIMEOUT):
+    def __init__(
+        self, host: str, port: int = DEFAULT_PORT, unit: int = PLANT_UNIT_ID, timeout: float = DEFAULT_TIMEOUT
+    ):
         self.host, self.port, self.unit, self.timeout = host, port, unit, timeout
         self._sock = None
         self._tid = 0
@@ -78,7 +80,7 @@ class ModbusClient:
         nbytes = body[1]
         if nbytes != count * 2 or len(body) < 2 + nbytes:
             raise ConnectionFailed(f"short reply reading {address}: {nbytes} bytes for {count} registers")
-        return list(struct.unpack(f">{count}H", body[2:2 + nbytes]))
+        return list(struct.unpack(f">{count}H", body[2 : 2 + nbytes]))
 
     def write(self, address: int, words: List[int]) -> None:
         """Write holding registers: function 06 for one word, 16 for several."""

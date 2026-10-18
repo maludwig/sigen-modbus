@@ -1,4 +1,5 @@
 """Finding a SigenStor on the local network."""
+
 import argparse
 import concurrent.futures
 import ipaddress
@@ -15,7 +16,7 @@ def local_subnet() -> ipaddress.IPv4Network:
     """The /24 around this computer's LAN address (the interface used to reach the internet)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(("8.8.8.8", 80))   # UDP "connect" sends nothing; it just picks the interface
+        s.connect(("8.8.8.8", 80))  # UDP "connect" sends nothing; it just picks the interface
         ip = s.getsockname()[0]
     finally:
         s.close()
@@ -31,7 +32,7 @@ def parse_ip_range(text: str) -> List[str]:
         if "-" in text:
             start_s, end_s = (p.strip() for p in text.split("-", 1))
             start = ipaddress.IPv4Address(start_s)
-            if "." not in end_s:   # short form: 192.168.1.170-180
+            if "." not in end_s:  # short form: 192.168.1.170-180
                 end_s = start_s.rsplit(".", 1)[0] + "." + end_s
             end = ipaddress.IPv4Address(end_s)
             if end < start:
@@ -61,8 +62,15 @@ def looks_like_sigen(ip: str, port: int, unit: int, timeout: float) -> bool:
         return False
 
 
-def scan(ips: List[str], *, port: int, unit: int, timeout: float, scan_timeout: float,
-         log=lambda msg: print(msg, file=sys.stderr)) -> List[str]:
+def scan(
+    ips: List[str],
+    *,
+    port: int,
+    unit: int,
+    timeout: float,
+    scan_timeout: float,
+    log=lambda msg: print(msg, file=sys.stderr),
+) -> List[str]:
     """Return every address in `ips` that answers like a SigenStor."""
     label = f"{ips[0]} – {ips[-1]}" if len(ips) > 1 else ips[0]
     log(f"Scanning {label} ({len(ips)} address{'es' if len(ips) != 1 else ''}) for Modbus TCP on port {port}…")

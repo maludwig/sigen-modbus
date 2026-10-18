@@ -1,5 +1,6 @@
 """Database code that doesn't need a database: value encoding, migration files, meta sync
 planning, password redaction, the poll schedule, and `db query`'s table."""
+
 import decimal
 import json
 
@@ -15,14 +16,17 @@ from sigen.registers import BY_NAME, PLANT_REGISTERS
 
 
 # ---------- stored values ----------
-@pytest.mark.parametrize("name,words,expected", [
-    ("plant_ess_power", [65535, 63536], -2000),                          # s32: decoded, sign kept, no gain
-    ("plant_ess_soc", [945], 945),                                        # u16
-    ("plant_system_timezone", [65116], -420),                             # s16
-    ("plant_ess_max_charging_limit", [65535, 65535], 0xFFFFFFFF),         # u32 "not set" fits as-is
-    ("plant_accumulated_pv_energy", [0, 0, 0, 3066], 3066),               # u64
-    ("plant_accumulated_pv_energy", [65535, 65535, 65535, 65535], -1),    # u64 "not set" -> -1
-])
+@pytest.mark.parametrize(
+    "name,words,expected",
+    [
+        ("plant_ess_power", [65535, 63536], -2000),  # s32: decoded, sign kept, no gain
+        ("plant_ess_soc", [945], 945),  # u16
+        ("plant_system_timezone", [65116], -420),  # s16
+        ("plant_ess_max_charging_limit", [65535, 65535], 0xFFFFFFFF),  # u32 "not set" fits as-is
+        ("plant_accumulated_pv_energy", [0, 0, 0, 3066], 3066),  # u64
+        ("plant_accumulated_pv_energy", [65535, 65535, 65535, 65535], -1),  # u64 "not set" -> -1
+    ],
+)
 def test_stored_value(name, words, expected):
     assert db.stored_value(BY_NAME[name], words) == expected
 
@@ -31,9 +35,9 @@ def test_values_for_full_capture():
     doc = json.loads((FULL_DATA / "sigenstor.json").read_text(encoding="utf-8"))
     values = dict(db.values_for(readings_from_document(doc)))
     assert len(values) == len(PLANT_REGISTERS)
-    assert values[30014] == 880            # SOC 88.0 %
-    assert values[30037] == -1859          # battery -1.859 kW (discharging)
-    assert values[40032] == 0xFFFFFFFF     # charging limit "not set"
+    assert values[30014] == 880  # SOC 88.0 %
+    assert values[30037] == -1859  # battery -1.859 kW (discharging)
+    assert values[40032] == 0xFFFFFFFF  # charging limit "not set"
 
 
 def test_values_for_refuses_partial_readings():
@@ -46,7 +50,7 @@ def test_migration_files_load_in_order():
     migrations = db.load_migrations()
     assert [m.label for m in migrations][:1] == ["0001_initial"]
     assert [m.version for m in migrations] == list(range(1, len(migrations) + 1))
-    assert all("\r" not in m.sql for m in migrations)     # CRLF checkouts checksum the same
+    assert all("\r" not in m.sql for m in migrations)  # CRLF checkouts checksum the same
 
 
 def test_checksum_changes_with_content():
@@ -64,7 +68,7 @@ def test_meta_plan_fresh_inserts_everything_stored():
     plan = db.plan_meta_sync({}, lambda a: False)
     assert len(plan.inserts) == len(db.STORED_REGISTERS) and not plan.updates and not plan.problems
     assert {r.device for r in plan.inserts} == {"plant", "inverter"}
-    assert not any(r.type == "string" for r in plan.inserts)        # display only, never stored
+    assert not any(r.type == "string" for r in plan.inserts)  # display only, never stored
 
 
 def test_meta_plan_device_change_is_an_update():
@@ -83,33 +87,37 @@ def test_meta_plan_cosmetic_changes_are_updates_even_with_values():
 
 def test_meta_plan_type_change():
     other = ("plant_ess_power", "u32", float(REG.gain), REG.unit, "plant")
-    assert db.plan_meta_sync({REG.address: other}, lambda a: False, [REG]).updates == [REG]   # no data yet
-    plan = db.plan_meta_sync({REG.address: other}, lambda a: True, [REG])                     # data stored
+    assert db.plan_meta_sync({REG.address: other}, lambda a: False, [REG]).updates == [REG]  # no data yet
+    plan = db.plan_meta_sync({REG.address: other}, lambda a: True, [REG])  # data stored
     assert not plan.updates and "write a migration" in plan.problems[0]
 
 
 def test_meta_plan_ignores_addresses_only_in_the_database():
-    assert db.plan_meta_sync({REG.address: ROW, 39999: ("gone", "u16", 1.0, None, "plant")},
-                             lambda a: True, [REG]).in_sync
+    assert db.plan_meta_sync(
+        {REG.address: ROW, 39999: ("gone", "u16", 1.0, None, "plant")}, lambda a: True, [REG]
+    ).in_sync
 
 
 def test_values_for_skips_strings():
     from sigen.block_reader import entry_for
     from sigen.registers import encode_string
+
     model, soc = BY_NAME["inverter_model_type"], BY_NAME["inverter_ess_soc"]
-    readings = {model.name: entry_for(model, encode_string("SigenStor EC SP US", 15)),
-                soc.name: entry_for(soc, [313])}
+    readings = {model.name: entry_for(model, encode_string("SigenStor EC SP US", 15)), soc.name: entry_for(soc, [313])}
     assert db.values_for(readings) == [(30601, 313)]
 
 
 # ---------- redaction ----------
-@pytest.mark.parametrize("url,expected", [
-    ("postgresql://postgres:s3cret@localhost:5432/sigen", "postgresql://postgres:***@localhost:5432/sigen"),
-    ("postgresql://postgres@localhost/sigen", "postgresql://postgres@localhost/sigen"),
-    ("postgresql://localhost/sigen?user=u&password=s3cret", "postgresql://localhost/sigen?user=u&password=***"),
-    ("host=localhost password=s3cret dbname=sigen", "host=localhost password=*** dbname=sigen"),
-    ("host=localhost password='s 3cret' dbname=sigen", "host=localhost password=*** dbname=sigen"),
-])
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("postgresql://postgres:s3cret@localhost:5432/sigen", "postgresql://postgres:***@localhost:5432/sigen"),
+        ("postgresql://postgres@localhost/sigen", "postgresql://postgres@localhost/sigen"),
+        ("postgresql://localhost/sigen?user=u&password=s3cret", "postgresql://localhost/sigen?user=u&password=***"),
+        ("host=localhost password=s3cret dbname=sigen", "host=localhost password=*** dbname=sigen"),
+        ("host=localhost password='s 3cret' dbname=sigen", "host=localhost password=*** dbname=sigen"),
+    ],
+)
 def test_redact(url, expected):
     assert db.redact(url) == expected
 
@@ -117,21 +125,24 @@ def test_redact(url, expected):
 # ---------- schedule ----------
 def test_seconds_to_boundary():
     assert 1_000_020 % 60 == 0
-    assert seconds_to_boundary(60, 1_000_040.5) == pytest.approx(39.5)     # 20.5 s past the minute
-    assert seconds_to_boundary(60, 1_000_020.0) == pytest.approx(60.0)     # exactly on it: next one
+    assert seconds_to_boundary(60, 1_000_040.5) == pytest.approx(39.5)  # 20.5 s past the minute
+    assert seconds_to_boundary(60, 1_000_020.0) == pytest.approx(60.0)  # exactly on it: next one
     assert 1_000_005 % 15 == 0
-    assert seconds_to_boundary(15, 1_000_005.0, offset=7) == pytest.approx(7.0)    # on :00: next at :07
-    assert seconds_to_boundary(15, 1_000_013.0, offset=7) == pytest.approx(14.0)   # at :08: next at :22
-    assert seconds_to_boundary(15, 1_000_012.0, offset=7) == pytest.approx(15.0)   # exactly on :07: the next one
+    assert seconds_to_boundary(15, 1_000_005.0, offset=7) == pytest.approx(7.0)  # on :00: next at :07
+    assert seconds_to_boundary(15, 1_000_013.0, offset=7) == pytest.approx(14.0)  # at :08: next at :22
+    assert seconds_to_boundary(15, 1_000_012.0, offset=7) == pytest.approx(15.0)  # exactly on :07: the next one
 
 
 # ---------- CLI without a database ----------
 def test_db_commands_need_a_database_url(run, tmp_path):
     f = tmp_path / "config.json"
     f.write_text('{"smart_loads": []}', encoding="utf-8")
-    for argv in (["db", "migrate", "--config", f], ["db", "status", "--config", f],
-                 ["db", "query", "SELECT 1", "--config", f],
-                 ["poll", "--ip", "127.0.0.1", "--config", f, "--count", 1]):
+    for argv in (
+        ["db", "migrate", "--config", f],
+        ["db", "status", "--config", f],
+        ["db", "query", "SELECT 1", "--config", f],
+        ["poll", "--ip", "127.0.0.1", "--config", f, "--count", 1],
+    ):
         code, _, err = run(*argv)
         assert code == ExitCode.USAGE and "no database URL" in err
 
@@ -145,8 +156,9 @@ def test_unreachable_database_is_exit_10(run, tmp_path, hangs_up):
 
 
 def test_query_table():
-    table = format_query_table(["id", "name", "gain"],
-                               [(7, "plant_ess_soc", decimal.Decimal("10")), (12345, None, 1000.0)])
+    table = format_query_table(
+        ["id", "name", "gain"], [(7, "plant_ess_soc", decimal.Decimal("10")), (12345, None, 1000.0)]
+    )
     assert table.splitlines() == [
         "id    | name          | gain",
         "------+---------------+-------",
@@ -177,6 +189,6 @@ def test_poll_interval_validation(run, tmp_path):
     assert e.value.code == 2
     f = tmp_path / "config.json"
     f.write_text('{"database": {"url": "postgresql://u:x@127.0.0.1:1/x"}}', encoding="utf-8")
-    for offset in ("15", "-1"):                       # at least 0, under the interval: checked before connecting
+    for offset in ("15", "-1"):  # at least 0, under the interval: checked before connecting
         code, _, err = run("poll", "--ip", "127.0.0.1", "--config", f, "--interval", "15", "--offset", offset)
         assert code == ExitCode.USAGE and "--offset must be" in err, offset

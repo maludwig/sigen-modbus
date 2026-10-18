@@ -15,6 +15,7 @@ queried at once, to catch the ~10-minute stagger between them. Every poll is sto
 The main poll feeds the gate (PV, coolest temperature) through observe() after each Modbus poll; the cloud token is
 refreshed once at launch and kept fresh (>1 h of life) by the thread, so queries never have to refresh.
 """
+
 import datetime
 import threading
 import time
@@ -25,10 +26,10 @@ from sigen.cloud import DEVICE_BATTERY, CloudClient
 from sigen.config import Cloud
 from sigen.errors import CloudError
 
-BASE_INTERVAL = 600.0        # seconds between polls at rest (10 min)
-ACTIVE_INTERVAL = 60.0       # seconds between polls while the heater might run / is on (1 min)
-PV_THRESHOLD_KW = 0.2        # PV above this (with a cold pack) -> the heater might turn on soon
-COLD_THRESHOLD_C = 15.0      # coolest cluster below this -> the heater might run (its off-point is ~15 °C)
+BASE_INTERVAL = 600.0  # seconds between polls at rest (10 min)
+ACTIVE_INTERVAL = 60.0  # seconds between polls while the heater might run / is on (1 min)
+PV_THRESHOLD_KW = 0.2  # PV above this (with a cold pack) -> the heater might turn on soon
+COLD_THRESHOLD_C = 15.0  # coolest cluster below this -> the heater might run (its off-point is ~15 °C)
 PV_REGISTER = "inverter_pv_power"
 COOLEST_REGISTER = "inverter_ess_min_cluster_temperature"
 
@@ -64,11 +65,21 @@ def gate_values(results, units: Dict[int, str]) -> Tuple[Optional[float], Option
 class HeaterPoller:
     """Polls the cloud for the packs' heating status on the gated cadence, in its own daemon thread."""
 
-    def __init__(self, client: CloudClient, station_id: str, batteries: List[str], db_url: str, *,
-                 out: Callable[[str], None] = print, err: Callable[[str], None] = print,
-                 base_interval: float = BASE_INTERVAL, active_interval: float = ACTIVE_INTERVAL,
-                 pv_threshold: float = PV_THRESHOLD_KW, cold_threshold: float = COLD_THRESHOLD_C,
-                 now=lambda: datetime.datetime.now(datetime.timezone.utc)):
+    def __init__(
+        self,
+        client: CloudClient,
+        station_id: str,
+        batteries: List[str],
+        db_url: str,
+        *,
+        out: Callable[[str], None] = print,
+        err: Callable[[str], None] = print,
+        base_interval: float = BASE_INTERVAL,
+        active_interval: float = ACTIVE_INTERVAL,
+        pv_threshold: float = PV_THRESHOLD_KW,
+        cold_threshold: float = COLD_THRESHOLD_C,
+        now=lambda: datetime.datetime.now(datetime.timezone.utc),
+    ):
         self._client = client
         self._station = station_id
         self._batteries = list(batteries)
@@ -77,12 +88,12 @@ class HeaterPoller:
         self._base, self._active_iv = base_interval, active_interval
         self._pv_threshold, self._cold_threshold = pv_threshold, cold_threshold
         self._now = now
-        self._pv_kw, self._coolest_c = 0.0, float("inf")      # gate; not active until the first poll says cold
-        self._state: Dict[int, bool] = {}                      # battery index -> last heating (True/False)
-        self._rr = 0                                           # round-robin cursor
-        self._last_error: Optional[str] = None                 # to avoid repeating the same cloud warning each minute
-        self._last_db_error: Optional[str] = None              # the same, for database trouble
-        self._db_broken = False                                # a write failed -> reopen the connection next round
+        self._pv_kw, self._coolest_c = 0.0, float("inf")  # gate; not active until the first poll says cold
+        self._state: Dict[int, bool] = {}  # battery index -> last heating (True/False)
+        self._rr = 0  # round-robin cursor
+        self._last_error: Optional[str] = None  # to avoid repeating the same cloud warning each minute
+        self._last_db_error: Optional[str] = None  # the same, for database trouble
+        self._db_broken = False  # a write failed -> reopen the connection next round
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="sigen-heater", daemon=True)
@@ -93,8 +104,13 @@ class HeaterPoller:
         if not cloud.station_id or not cloud.batteries:
             err("warning: cloud heater polling off: the config's cloud section needs station_id and batteries")
             return None
-        client = CloudClient(cloud.token_file, cloud.base_url, app_base_url=cloud.app_base_url,
-                             obfuscation_key=cloud.obfuscation_key, client_basic=cloud.client_basic)
+        client = CloudClient(
+            cloud.token_file,
+            cloud.base_url,
+            app_base_url=cloud.app_base_url,
+            obfuscation_key=cloud.obfuscation_key,
+            client_basic=cloud.client_basic,
+        )
         return cls(client, cloud.station_id, list(cloud.batteries), db_url, out=out, err=err)
 
     # ---------- the main poll feeds the gate ----------
@@ -146,7 +162,7 @@ class HeaterPoller:
     def _loop(self) -> None:
         self._log("refreshing token")
         try:
-            self._client.refresh()            # Mitchell: refresh at launch (keeps queries from ever refreshing)
+            self._client.refresh()  # Mitchell: refresh at launch (keeps queries from ever refreshing)
         except CloudError as e:
             self._err(f"warning: cloud heater polling off this session (couldn't refresh the token): {e}")
             return
@@ -154,12 +170,12 @@ class HeaterPoller:
         try:
             while not self._stop.is_set():
                 if conn is None:
-                    conn = self._open()       # may stay None while the database is down; we still poll the cloud
+                    conn = self._open()  # may stay None while the database is down; we still poll the cloud
                 try:
                     self._poll_round(conn)
-                except Exception as e:        # a bad round must never stop the thread
+                except Exception as e:  # a bad round must never stop the thread
                     self._err(f"warning: cloud heater poll round failed: {type(e).__name__}: {e}")
-                if self._db_broken:           # a write failed: drop the connection and reopen next round
+                if self._db_broken:  # a write failed: drop the connection and reopen next round
                     self._close(conn)
                     conn = None
                     self._db_broken = False
@@ -185,7 +201,7 @@ class HeaterPoller:
         heating: Optional[bool] = None
         error: Optional[str] = None
         try:
-            self._client.ensure_fresh()       # refresh only when the token is within an hour of expiry
+            self._client.ensure_fresh()  # refresh only when the token is within an hour of expiry
             data = self._client.device_dynamic_info(self._station, sn, DEVICE_BATTERY)
             heating = heating_from(data)
             if heating is None:
@@ -196,7 +212,7 @@ class HeaterPoller:
         status = "written successfully" if written else "database unwritten"
         if error is not None:
             self._log(f"Battery {sn} query failed: {error}, {status}")
-            if error != self._last_error:     # a new kind of cloud problem: an operator warning, once
+            if error != self._last_error:  # a new kind of cloud problem: an operator warning, once
                 self._err(f"warning: cloud heater poll of battery {i + 1} failed: {error}")
                 self._last_error = error
             return False

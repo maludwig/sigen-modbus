@@ -7,6 +7,7 @@ Nothing else in sigen-modbus writes to the device. Every write:
   4. writes, then reads the register back and compares the raw words (exit 5 on mismatch),
   5. is recorded in the journal (one JSON object per line) when --apply was given.
 """
+
 import datetime
 import json
 import secrets
@@ -22,15 +23,15 @@ DEFAULT_JOURNAL = Path.home() / ".local" / "state" / "sigen-modbus" / "journal.j
 
 # Outcomes, and the exit code each one produces
 OUTCOME_EXIT = {
-    "written": ExitCode.OK,                 # written and verified by read-back
-    "unchanged": ExitCode.OK,               # already at the target; nothing written
-    "dry_run": ExitCode.DRY_RUN,            # change needed but --apply not given
-    "refused": ExitCode.REFUSED,            # failed the allowlist
+    "written": ExitCode.OK,  # written and verified by read-back
+    "unchanged": ExitCode.OK,  # already at the target; nothing written
+    "dry_run": ExitCode.DRY_RUN,  # change needed but --apply not given
+    "refused": ExitCode.REFUSED,  # failed the allowlist
     "precondition_failed": ExitCode.PRECONDITION,
-    "verify_failed": ExitCode.VERIFY_FAILED,     # read-back differs from what was written
-    "write_unconfirmed": ExitCode.VERIFY_FAILED, # write sent, but couldn't read back: state unknown
-    "write_rejected": ExitCode.MODBUS,      # device refused the write with a Modbus exception
-    "read_failed": ExitCode.CONNECTION,     # couldn't do the first read; nothing was written
+    "verify_failed": ExitCode.VERIFY_FAILED,  # read-back differs from what was written
+    "write_unconfirmed": ExitCode.VERIFY_FAILED,  # write sent, but couldn't read back: state unknown
+    "write_rejected": ExitCode.MODBUS,  # device refused the write with a Modbus exception
+    "read_failed": ExitCode.CONNECTION,  # couldn't do the first read; nothing was written
 }
 
 
@@ -44,8 +45,10 @@ class WriteResult:
     after_words: Optional[List[int]] = None
     write_sent: bool = False
     undo_of: Optional[str] = None
-    id: str = field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc)
-                    .strftime("%Y%m%dT%H%M%SZ-") + secrets.token_hex(3))
+    id: str = field(
+        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ-")
+        + secrets.token_hex(3)
+    )
 
     @property
     def exit_code(self) -> ExitCode:
@@ -62,12 +65,18 @@ class WriteResult:
             "id": self.id,
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             **context,
-            "register": r.name, "table": r.table, "address": r.address,
-            "before": self._show(self.before_words), "before_raw": self.before_words,
-            "target": self._show(self.target_words), "target_raw": self.target_words,
-            "after": self._show(self.after_words), "after_raw": self.after_words,
+            "register": r.name,
+            "table": r.table,
+            "address": r.address,
+            "before": self._show(self.before_words),
+            "before_raw": self.before_words,
+            "target": self._show(self.target_words),
+            "target_raw": self.target_words,
+            "after": self._show(self.after_words),
+            "after_raw": self.after_words,
             "write_sent": self.write_sent,
-            "outcome": self.outcome, "exit_code": int(self.exit_code),
+            "outcome": self.outcome,
+            "exit_code": int(self.exit_code),
             "message": self.message,
             "undo_of": self.undo_of,
         }
@@ -92,24 +101,28 @@ class Journal:
                 try:
                     out.append(json.loads(line))
                 except json.JSONDecodeError:
-                    continue   # never let one damaged line block undo of the others
+                    continue  # never let one damaged line block undo of the others
         return out
 
     def last_undoable(self, ip: str, port: int, unit: int) -> Optional[dict]:
         """Most recent successful write to this device that hasn't been undone yet."""
-        entries = [e for e in self.entries()
-                   if e.get("ip") == ip and e.get("port") == port and e.get("unit") == unit]
-        undone = {e["undo_of"] for e in entries
-                  if e.get("undo_of") and e.get("outcome") in ("written", "unchanged")}
+        entries = [e for e in self.entries() if e.get("ip") == ip and e.get("port") == port and e.get("unit") == unit]
+        undone = {e["undo_of"] for e in entries if e.get("undo_of") and e.get("outcome") in ("written", "unchanged")}
         for e in reversed(entries):
             if e.get("outcome") == "written" and not e.get("undo_of") and e["id"] not in undone:
                 return e
         return None
 
 
-def set_register(connect: Callable[[], ModbusClient], reg: Register, value: float, *,
-                 apply: bool, expect_words: Optional[List[int]] = None,
-                 undo_of: Optional[str] = None) -> WriteResult:
+def set_register(
+    connect: Callable[[], ModbusClient],
+    reg: Register,
+    value: float,
+    *,
+    apply: bool,
+    expect_words: Optional[List[int]] = None,
+    undo_of: Optional[str] = None,
+) -> WriteResult:
     """Read → write → read back. Never raises for device problems; returns the outcome."""
 
     def result(outcome, message, **kw):
@@ -132,9 +145,12 @@ def set_register(connect: Callable[[], ModbusClient], reg: Register, value: floa
             seen = {**with_target, "before_words": before}
 
             if expect_words is not None and before != expect_words:
-                return result("precondition_failed",
-                              f"expected current value {reg.describe(expect_words)}, "
-                              f"but it is {reg.describe(before)}; nothing written", **seen)
+                return result(
+                    "precondition_failed",
+                    f"expected current value {reg.describe(expect_words)}, "
+                    f"but it is {reg.describe(before)}; nothing written",
+                    **seen,
+                )
             if before == target:
                 return result("unchanged", f"already {reg.describe(target)}; nothing written", **seen)
             if not apply:
@@ -145,21 +161,35 @@ def set_register(connect: Callable[[], ModbusClient], reg: Register, value: floa
                 client.write(reg.address, target)
             except ModbusError as e:
                 after = _try_read(client, connect, reg)
-                return result("write_rejected", f"device rejected the write: {e}",
-                              write_sent=True, after_words=after, **seen)
+                return result(
+                    "write_rejected", f"device rejected the write: {e}", write_sent=True, after_words=after, **seen
+                )
             except ConnectionFailed as e:
                 # The write may or may not have landed. Find out on a fresh connection.
                 after = _try_read(None, connect, reg)
                 if after is None:
-                    return result("write_unconfirmed",
-                                  f"connection failed during the write ({e}) and the read-back also "
-                                  f"failed: the register's state is UNKNOWN; check it before retrying",
-                                  write_sent=True, **seen)
+                    return result(
+                        "write_unconfirmed",
+                        f"connection failed during the write ({e}) and the read-back also "
+                        f"failed: the register's state is UNKNOWN; check it before retrying",
+                        write_sent=True,
+                        **seen,
+                    )
                 if after == target:
-                    return result("written", f"verified (the write's reply was lost: {e})",
-                                  write_sent=True, after_words=after, **seen)
-                return result("verify_failed", f"write failed ({e}); register reads "
-                              f"{reg.describe(after)}", write_sent=True, after_words=after, **seen)
+                    return result(
+                        "written",
+                        f"verified (the write's reply was lost: {e})",
+                        write_sent=True,
+                        after_words=after,
+                        **seen,
+                    )
+                return result(
+                    "verify_failed",
+                    f"write failed ({e}); register reads " f"{reg.describe(after)}",
+                    write_sent=True,
+                    after_words=after,
+                    **seen,
+                )
 
             # 4. Read back
             after = _try_read(client, connect, reg)
@@ -167,12 +197,21 @@ def set_register(connect: Callable[[], ModbusClient], reg: Register, value: floa
         return result("read_failed", f"couldn't connect to read {reg.name}: {e}", **with_target)
 
     if after is None:
-        return result("write_unconfirmed", "write was acknowledged but the read-back failed: "
-                      "the register's state is UNKNOWN; check it before retrying",
-                      write_sent=True, **seen)
+        return result(
+            "write_unconfirmed",
+            "write was acknowledged but the read-back failed: "
+            "the register's state is UNKNOWN; check it before retrying",
+            write_sent=True,
+            **seen,
+        )
     if after != target:
-        return result("verify_failed", f"read back {reg.describe(after)} but wrote "
-                      f"{reg.describe(target)}", write_sent=True, after_words=after, **seen)
+        return result(
+            "verify_failed",
+            f"read back {reg.describe(after)} but wrote " f"{reg.describe(target)}",
+            write_sent=True,
+            after_words=after,
+            **seen,
+        )
     return result("written", "written and verified", write_sent=True, after_words=after, **seen)
 
 

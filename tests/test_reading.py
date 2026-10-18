@@ -1,4 +1,5 @@
 """derive() and the summary, checked against real captures."""
+
 import json
 
 import pytest
@@ -42,6 +43,7 @@ def test_alarms_none_on_the_real_system():
 
 def with_raw(readings, name, raw):
     from sigen.registers import BY_NAME
+
     value, label = BY_NAME[name].decode(raw)
     readings[name] = {**readings[name], "raw": raw, "value": value, "label": label}
     return readings
@@ -52,8 +54,9 @@ def test_active_alarms_are_listed_by_group():
     readings = with_raw(readings, "plant_merged_alarm_3", [1 << 6])
     d = derive(readings)
     assert d["active_alarms"] == ["PCS: Over-temperature", "PCS: Grid power outage", "ESS: Thermal runaway"]
-    assert "Alarms:            PCS: Over-temperature; PCS: Grid power outage; ESS: Thermal runaway" \
-        in format_summary("192.0.2.1", readings)
+    assert "Alarms:            PCS: Over-temperature; PCS: Grid power outage; ESS: Thermal runaway" in format_summary(
+        "192.0.2.1", readings
+    )
 
 
 def test_unavailable_alarm_register_is_not_sixteen_alarms():
@@ -66,6 +69,7 @@ def test_unavailable_alarm_register_is_not_sixteen_alarms():
 def test_inverter_section_from_a_two_unit_dump():
     from conftest import BOTH_DATA
     from sigen.reading import format_inverter, other_unit_readings
+
     doc = json.loads((BOTH_DATA / "sigenstor.json").read_text(encoding="utf-8"))
     inverters = other_unit_readings(doc)
     assert list(inverters) == [1]

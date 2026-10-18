@@ -1,4 +1,5 @@
 """Turning readings into useful numbers and summaries. (Reading itself: sigen.block_reader.)"""
+
 import datetime
 from typing import Dict, List, Optional
 
@@ -6,9 +7,14 @@ from sigen.config import SMART_LOAD_SLOTS, Config
 from sigen.registers import ALL_ONES_16, BY_ADDRESS, BY_NAME, flag_names
 
 TABLE_KEYS = {"input": "input_registers", "holding": "holding_registers"}
-ALARM_GROUPS = {"plant_merged_alarm_1": "PCS", "plant_merged_alarm_2": "PCS", "plant_merged_alarm_3": "ESS",
-                "plant_merged_alarm_4": "Gateway", "plant_merged_alarm_5": "DC charger",
-                "plant_merged_alarm_6": "Plant"}
+ALARM_GROUPS = {
+    "plant_merged_alarm_1": "PCS",
+    "plant_merged_alarm_2": "PCS",
+    "plant_merged_alarm_3": "ESS",
+    "plant_merged_alarm_4": "Gateway",
+    "plant_merged_alarm_5": "DC charger",
+    "plant_merged_alarm_6": "Plant",
+}
 
 
 def readings_from_document(doc: dict) -> Dict[str, dict]:
@@ -23,8 +29,12 @@ def readings_from_document(doc: dict) -> Dict[str, dict]:
             addr = int(addr_s)
             reg = BY_ADDRESS.get((table, addr))
             name = reg.name if reg else spec.get("name", f"{table}_{addr}")
-            entry = {"table": table, "address": addr, "type": spec.get("type", reg.type if reg else "u16"),
-                     "gain": spec.get("gain", reg.gain if reg else 1)}
+            entry = {
+                "table": table,
+                "address": addr,
+                "type": spec.get("type", reg.type if reg else "u16"),
+                "gain": spec.get("gain", reg.gain if reg else 1),
+            }
             if reg and reg.unit or spec.get("unit"):
                 entry["unit"] = reg.unit if reg and reg.unit else spec.get("unit")
             raw = spec.get("raw")
@@ -93,8 +103,9 @@ def value(readings: dict, name: str, default=None):
 def derive(readings: dict, now: Optional[datetime.datetime] = None) -> dict:
     now = now or datetime.datetime.now(datetime.timezone.utc)
     out = {}
-    pv, grid, ess = (value(readings, n) for n in
-                     ("plant_photovoltaic_power", "plant_grid_sensor_active_power", "plant_ess_power"))
+    pv, grid, ess = (
+        value(readings, n) for n in ("plant_photovoltaic_power", "plant_grid_sensor_active_power", "plant_ess_power")
+    )
     if None not in (pv, grid, ess):
         out["house_load_estimate_kw"] = round(pv + grid - ess, 3)
         out["battery_direction"] = "charging" if ess > 0 else "discharging" if ess < 0 else "idle"
@@ -131,8 +142,9 @@ def derive(readings: dict, now: Optional[datetime.datetime] = None) -> dict:
     t = value(readings, "plant_system_time")
     if t:
         # The SigenStor stores local wall-clock time in this "epoch" register, not UTC.
-        out["device_clock_local"] = datetime.datetime.fromtimestamp(t, datetime.timezone.utc) \
-            .strftime("%Y-%m-%dT%H:%M:%S")
+        out["device_clock_local"] = datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
         out["device_clock_skew_hours_vs_utc"] = round((t - now.timestamp()) / 3600, 2)
     return out
 
@@ -154,8 +166,9 @@ def format_smart_loads(readings: dict, config: Config) -> List[str]:
     return ["  Smart loads:"] + rows if rows else []
 
 
-INVERTER_ALARMS = {f"inverter_alarm_{n}": group for n, group in
-                   zip(range(1, 6), ("PCS", "PCS", "ESS", "Gateway", "DC charger"))}
+INVERTER_ALARMS = {
+    f"inverter_alarm_{n}": group for n, group in zip(range(1, 6), ("PCS", "PCS", "ESS", "Gateway", "DC charger"))
+}
 
 
 def format_inverter(unit: int, readings: dict) -> List[str]:
@@ -168,8 +181,10 @@ def format_inverter(unit: int, readings: dict) -> List[str]:
     lines = [head]
     if label("inverter_running_state"):
         temp = v("inverter_pcs_internal_temperature")
-        lines.append(f"    State:           {label('inverter_running_state')}"
-                     + (f", internal {temp:.1f} °C" if temp is not None else ""))
+        lines.append(
+            f"    State:           {label('inverter_running_state')}"
+            + (f", internal {temp:.1f} °C" if temp is not None else "")
+        )
     strings = []
     for i in range(1, (v("inverter_pv_string_count") or 0) + 1):
         volts, amps = v(f"inverter_pv{i}_voltage"), v(f"inverter_pv{i}_current")
@@ -178,15 +193,21 @@ def format_inverter(unit: int, readings: dict) -> List[str]:
     if strings:
         lines.append(f"    PV strings:      {'   '.join(strings)}")
     if v("inverter_pv_power") is not None:
-        lines.append(f"    PV:              {v('inverter_pv_power'):.2f} kW now, "
-                     f"{v('inverter_pv_daily_generation') or 0:.2f} kWh today")
+        lines.append(
+            f"    PV:              {v('inverter_pv_power'):.2f} kW now, "
+            f"{v('inverter_pv_daily_generation') or 0:.2f} kWh today"
+        )
     if v("inverter_phase_a_voltage") is not None:
-        lines.append(f"    Grid:            {v('inverter_phase_a_voltage'):.1f} V / {v('inverter_phase_b_voltage'):.1f} V "
-                     f"({v('inverter_ab_line_voltage'):.1f} V), {v('inverter_grid_frequency'):.2f} Hz")
+        lines.append(
+            f"    Grid:            {v('inverter_phase_a_voltage'):.1f} V / {v('inverter_phase_b_voltage'):.1f} V "
+            f"({v('inverter_ab_line_voltage'):.1f} V), {v('inverter_grid_frequency'):.2f} Hz"
+        )
     if v("inverter_ess_min_cluster_temperature") is not None:
-        lines.append(f"    Battery cells:   {v('inverter_ess_min_cluster_temperature'):.1f}–"
-                     f"{v('inverter_ess_max_cluster_temperature'):.1f} °C, "
-                     f"average {v('inverter_ess_average_cell_voltage'):.3f} V")
+        lines.append(
+            f"    Battery cells:   {v('inverter_ess_min_cluster_temperature'):.1f}–"
+            f"{v('inverter_ess_max_cluster_temperature'):.1f} °C, "
+            f"average {v('inverter_ess_average_cell_voltage'):.3f} V"
+        )
     alarms, readable = [], False
     for name, group in INVERTER_ALARMS.items():
         n = v(name)
@@ -201,9 +222,14 @@ def format_inverter(unit: int, readings: dict) -> List[str]:
     return lines
 
 
-def format_summary(ip: str, readings: dict, now: Optional[datetime.datetime] = None,
-                   title: Optional[str] = None, config: Config = Config(),
-                   inverters: Optional[Dict[int, dict]] = None) -> str:
+def format_summary(
+    ip: str,
+    readings: dict,
+    now: Optional[datetime.datetime] = None,
+    title: Optional[str] = None,
+    config: Config = Config(),
+    inverters: Optional[Dict[int, dict]] = None,
+) -> str:
     d = derive(readings, now)
     v = lambda n, default=0: value(readings, n, default)
     label = lambda n: readings.get(n, {}).get("label", "(not readable)")
@@ -214,15 +240,21 @@ def format_summary(ip: str, readings: dict, now: Optional[datetime.datetime] = N
         f"  Remote EMS mode:   {label('plant_remote_ems_control_mode')}",
     ]
     if "active_alarms" in d:
-        lines.append(f"  Alarms:            {'; '.join(d['active_alarms']) or 'none'}"
-                     + (" (some alarm registers not available)" if "alarm_registers_unavailable" in d else ""))
+        lines.append(
+            f"  Alarms:            {'; '.join(d['active_alarms']) or 'none'}"
+            + (" (some alarm registers not available)" if "alarm_registers_unavailable" in d else "")
+        )
     if "battery_total_estimate_kwh" in d:
-        lines.append(f"  Battery:           {v('plant_ess_soc'):.1f}%  {d['battery_available_kwh']:.2f} / "
-                     f"{d['battery_total_estimate_kwh']:.2f} kWh available / total  "
-                     f"({v('plant_ess_rated_energy_capacity'):.2f} kWh nominal)")
+        lines.append(
+            f"  Battery:           {v('plant_ess_soc'):.1f}%  {d['battery_available_kwh']:.2f} / "
+            f"{d['battery_total_estimate_kwh']:.2f} kWh available / total  "
+            f"({v('plant_ess_rated_energy_capacity'):.2f} kWh nominal)"
+        )
     else:
-        lines.append(f"  Battery:           {v('plant_ess_soc'):.1f}% of "
-                     f"{v('plant_ess_rated_energy_capacity'):.2f} kWh nominal")
+        lines.append(
+            f"  Battery:           {v('plant_ess_soc'):.1f}% of "
+            f"{v('plant_ess_rated_energy_capacity'):.2f} kWh nominal"
+        )
     if value(readings, "plant_ess_average_cell_temperature") is not None:
         lines.append(f"  Battery temp:      {v('plant_ess_average_cell_temperature'):.1f} °C")
     lines += [

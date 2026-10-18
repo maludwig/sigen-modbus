@@ -23,6 +23,7 @@ for that cube directory is going. At most one start per window every FETCH_EVERY
 dashboard started is still running. The strips show whatever cubes exist when they're fetched (sigen satellite swaps
 each one in whole).
 """
+
 import datetime
 import json
 import math
@@ -38,39 +39,47 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, abort, redirect, render_template, request, url_for
 
 from sigen import charts, db, sync
-from sigen import daily as daily_mod       # aliased: the `daily()` route below would shadow the module name
+from sigen import daily as daily_mod  # aliased: the `daily()` route below would shadow the module name
 from sigen.config import Config
 from sigen.errors import DatabaseError
 
-REFRESH_SECONDS = 300           # the daily page reloads this often while its day is today
+REFRESH_SECONDS = 300  # the daily page reloads this often while its day is today
 MAX_HOURS = 24 * 31
-CHARTS = {                     # name -> its title on the page; each has a data endpoint (DATA) and a spec in live_charts.js
+CHARTS = {  # name -> its title on the page; each has a data endpoint (DATA) and a spec in live_charts.js
     "string_voltage": "String voltage, every reading",
     "string_power": "String power, every reading, with each string's clear-sky model dashed (config array); "
-                    "underneath, the radar's rain or snow at the site and NOAA's satellite cloud",
+    "underneath, the radar's rain or snow at the site and NOAA's satellite cloud",
     "load_energy": "Energy by load (smart loads and Other)",
     "load_power_now": "Power by load now (the newest reading, every 15 s; smart loads and Other)",
     "load_counters": "Smart-load energy since the window started (the counters: exact energy; slope = power)",
     "load_snapshots": "Smart-load power (5-minute mean; every reading faint behind)",
     "battery_temps": "Battery temperatures (left axis) and the inverter's (red, right axis, 5-minute mean)",
     "battery_power": "Battery charge / discharge and PV power (5-minute means; every reading faint behind), and the "
-                     "SOC with its reserve and charge cut-off settings (blue, right axis)",
+    "SOC with its reserve and charge cut-off settings (blue, right axis)",
 }
 QUICK = [("Today", {}), ("Last 10 min", {"minutes": "10"}), ("Last 30 min", {"minutes": "30"})] + [
-    (label, {"hours": h}) for label, h in (                            # the window menu; then "Custom day…"
-    ("Last hour", "1"), ("Last 2 h", "2"), ("Last 6 h", "6"), ("Last 12 h", "12"), ("Last 24 h", "24"),
-    ("Last 3 days", "72"), ("Last 7 days", "168"))]
-FETCH_EVERY = datetime.timedelta(minutes=10)     # NOAA's scan interval
-MAX_FETCH = datetime.timedelta(days=3)           # longer windows don't start a fetch (a day is ~1 minute, ~210 MB)
+    (label, {"hours": h})
+    for label, h in (  # the window menu; then "Custom day…"
+        ("Last hour", "1"),
+        ("Last 2 h", "2"),
+        ("Last 6 h", "6"),
+        ("Last 12 h", "12"),
+        ("Last 24 h", "24"),
+        ("Last 3 days", "72"),
+        ("Last 7 days", "168"),
+    )
+]
+FETCH_EVERY = datetime.timedelta(minutes=10)  # NOAA's scan interval
+MAX_FETCH = datetime.timedelta(days=3)  # longer windows don't start a fetch (a day is ~1 minute, ~210 MB)
 SATELLITE_LOG = "satellite.log"
-UPLOT = "https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot"        # .iife.min.js and .min.css (MIT, ~50 KB)
-LIVE_EVERY = 15                 # seconds between the uPlot charts' checks for newer readings (a poll every 15 s)
-AIR_MARGIN = datetime.timedelta(hours=2)         # a top-up's Open-Meteo rows: stored minutes to an hour after their time
-SOC_MARGIN = datetime.timedelta(minutes=1)       # a top-up's plant readings: the same poll's can be a moment later
-SKY_MARGIN = datetime.timedelta(hours=1)         # a top-up's clear-sky model: Open-Meteo's weather comes in late
-MODEL_AFTER_SUNSET = datetime.timedelta(minutes=30)   # the clear-sky model stops this long after sunset (model_end)
-STRIPS_EVERY = 300              # seconds between the page's fetches of the string-power strips (radar 6 min, NOAA 10)
-SANKEY_EVERY = 60               # seconds between the page's fetches of the Sankey diagram (the whole window's flows)
+UPLOT = "https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot"  # .iife.min.js and .min.css (MIT, ~50 KB)
+LIVE_EVERY = 15  # seconds between the uPlot charts' checks for newer readings (a poll every 15 s)
+AIR_MARGIN = datetime.timedelta(hours=2)  # a top-up's Open-Meteo rows: stored minutes to an hour after their time
+SOC_MARGIN = datetime.timedelta(minutes=1)  # a top-up's plant readings: the same poll's can be a moment later
+SKY_MARGIN = datetime.timedelta(hours=1)  # a top-up's clear-sky model: Open-Meteo's weather comes in late
+MODEL_AFTER_SUNSET = datetime.timedelta(minutes=30)  # the clear-sky model stops this long after sunset (model_end)
+STRIPS_EVERY = 300  # seconds between the page's fetches of the string-power strips (radar 6 min, NOAA 10)
+SANKEY_EVERY = 60  # seconds between the page's fetches of the Sankey diagram (the whole window's flows)
 
 
 class BadWindow(ValueError):
@@ -84,8 +93,15 @@ def iso_utc(t: datetime.datetime) -> str:
 
 def strips_json(strips) -> List[dict]:
     """charts.Strip objects as static/strips.js takes them (the page turns the ISO starts into seconds)."""
-    return [{"label": s.label, "starts": [iso_utc(x) for x in s.starts], "length": s.length.total_seconds(),
-             "colours": s.colours} for s in strips]
+    return [
+        {
+            "label": s.label,
+            "starts": [iso_utc(x) for x in s.starts],
+            "length": s.length.total_seconds(),
+            "colours": s.colours,
+        }
+        for s in strips
+    ]
 
 
 def model_end(end: datetime.datetime, site, after: datetime.timedelta = None) -> datetime.datetime:
@@ -93,13 +109,14 @@ def model_end(end: datetime.datetime, site, after: datetime.timedelta = None) ->
     sunrise, the day before), `after` (MODEL_AFTER_SUNSET) past that sunset: after that it's 0 till morning. `end`
     where the sun doesn't set or rise."""
     from sigen.goes import sun_rise_set
+
     after = MODEL_AFTER_SUNSET if after is None else after
     day = end.astimezone(ZoneInfo(site.timezone)).date()
     today = sun_rise_set(day, site.latitude, site.longitude)
     if today is None:
         return end
     rise, sunset = today
-    if end < rise:                                       # small hours: the last sunset was yesterday's
+    if end < rise:  # small hours: the last sunset was yesterday's
         yesterday = sun_rise_set(day - datetime.timedelta(days=1), site.latitude, site.longitude)
         if yesterday is None:
             return end
@@ -112,24 +129,46 @@ def satellite_command(config: Config, start: datetime.datetime, end: datetime.da
     end = end.astimezone(tz)
     whole = end.replace(second=0, microsecond=0)
     end = whole if whole == end else whole + datetime.timedelta(minutes=1)
-    return [sys.executable, "-m", "sigen", "satellite", "--start", f"{start.astimezone(tz):%Y-%m-%d %H:%M}",
-            "--end", f"{end:%Y-%m-%d %H:%M}", "--config", str(config.path), "--cube-dir", str(config.cube_dir()),
-            "--record-to-db"]
+    return [
+        sys.executable,
+        "-m",
+        "sigen",
+        "satellite",
+        "--start",
+        f"{start.astimezone(tz):%Y-%m-%d %H:%M}",
+        "--end",
+        f"{end:%Y-%m-%d %H:%M}",
+        "--config",
+        str(config.path),
+        "--cube-dir",
+        str(config.cube_dir()),
+        "--record-to-db",
+    ]
 
 
 def launch_detached(command: List[str], log: Path):
     """Start `command` in its own process (no console window, not in this one's Ctrl+C group), output to `log`;
     returns the Popen without waiting."""
     log.parent.mkdir(parents=True, exist_ok=True)
-    flags = ({"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
-             if sys.platform == "win32" else {"start_new_session": True})
-    with open(log, "w", encoding="utf-8") as out:          # the child has its own handle
-        return subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                env={**os.environ, "PYTHONUNBUFFERED": "1"}, **flags)
+    flags = (
+        {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
+        if sys.platform == "win32"
+        else {"start_new_session": True}
+    )
+    with open(log, "w", encoding="utf-8") as out:  # the child has its own handle
+        return subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            **flags,
+        )
 
 
-def parse_window(args, tz, now: Optional[datetime.datetime] = None) -> Tuple[datetime.datetime, datetime.datetime,
-                                                                            bool, str]:
+def parse_window(
+    args, tz, now: Optional[datetime.datetime] = None
+) -> Tuple[datetime.datetime, datetime.datetime, bool, str]:
     """(start, end, reaches now, description) from the query string."""
     now = now or datetime.datetime.now(tz)
     day, hours, minutes = args.get("day"), args.get("hours"), args.get("minutes")
@@ -168,8 +207,8 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
     names = config.smart_load_names
     app = Flask(__name__)
     fetch_lock = threading.Lock()
-    fetches: Dict[str, object] = {"process": None}       # the last process started
-    last_start: Dict[Tuple[datetime.date, datetime.date], float] = {}   # window's local days -> time.monotonic()
+    fetches: Dict[str, object] = {"process": None}  # the last process started
+    last_start: Dict[Tuple[datetime.date, datetime.date], float] = {}  # window's local days -> time.monotonic()
 
     def fetch_satellite(start, end):
         """Start `sigen satellite` for the window, unless one of ours is running or this window had one lately."""
@@ -185,15 +224,18 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
                 return
             last_start[key] = now
             try:
-                fetches["process"] = launcher(satellite_command(config, start, end, tz),
-                                              config.cube_dir() / SATELLITE_LOG)
+                fetches["process"] = launcher(
+                    satellite_command(config, start, end, tz), config.cube_dir() / SATELLITE_LOG
+                )
             except OSError as e:
                 print(f"warning: couldn't start sigen satellite: {e}", file=sys.stderr)
 
     def day_nav(start, live):
         """The previous / next day links (none after today)."""
         before, after = start.date() - datetime.timedelta(days=1), start.date() + datetime.timedelta(days=1)
-        return [(f"◀ {before:%m-%d}", {"day": f"{before}"})] + ([] if live else [(f"{after:%m-%d} ▶", {"day": f"{after}"})])
+        return [(f"◀ {before:%m-%d}", {"day": f"{before}"})] + (
+            [] if live else [(f"{after:%m-%d} ▶", {"day": f"{after}"})]
+        )
 
     @app.get("/daily")
     def daily():
@@ -219,12 +261,25 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
                     conn.close()
             if energy is not None:
                 sankey = charts.sankey(energy)
-        return render_template("daily.html", query=query, nav=day_nav(start, live) if start is not None else [],
-                               live=live, refresh=REFRESH_SECONDS, description=description, error=error, tz=str(tz),
-                               energy=energy, totals=charts.DAY_TOTALS, sankey=sankey,
-                               span=(f"{energy.first.astimezone(tz):%H:%M} to {energy.last.astimezone(tz):%H:%M}"
-                                     if energy is not None else ""),
-                               drawn=datetime.datetime.now(tz))
+        return render_template(
+            "daily.html",
+            query=query,
+            nav=day_nav(start, live) if start is not None else [],
+            live=live,
+            refresh=REFRESH_SECONDS,
+            description=description,
+            error=error,
+            tz=str(tz),
+            energy=energy,
+            totals=charts.DAY_TOTALS,
+            sankey=sankey,
+            span=(
+                f"{energy.first.astimezone(tz):%H:%M} to {energy.last.astimezone(tz):%H:%M}"
+                if energy is not None
+                else ""
+            ),
+            drawn=datetime.datetime.now(tz),
+        )
 
     @app.get("/all-time")
     def all_time():
@@ -246,11 +301,23 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
                 conn.close()
         if energy is not None:
             sankey = charts.sankey(energy)
-        return render_template("all_time.html", error=error, tz=str(tz), energy=energy, sankey=sankey, pv=pv,
-                               strips=strips_json(strips), strip_notes=notes, uplot=UPLOT,
-                               drawn=datetime.datetime.now(tz),
-                               span=(f"{energy.first.astimezone(tz):%Y-%m-%d} to {energy.last.astimezone(tz):%Y-%m-%d}"
-                                     if energy is not None else ""))
+        return render_template(
+            "all_time.html",
+            error=error,
+            tz=str(tz),
+            energy=energy,
+            sankey=sankey,
+            pv=pv,
+            strips=strips_json(strips),
+            strip_notes=notes,
+            uplot=UPLOT,
+            drawn=datetime.datetime.now(tz),
+            span=(
+                f"{energy.first.astimezone(tz):%Y-%m-%d} to {energy.last.astimezone(tz):%Y-%m-%d}"
+                if energy is not None
+                else ""
+            ),
+        )
 
     # ---------- the data endpoints: numbers for charts drawn in the browser ----------
     # Each answers JSON {"t": [ISO 8601 UTC, to the microsecond: "2026-10-14T03:01:30.997599Z"], …the values…} for
@@ -270,7 +337,7 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             return start.astimezone(utc), end.astimezone(utc), None
         try:
             start = datetime.datetime.fromisoformat(since[:-1] + "+00:00" if since.endswith("Z") else since)
-        except ValueError:                # (Python 3.9's fromisoformat doesn't take "Z" itself)
+        except ValueError:  # (Python 3.9's fromisoformat doesn't take "Z" itself)
             raise BadWindow(f"since={since!r} isn't an ISO 8601 time like 2026-10-14T03:01:30.997599Z")
         if start.tzinfo is None:
             raise BadWindow(f"since={since!r} needs its timezone, e.g. Z for UTC")
@@ -305,8 +372,10 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
     def columns(times, series: Dict[str, List[float]], since, digits: int):
         """{"t": [ISO…], label: […]}-style pieces for the readings after `since`: (the times, {label: values})."""
         keep = after(times, since)
-        return ([iso_utc(times[k]) for k in keep],
-                {label: [round(values[k], digits) for k in keep] for label, values in series.items()})
+        return (
+            [iso_utc(times[k]) for k in keep],
+            {label: [round(values[k], digits) for k in keep] for label, values in series.items()},
+        )
 
     def string_voltage_data(conn, start, end, since):
         """{"t", "volts": {"1": [V, …], … "4": […]}}: each string's voltage at every inverter reading."""
@@ -329,9 +398,12 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             body["sky"] = {"t": [], "kw": {}}
             if sky_end > sky_start:
                 sky = charts.clear_sky_strings(conn, config.site, config.array, sky_start, sky_end)
-                body["sky"] = {"t": [iso_utc(x.to_pydatetime()) for x in sky.index],
-                               "kw": {str(n): [None if math.isnan(v) else round(float(v), 3) for v in sky[n]]
-                                      for n in sky.columns}}
+                body["sky"] = {
+                    "t": [iso_utc(x.to_pydatetime()) for x in sky.index],
+                    "kw": {
+                        str(n): [None if math.isnan(v) else round(float(v), 3) for v in sky[n]] for n in sky.columns
+                    },
+                }
         return body
 
     def string_power_strips_data(conn, start, end, since):
@@ -341,14 +413,16 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         time. They change every few minutes, so the page fetches them again rather than topping them up. Each fetch
         also starts `sigen satellite` for the window (fetch_satellite's limits apply), so a page left open (it never
         reloads) keeps getting new scans."""
-        fetch_satellite(start, end)                      # in the background: these are the cubes there are now
+        fetch_satellite(start, end)  # in the background: these are the cubes there are now
         strip, note = charts.precipitation_strip(charts.precipitation(conn, start, end))
         strips, notes = [strip], [note]
-        if config.array is not None and config.site is not None:     # measured PV vs the clear-sky model, nearest the chart
+        if (
+            config.array is not None and config.site is not None
+        ):  # measured PV vs the clear-sky model, nearest the chart
             clear_sky = charts.clear_sky_strings(conn, config.site, config.array, start, end)
             pv_strip, pv_note = charts.measured_strip(charts.string_readings(conn, start, end), clear_sky)
             strips, notes = [pv_strip] + strips, [pv_note] + notes
-        if config.site is not None:                      # the satellite strips, from the stored scans (satellite_shade)
+        if config.site is not None:  # the satellite strips, from the stored scans (satellite_shade)
             more, note = charts.satellite_strips(charts.satellite_shade_series(conn, start, end))
             strips, notes = strips + more, notes + [note]
         return {"strips": strips_json(strips), "notes": notes}
@@ -400,8 +474,15 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         stored a few minutes after its time, so a top-up sends the last AIR_MARGIN of them again (the page keeps the
         ones it doesn't have)."""
         s = charts.inverter_series(conn, [*charts.BATTERY_TEMPS, charts.INVERTER_TEMP], start, end)
-        t, c = columns(s.times, {**{label: s.values[name] for name, label in charts.BATTERY_TEMPS.items()},
-                                 "inverter internal": s.values[charts.INVERTER_TEMP]}, since, 1)
+        t, c = columns(
+            s.times,
+            {
+                **{label: s.values[name] for name, label in charts.BATTERY_TEMPS.items()},
+                "inverter internal": s.values[charts.INVERTER_TEMP],
+            },
+            since,
+            1,
+        )
         air = charts.air_temperatures(conn, start - AIR_MARGIN if since else start, end)
         return {"t": t, "c": c, "air": {"t": [iso_utc(at) for at, _ in air], "c": [round(v, 1) for _, v in air]}}
 
@@ -410,16 +491,19 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
         "charge cut-off": [%…]}}}: every inverter reading, and every plant reading's SOC and settings (a few
         milliseconds off the inverter's, so a top-up sends the last SOC_MARGIN of them again)."""
         s = charts.inverter_series(conn, [charts.BATTERY_POWER, charts.PV_POWER], start, end)
-        t, kw = columns(s.times, {"battery": s.values[charts.BATTERY_POWER], "pv": s.values[charts.PV_POWER]},
-                        since, 3)
-        soc = charts.unit_series(conn, charts.PLANT, [charts.SOC, *charts.SOC_LIMITS],
-                                 start - SOC_MARGIN if since else start, end)
-        soc_t, pct = columns(soc.times, {"SOC": soc.values[charts.SOC],
-                                         **{label: soc.values[name] for name, label in charts.SOC_LIMITS.items()}},
-                             None, 1)
+        t, kw = columns(s.times, {"battery": s.values[charts.BATTERY_POWER], "pv": s.values[charts.PV_POWER]}, since, 3)
+        soc = charts.unit_series(
+            conn, charts.PLANT, [charts.SOC, *charts.SOC_LIMITS], start - SOC_MARGIN if since else start, end
+        )
+        soc_t, pct = columns(
+            soc.times,
+            {"SOC": soc.values[charts.SOC], **{label: soc.values[name] for name, label in charts.SOC_LIMITS.items()}},
+            None,
+            1,
+        )
         return {"t": t, "kw": kw, "soc": {"t": soc_t, "pct": pct}}
 
-    DATA = {                                                    # chart name -> (what it's doing, read)
+    DATA = {  # chart name -> (what it's doing, read)
         "sankey": ("reading where the energy went", sankey_data),
         "string_voltage": ("reading the string voltages", string_voltage_data),
         "string_power": ("reading the string power", string_power_data),
@@ -451,41 +535,56 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
 
     def render_page(args, sunrise_in_days: int = 0):
         query = {k: v for k, v in args.items() if k in ("day", "hours", "minutes")}
-        span = "hours" in query or "minutes" in query   # a sliding window
+        span = "hours" in query or "minutes" in query  # a sliding window
         try:
             start, end, live, description = parse_window(args, tz)
             error = None
-            fetch_satellite(start, end)                  # in the background: the page doesn't wait for it
+            fetch_satellite(start, end)  # in the background: the page doesn't wait for it
         except BadWindow as e:
             start, live, description, error = None, False, "", str(e)
         live = live and error is None
-        nav = day_nav(start, live) if start is not None and "day" in query else []   # ◀ ▶ beside a custom day
+        nav = day_nav(start, live) if start is not None and "day" in query else []  # ◀ ▶ beside a custom day
         daily_query = {"day": f"{start.date()}"} if start is not None and not span and not live else {}
-        sunrise = None                                  # "today" before sunrise: the string charts show the night
+        sunrise = None  # "today" before sunrise: the string charts show the night
         if live and not query and config.site is not None:
             from sigen.goes import sun_rise_set
+
             day = datetime.datetime.now(tz).date() + datetime.timedelta(days=sunrise_in_days)
             times = sun_rise_set(day, config.site.latitude, config.site.longitude)
             sunrise = times[0].timestamp() if times else None
-        if sunrise is None and sunrise_in_days:         # /night with no site (or no sunrise there): any time ahead
+        if sunrise is None and sunrise_in_days:  # /night with no site (or no sunrise there): any time ahead
             sunrise = time.time() + 6 * 3600
-        env = {                                         # for static/live_charts.js
+        env = {  # for static/live_charts.js
             "data": {name: url_for("chart_data", name=name, **query) for name in DATA},
-            "live": live,                               # top the charts up every `every` seconds
+            "live": live,  # top the charts up every `every` seconds
             "every": LIVE_EVERY,
             "strips_every": STRIPS_EVERY,
             "sankey_every": SANKEY_EVERY,
-            "keep": ((float(query["hours"]) * 3600 if "hours" in query else float(query["minutes"]) * 60)
-                     if span and live else None),                   # a sliding window's length (s)
-            "today": live and not query,                # load again after midnight, for the new day
-            "sunrise": sunrise,                         # today's, unix seconds (null: not "today", or no site)
+            "keep": (
+                (float(query["hours"]) * 3600 if "hours" in query else float(query["minutes"]) * 60)
+                if span and live
+                else None
+            ),  # a sliding window's length (s)
+            "today": live and not query,  # load again after midnight, for the new day
+            "sunrise": sunrise,  # today's, unix seconds (null: not "today", or no site)
             "live_volts": charts.LIVE_VOLTS,
         }
-        return render_template("dashboard.html", uplot=UPLOT, charts=CHARTS, query=query, quick=QUICK, nav=nav,
-                               today=f"{datetime.datetime.now(tz).date()}",
-                               listed="day" in query or query in [params for _, params in QUICK],
-                               daily_query=daily_query, description=description, error=error, live=live,
-                               every=LIVE_EVERY, env=env)
+        return render_template(
+            "dashboard.html",
+            uplot=UPLOT,
+            charts=CHARTS,
+            query=query,
+            quick=QUICK,
+            nav=nav,
+            today=f"{datetime.datetime.now(tz).date()}",
+            listed="day" in query or query in [params for _, params in QUICK],
+            daily_query=daily_query,
+            description=description,
+            error=error,
+            live=live,
+            every=LIVE_EVERY,
+            env=env,
+        )
 
     @app.get("/data/<name>.json")
     def chart_data(name):
@@ -503,9 +602,13 @@ def create_app(config: Config, launcher: Optional[Callable] = launch_detached) -
             conn = db.connect(url)
             conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
             body = build(conn)
-        except Exception as e:                           # noqa: BLE001 -- report anything as JSON, never a 500 page
-            return Response(json.dumps({"error": str(e)}), status=503, mimetype="application/json",
-                            headers={"Cache-Control": "no-store"})
+        except Exception as e:  # noqa: BLE001 -- report anything as JSON, never a 500 page
+            return Response(
+                json.dumps({"error": str(e)}),
+                status=503,
+                mimetype="application/json",
+                headers={"Cache-Control": "no-store"},
+            )
         finally:
             if conn is not None:
                 conn.close()

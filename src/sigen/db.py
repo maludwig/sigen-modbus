@@ -18,6 +18,7 @@ Tables (created by the numbered SQL files in sigen/migrations/):
 
 psycopg is imported only inside this module's functions, so the rest of sigen works without it.
 """
+
 import datetime
 import hashlib
 import re
@@ -30,7 +31,7 @@ from sigen import __version__
 from sigen.errors import DatabaseError, SchemaNotReady
 from sigen.registers import ALL_REGISTERS, BY_NAME, Register, decode_int
 
-STORED_REGISTERS = [r for r in ALL_REGISTERS if r.stored]     # what register_meta describes
+STORED_REGISTERS = [r for r in ALL_REGISTERS if r.stored]  # what register_meta describes
 BY_ADDRESS = {r.address: r for r in STORED_REGISTERS}
 DEVICES = ("plant", "inverter")
 # Column type per register type (u16 doesn't fit SMALLINT; u64 is stored as the same-bits signed number).
@@ -38,8 +39,20 @@ COLUMN_TYPES = {"u16": "integer", "s16": "smallint", "u32": "bigint", "s32": "in
 
 
 # The scaled views' column suffix per register unit, as migration 0004 named them.
-VIEW_SUFFIX = {"kW": "kw", "kWh": "kwh", "kvar": "kvar", "kVA": "kva", "V": "v", "A": "a", "%": "pct", "°C": "c",
-               "s": "s", "Hz": "hz", "min": "min", "MΩ": "megohm"}
+VIEW_SUFFIX = {
+    "kW": "kw",
+    "kWh": "kwh",
+    "kvar": "kvar",
+    "kVA": "kva",
+    "V": "v",
+    "A": "a",
+    "%": "pct",
+    "°C": "c",
+    "s": "s",
+    "Hz": "hz",
+    "min": "min",
+    "MΩ": "megohm",
+}
 
 
 def view_column(reg: Register) -> str:
@@ -53,6 +66,7 @@ def values_table(device: str) -> str:
     if device not in DEVICES:
         raise ValueError(f"unknown device {device!r}")
     return f"raw_{device}_register_values"
+
 
 MIGRATION_FILE = re.compile(r"^(\d{4})_([a-z0-9_]+)\.sql$")
 
@@ -72,7 +86,7 @@ UNLOCK_SQL = "SELECT pg_advisory_unlock(hashtext('sigen-migrate:' || current_sch
 # ---------- connections and errors ----------
 def redact(url: str) -> str:
     """Hide passwords in a postgresql:// URL or a key=value connection string."""
-    url = re.sub(r"(://[^:/@?#]*:)[^@/?#]*@", r"\1***@", url)          # user:PASSWORD@host
+    url = re.sub(r"(://[^:/@?#]*:)[^@/?#]*@", r"\1***@", url)  # user:PASSWORD@host
     return re.sub(r"(password\s*=\s*)('[^']*'|[^&\s]+)", r"\1***", url)  # password=… / ?password=…
 
 
@@ -97,6 +111,7 @@ def errors_as(what: str) -> Iterator[None]:
     """Turn psycopg errors into DatabaseError (exit 10) with some context.
     OperationalError (connection lost, server shutting down) is marked transient."""
     import psycopg
+
     try:
         yield
     except psycopg.Error as e:
@@ -180,11 +195,14 @@ def _check_applied(applied: Dict[int, Tuple[str, str]], migrations: Sequence[Mig
     for version, (name, checksum) in sorted(applied.items()):
         mig = known.get(version)
         if mig is None:
-            raise SchemaNotReady(f"the database has migration {version:04d}_{name}, which this version "
-                                 f"of sigen doesn't know; upgrade sigen")
+            raise SchemaNotReady(
+                f"the database has migration {version:04d}_{name}, which this version "
+                f"of sigen doesn't know; upgrade sigen"
+            )
         if mig.checksum != checksum:
-            raise SchemaNotReady(f"migration {mig.label} was edited after it was applied; put the change "
-                                 f"in a new migration instead")
+            raise SchemaNotReady(
+                f"migration {mig.label} was edited after it was applied; put the change " f"in a new migration instead"
+            )
 
 
 def migrate(conn, migrations: Optional[Sequence[Migration]] = None, log=lambda msg: None) -> List[str]:
@@ -204,8 +222,10 @@ def migrate(conn, migrations: Optional[Sequence[Migration]] = None, log=lambda m
                 log(f"applying {mig.label}")
                 with conn.transaction():
                     conn.execute(mig.sql)
-                    conn.execute("INSERT INTO schema_migrations (version, name, checksum) VALUES (%s, %s, %s)",
-                                 (mig.version, mig.name, mig.checksum))
+                    conn.execute(
+                        "INSERT INTO schema_migrations (version, name, checksum) VALUES (%s, %s, %s)",
+                        (mig.version, mig.name, mig.checksum),
+                    )
                 done.append(mig.label)
             with conn.transaction():
                 sync_register_meta(conn, log)
@@ -219,7 +239,7 @@ def migrate(conn, migrations: Optional[Sequence[Migration]] = None, log=lambda m
 class MetaPlan:
     inserts: List[Register]
     updates: List[Register]
-    problems: List[str]        # type changes on addresses that already have values
+    problems: List[str]  # type changes on addresses that already have values
 
     @property
     def in_sync(self) -> bool:
@@ -242,9 +262,11 @@ def plan_meta_sync(meta: Dict[int, tuple], has_values, registers: Sequence[Regis
             plan.inserts.append(reg)
         elif tuple(row) != _meta_row(reg):
             if row[1] != reg.type and has_values(reg.address):
-                plan.problems.append(f"{reg.address} {reg.name}: type is {row[1]} in the database but "
-                                     f"{reg.type} in the code, and values are stored; write a migration that "
-                                     f"converts them and updates register_meta")
+                plan.problems.append(
+                    f"{reg.address} {reg.name}: type is {row[1]} in the database but "
+                    f"{reg.type} in the code, and values are stored; write a migration that "
+                    f"converts them and updates register_meta"
+                )
             else:
                 plan.updates.append(reg)
     return plan
@@ -254,8 +276,9 @@ def wide_layout(conn) -> bool:
     """Whether migration 0004 has switched over: register_values is then a view over the wide tables. (The wide
     tables alone don't say so: the backfill script creates them, and fills them, while register_values is still
     the table poll writes to.)"""
-    return conn.execute("SELECT coalesce((SELECT relkind = 'v' FROM pg_class WHERE oid = to_regclass('register_values')), "
-                        "false)").fetchone()[0]
+    return conn.execute(
+        "SELECT coalesce((SELECT relkind = 'v' FROM pg_class WHERE oid = to_regclass('register_values')), " "false)"
+    ).fetchone()[0]
 
 
 _wide = wide_layout
@@ -263,36 +286,48 @@ _wide = wide_layout
 
 def has_glitch_column(conn) -> bool:
     """Whether readings has the glitch column (migration 0007)."""
-    return conn.execute("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
-                        "AND table_name = 'readings' AND column_name = 'glitch')").fetchone()[0]
+    return conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+        "AND table_name = 'readings' AND column_name = 'glitch')"
+    ).fetchone()[0]
 
 
 def _columns(conn) -> Dict[str, Dict[str, str]]:
     """device -> {column: data type} of the wide value tables."""
     found = {d: {} for d in DEVICES}
     for table, column, data_type in conn.execute(
-            "SELECT table_name, column_name, data_type FROM information_schema.columns "
-            "WHERE table_schema = current_schema() AND table_name = ANY(%s)", ([values_table(d) for d in DEVICES],)):
+        "SELECT table_name, column_name, data_type FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = ANY(%s)",
+        ([values_table(d) for d in DEVICES],),
+    ):
         found[table.split("_")[1]][column] = data_type
     return found
 
 
 def _plan(conn) -> MetaPlan:
     from psycopg import sql
-    meta = {a: (n, t, g, u, d) for a, n, t, g, u, d in
-            conn.execute("SELECT address, name, type, gain, unit, device FROM register_meta")}
+
+    meta = {
+        a: (n, t, g, u, d)
+        for a, n, t, g, u, d in conn.execute("SELECT address, name, type, gain, unit, device FROM register_meta")
+    }
     wide = _wide(conn)
     columns = _columns(conn) if wide else {}
 
     def has_values(address: int) -> bool:
-        if not wide:                                   # before 0004: the long table
-            return conn.execute("SELECT EXISTS (SELECT 1 FROM register_values WHERE address = %s)",
-                                (address,)).fetchone()[0]
+        if not wide:  # before 0004: the long table
+            return conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM register_values WHERE address = %s)", (address,)
+            ).fetchone()[0]
         name, device = meta[address][0], meta[address][4]
         if device not in DEVICES or name not in columns[device]:
             return False
-        return conn.execute(sql.SQL("SELECT EXISTS (SELECT 1 FROM {} WHERE {} IS NOT NULL)").format(
-            sql.Identifier(values_table(device)), sql.Identifier(name))).fetchone()[0]
+        return conn.execute(
+            sql.SQL("SELECT EXISTS (SELECT 1 FROM {} WHERE {} IS NOT NULL)").format(
+                sql.Identifier(values_table(device)), sql.Identifier(name)
+            )
+        ).fetchone()[0]
+
     return plan_meta_sync(meta, has_values)
 
 
@@ -304,8 +339,9 @@ def missing_columns(conn) -> List[str]:
         if have is None:
             problems.append(f"{reg.name} ({reg.address}) has no column in {values_table(reg.device)}")
         elif have != COLUMN_TYPES[reg.type]:
-            problems.append(f"{values_table(reg.device)}.{reg.name} is {have}, but {reg.type} needs "
-                            f"{COLUMN_TYPES[reg.type]}")
+            problems.append(
+                f"{values_table(reg.device)}.{reg.name} is {have}, but {reg.type} needs " f"{COLUMN_TYPES[reg.type]}"
+            )
     return problems
 
 
@@ -314,13 +350,19 @@ def sync_register_meta(conn, log=lambda msg: None) -> None:
     plan = _plan(conn)
     if plan.problems:
         raise SchemaNotReady("register_meta can't be synced:\n  " + "\n  ".join(plan.problems))
-    with conn.cursor() as cur:          # executemany: one pipelined batch, not a round trip per register
+    with conn.cursor() as cur:  # executemany: one pipelined batch, not a round trip per register
         if plan.inserts:
-            cur.executemany("INSERT INTO register_meta (address, name, type, gain, unit, device) "
-                            "VALUES (%s, %s, %s, %s, %s, %s)", [(reg.address, *_meta_row(reg)) for reg in plan.inserts])
+            cur.executemany(
+                "INSERT INTO register_meta (address, name, type, gain, unit, device) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                [(reg.address, *_meta_row(reg)) for reg in plan.inserts],
+            )
         if plan.updates:
-            cur.executemany("UPDATE register_meta SET name = %s, type = %s, gain = %s, unit = %s, device = %s "
-                            "WHERE address = %s", [(*_meta_row(reg), reg.address) for reg in plan.updates])
+            cur.executemany(
+                "UPDATE register_meta SET name = %s, type = %s, gain = %s, unit = %s, device = %s "
+                "WHERE address = %s",
+                [(*_meta_row(reg), reg.address) for reg in plan.updates],
+            )
     if plan.inserts or plan.updates:
         log(f"register_meta: {len(plan.inserts)} added, {len(plan.updates)} updated")
 
@@ -340,12 +382,17 @@ def check_ready(conn, migrations: Optional[Sequence[Migration]] = None) -> None:
         plan = _plan(conn)
         missing = missing_columns(conn)
     if not plan.in_sync:
-        detail = "\n  ".join(plan.problems) if plan.problems else \
-            f"{len(plan.inserts)} register(s) missing, {len(plan.updates)} changed; run `sigen db migrate`"
+        detail = (
+            "\n  ".join(plan.problems)
+            if plan.problems
+            else f"{len(plan.inserts)} register(s) missing, {len(plan.updates)} changed; run `sigen db migrate`"
+        )
         raise SchemaNotReady(f"register_meta doesn't match the code:\n  {detail}")
     if missing:
-        raise SchemaNotReady("the register map has registers the database can't store; add them with a migration "
-                             "(ALTER TABLE … ADD COLUMN, and recreate the views):\n  " + "\n  ".join(missing))
+        raise SchemaNotReady(
+            "the register map has registers the database can't store; add them with a migration "
+            "(ALTER TABLE … ADD COLUMN, and recreate the views):\n  " + "\n  ".join(missing)
+        )
 
 
 # ---------- status ----------
@@ -353,8 +400,10 @@ def status(conn, migrations: Optional[Sequence[Migration]] = None) -> dict:
     migrations = load_migrations() if migrations is None else list(migrations)
     with errors_as("reading status failed"):
         applied = _applied(conn)
-        out = {"migrations_applied": sorted(applied) if applied else [],
-               "migrations_pending": [m.label for m in migrations if not applied or m.version not in applied]}
+        out = {
+            "migrations_applied": sorted(applied) if applied else [],
+            "migrations_pending": [m.label for m in migrations if not applied or m.version not in applied],
+        }
         if not applied:
             return out
         try:
@@ -364,39 +413,49 @@ def status(conn, migrations: Optional[Sequence[Migration]] = None) -> dict:
             out["ready"], out["problem"] = False, str(e)
         total, failed = conn.execute("SELECT count(*), count(error) FROM readings").fetchone()
         out["readings"], out["failed_readings"] = total, failed
-        if _wide(conn):                       # since 0004: one row per successful reading, per device
-            out["value_rows"] = {d: conn.execute(f"SELECT count(*) FROM {values_table(d)}").fetchone()[0]
-                                 for d in DEVICES}
+        if _wide(conn):  # since 0004: one row per successful reading, per device
+            out["value_rows"] = {
+                d: conn.execute(f"SELECT count(*) FROM {values_table(d)}").fetchone()[0] for d in DEVICES
+            }
         else:
             # An exact count(*) on a large table takes a while, so past a million rows use the
             # planner's estimate (which is 0 until the table has been analyzed, hence not always).
-            estimate = conn.execute("SELECT greatest(reltuples, 0)::bigint FROM pg_class "
-                                    "WHERE oid = 'register_values'::regclass").fetchone()[0]
+            estimate = conn.execute(
+                "SELECT greatest(reltuples, 0)::bigint FROM pg_class " "WHERE oid = 'register_values'::regclass"
+            ).fetchone()[0]
             if estimate < 1_000_000:
                 out["register_values"] = conn.execute("SELECT count(*) FROM register_values").fetchone()[0]
                 out["register_values_exact"] = True
             else:
                 out["register_values"], out["register_values_exact"] = estimate, False
         out["last_reading"] = conn.execute(
-            "SELECT id, started_at, ended_at, error FROM readings ORDER BY started_at DESC LIMIT 1").fetchone()
-        if out["ready"]:                       # unit_id only exists once 0002 is applied, glitch once 0007 is
+            "SELECT id, started_at, ended_at, error FROM readings ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        if out["ready"]:  # unit_id only exists once 0002 is applied, glitch once 0007 is
             out["readings_by_unit"] = conn.execute(
-                "SELECT unit_id, count(*), count(error) FROM readings GROUP BY unit_id ORDER BY unit_id").fetchall()
-            out["glitched_readings"] = dict(conn.execute(
-                "SELECT glitch, count(*) FROM readings WHERE glitch IS NOT NULL GROUP BY glitch ORDER BY glitch"))
-        if conn.execute("SELECT to_regclass('open_meteo_weather')").fetchone()[0] is not None:   # 0003
+                "SELECT unit_id, count(*), count(error) FROM readings GROUP BY unit_id ORDER BY unit_id"
+            ).fetchall()
+            out["glitched_readings"] = dict(
+                conn.execute(
+                    "SELECT glitch, count(*) FROM readings WHERE glitch IS NOT NULL GROUP BY glitch ORDER BY glitch"
+                )
+            )
+        if conn.execute("SELECT to_regclass('open_meteo_weather')").fetchone()[0] is not None:  # 0003
             out["open_meteo"] = conn.execute(
                 "SELECT count(*), count(error), count(*) FILTER (WHERE resolution_minutes = 60 AND error IS NULL), "
                 "count(*) FILTER (WHERE resolution_minutes = 15 AND error IS NULL), max(valid_at), max(fetched_at) "
-                "FROM open_meteo_weather").fetchone()
+                "FROM open_meteo_weather"
+            ).fetchone()
             out["radar"] = conn.execute(
                 "SELECT count(*) FILTER (WHERE error IS NULL), count(error), max(frame_at) FILTER (WHERE error IS NULL), "
-                "max(fetched_at) FROM radar_frames").fetchone()
-        if conn.execute("SELECT to_regclass('alert_log')").fetchone()[0] is not None:            # 0005
+                "max(fetched_at) FROM radar_frames"
+            ).fetchone()
+        if conn.execute("SELECT to_regclass('alert_log')").fetchone()[0] is not None:  # 0005
             out["alerts"] = conn.execute(
                 "SELECT count(*) FILTER (WHERE NOT was_suppressed AND error IS NULL), count(error), "
-                "count(*) FILTER (WHERE was_suppressed), max(alerted_at) FROM alert_log").fetchone()
-        if conn.execute("SELECT to_regclass('daily_energy')").fetchone()[0] is not None:         # 0006
+                "count(*) FILTER (WHERE was_suppressed), max(alerted_at) FROM alert_log"
+            ).fetchone()
+        if conn.execute("SELECT to_regclass('daily_energy')").fetchone()[0] is not None:  # 0006
             out["daily_energy"] = conn.execute("SELECT count(*), min(day), max(day) FROM daily_energy").fetchone()
         out["tables"] = table_sizes(conn)
     return out
@@ -404,20 +463,26 @@ def status(conn, migrations: Optional[Sequence[Migration]] = None) -> dict:
 
 # Each table's row time: when its rows were written, or the nearest thing it has. A table not
 # listed here has no such column (register_meta, register_values_v1).
-ROW_TIMES = {"readings": "started_at", "raw_plant_register_values": "started_at",
-             "raw_inverter_register_values": "started_at", "open_meteo_weather": "fetched_at",
-             "radar_frames": "fetched_at", "alert_log": "alerted_at", "schema_migrations": "applied_at",
-             "daily_energy": "computed_at"}
+ROW_TIMES = {
+    "readings": "started_at",
+    "raw_plant_register_values": "started_at",
+    "raw_inverter_register_values": "started_at",
+    "open_meteo_weather": "fetched_at",
+    "radar_frames": "fetched_at",
+    "alert_log": "alerted_at",
+    "schema_migrations": "applied_at",
+    "daily_energy": "computed_at",
+}
 
 
 @dataclass
 class TableSize:
     name: str
-    total_bytes: int                    # data + indexes + TOAST
-    rows: int                           # exact, unless rows_exact is False (the planner's estimate)
+    total_bytes: int  # data + indexes + TOAST
+    rows: int  # exact, unless rows_exact is False (the planner's estimate)
     rows_exact: bool
     time_column: Optional[str]
-    rows_last_day: Optional[int]        # rows whose time is in the last 24 h; None without a time column
+    rows_last_day: Optional[int]  # rows whose time is in the last 24 h; None without a time column
 
     @property
     def bytes_per_day(self) -> Optional[float]:
@@ -434,19 +499,22 @@ def table_sizes(conn) -> List[TableSize]:
         "SELECT c.relname, pg_total_relation_size(c.oid), greatest(c.reltuples, 0)::bigint "
         "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
         "WHERE c.relkind IN ('r', 'p') AND n.nspname = current_schema() "
-        "ORDER BY pg_total_relation_size(c.oid) DESC, c.relname").fetchall()
+        "ORDER BY pg_total_relation_size(c.oid) DESC, c.relname"
+    ).fetchall()
     out = []
     for name, total, estimate in tables:
         column = ROW_TIMES.get(name)
-        if column is None:              # past a million rows the estimate, as above (count(*) takes seconds)
+        if column is None:  # past a million rows the estimate, as above (count(*) takes seconds)
             if estimate >= 1_000_000:
                 out.append(TableSize(name, total, estimate, False, None, None))
             else:
-                out.append(TableSize(name, total, conn.execute(f"SELECT count(*) FROM {name}").fetchone()[0],
-                                     True, None, None))
+                out.append(
+                    TableSize(name, total, conn.execute(f"SELECT count(*) FROM {name}").fetchone()[0], True, None, None)
+                )
             continue
         rows, last_day = conn.execute(
-            f"SELECT count(*), count(*) FILTER (WHERE {column} > now() - interval '24 hours') FROM {name}").fetchone()
+            f"SELECT count(*), count(*) FILTER (WHERE {column} > now() - interval '24 hours') FROM {name}"
+        ).fetchone()
         out.append(TableSize(name, total, rows, True, column, last_day))
     return out
 
@@ -454,10 +522,10 @@ def table_sizes(conn) -> List[TableSize]:
 # ---------- ad-hoc queries ----------
 @dataclass
 class QueryResult:
-    status: str                         # PostgreSQL's command tag, e.g. "SELECT 10"
-    columns: Optional[List[str]]        # None: the statement returns no rows
+    status: str  # PostgreSQL's command tag, e.g. "SELECT 10"
+    columns: Optional[List[str]]  # None: the statement returns no rows
     rows: List[tuple]
-    truncated: bool                     # it returned more than max_rows rows
+    truncated: bool  # it returned more than max_rows rows
 
 
 def query(conn, sql_text: str, max_rows: Optional[int] = None) -> List[QueryResult]:
@@ -478,8 +546,14 @@ def query(conn, sql_text: str, max_rows: Optional[int] = None) -> List[QueryResu
                 else:
                     rows = cur.fetchall() if not max_rows else cur.fetchmany(max_rows + 1)
                     truncated = bool(max_rows) and len(rows) > max_rows
-                    results.append(QueryResult(cur.statusmessage or "", [c.name for c in cur.description],
-                                               rows[:max_rows] if truncated else rows, truncated))
+                    results.append(
+                        QueryResult(
+                            cur.statusmessage or "",
+                            [c.name for c in cur.description],
+                            rows[:max_rows] if truncated else rows,
+                            truncated,
+                        )
+                    )
                 if not cur.nextset():
                     break
     return results
@@ -492,13 +566,24 @@ def next_poll_id(conn) -> int:
         return conn.execute("SELECT nextval('poll_ids')").fetchone()[0]
 
 
-def insert_reading(conn, *, ip: str, unit_id: int, poll_id: int, started_at: datetime.datetime,
-                   ended_at: datetime.datetime, values: Sequence[Tuple[int, int]] = (),
-                   error: Optional[str] = None, glitch: Optional[str] = None) -> int:
+def insert_reading(
+    conn,
+    *,
+    ip: str,
+    unit_id: int,
+    poll_id: int,
+    started_at: datetime.datetime,
+    ended_at: datetime.datetime,
+    values: Sequence[Tuple[int, int]] = (),
+    error: Optional[str] = None,
+    glitch: Optional[str] = None,
+) -> int:
     """One unit's snapshot, in one transaction: a readings row plus, if it has values, one row in its device's
     wide table (raw_plant_register_values or raw_inverter_register_values), one column per register. `glitch`
-    (readings.glitch, since 0007) is left out of the INSERT when None, so a database before 0007 still takes readings."""
+    (readings.glitch, since 0007) is left out of the INSERT when None, so a database before 0007 still takes readings.
+    """
     from psycopg import sql
+
     columns = []
     if values:
         regs = [BY_ADDRESS.get(address) for address, _ in values]
@@ -515,17 +600,20 @@ def insert_reading(conn, *, ip: str, unit_id: int, poll_id: int, started_at: dat
                 reading_id = conn.execute(
                     "INSERT INTO readings (ip_addr, unit_id, poll_id, started_at, ended_at, version, error) "
                     "VALUES (%s::inet, %s, %s, %s, %s, %s, %s) RETURNING id",
-                    (ip, unit_id, poll_id, started_at, ended_at, __version__, error)).fetchone()[0]
+                    (ip, unit_id, poll_id, started_at, ended_at, __version__, error),
+                ).fetchone()[0]
             else:
                 reading_id = conn.execute(
                     "INSERT INTO readings (ip_addr, unit_id, poll_id, started_at, ended_at, version, error, glitch) "
                     "VALUES (%s::inet, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-                    (ip, unit_id, poll_id, started_at, ended_at, __version__, error, glitch)).fetchone()[0]
+                    (ip, unit_id, poll_id, started_at, ended_at, __version__, error, glitch),
+                ).fetchone()[0]
             if values:
                 query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
                     sql.Identifier(values_table(devices.pop())),
                     sql.SQL(", ").join(map(sql.Identifier, ["reading_id", "started_at", *columns])),
-                    sql.SQL(", ").join([sql.Placeholder()] * (len(columns) + 2)))
+                    sql.SQL(", ").join([sql.Placeholder()] * (len(columns) + 2)),
+                )
                 conn.execute(query, [reading_id, started_at, *(value for _, value in values)])
     return reading_id
 
@@ -537,22 +625,27 @@ COLUMN_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 def insert_open_meteo(conn, row) -> int:
     """One sigen.weather.WeatherRow -> its open_meteo_weather id."""
     from psycopg import sql
+
     columns = ["fetched_at", "resolution_minutes", "valid_at", *row.values, "error"]
     bad = [c for c in columns if not COLUMN_NAME.match(c)]
     if bad:
         raise ValueError(f"not column names: {bad}")
     query = sql.SQL("INSERT INTO open_meteo_weather ({}) VALUES ({}) RETURNING id").format(
-        sql.SQL(", ").join(map(sql.Identifier, columns)), sql.SQL(", ").join([sql.Placeholder()] * len(columns)))
+        sql.SQL(", ").join(map(sql.Identifier, columns)), sql.SQL(", ").join([sql.Placeholder()] * len(columns))
+    )
     with errors_as("storing the Open-Meteo row failed"):
-        return conn.execute(query, [row.fetched_at, row.resolution_minutes, row.valid_at,
-                                    *row.values.values(), row.error]).fetchone()[0]
+        return conn.execute(
+            query, [row.fetched_at, row.resolution_minutes, row.valid_at, *row.values.values(), row.error]
+        ).fetchone()[0]
 
 
 def stored_radar_frames(conn, since: datetime.datetime) -> set:
     """Frame times from `since` on that already have a good row."""
     with errors_as("reading the stored radar frames failed"):
-        return {t for t, in conn.execute(
-            "SELECT frame_at FROM radar_frames WHERE error IS NULL AND frame_at >= %s", (since,))}
+        return {
+            t
+            for t, in conn.execute("SELECT frame_at FROM radar_frames WHERE error IS NULL AND frame_at >= %s", (since,))
+        }
 
 
 def insert_alert(conn, attempt) -> int:
@@ -562,26 +655,43 @@ def insert_alert(conn, attempt) -> int:
         return conn.execute(
             "INSERT INTO alert_log (alerted_at, kind, was_suppressed, title, message, priority, tags, click, "
             "http_code, ntfy_id, error) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (a.alerted_at, a.kind, a.was_suppressed, a.title, a.message, a.priority, list(a.tags), a.click,
-             a.http_code, a.ntfy_id, a.error)).fetchone()[0]
+            (
+                a.alerted_at,
+                a.kind,
+                a.was_suppressed,
+                a.title,
+                a.message,
+                a.priority,
+                list(a.tags),
+                a.click,
+                a.http_code,
+                a.ntfy_id,
+                a.error,
+            ),
+        ).fetchone()[0]
 
 
-def insert_battery_heater(conn, *, polled_at: datetime.datetime, battery: int,
-                          heater_on: Optional[bool], error: Optional[str] = None) -> int:
+def insert_battery_heater(
+    conn, *, polled_at: datetime.datetime, battery: int, heater_on: Optional[bool], error: Optional[str] = None
+) -> int:
     """One cloud poll of a battery pack's heating status -> its battery_heater id. Exactly one of heater_on / error
     is set (the table's CHECK): heater_on on a reading, error on a grumpy poll (then heater_on stays NULL)."""
     with errors_as("storing the battery heater poll failed"):
         return conn.execute(
             "INSERT INTO battery_heater (polled_at, battery, heater_on, error) VALUES (%s, %s, %s, %s) RETURNING id",
-            (polled_at, battery, heater_on, error)).fetchone()[0]
+            (polled_at, battery, heater_on, error),
+        ).fetchone()[0]
 
 
 def last_alerts_sent(conn) -> Dict[Optional[str], datetime.datetime]:
     """{kind: when the last alert of that kind was sent} (suppressed ones don't count; failed sends do: they were
     tried). For keeping the per-kind cooldown across a restart of `poll`."""
     with errors_as("reading the alert log failed"):
-        return dict(conn.execute("SELECT kind, max(alerted_at) FROM alert_log WHERE NOT was_suppressed "
-                                 "GROUP BY kind").fetchall())
+        return dict(
+            conn.execute(
+                "SELECT kind, max(alerted_at) FROM alert_log WHERE NOT was_suppressed " "GROUP BY kind"
+            ).fetchall()
+        )
 
 
 def insert_radar_rows(conn, rows) -> int:
@@ -595,23 +705,45 @@ def insert_radar_rows(conn, rows) -> int:
                     "INSERT INTO radar_frames (fetched_at, frame_at, rain_mm_h, rain_class, snow_cm_h, snow_class, "
                     "covered, error) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
                     "ON CONFLICT (frame_at) WHERE error IS NULL DO NOTHING",
-                    (r.fetched_at, r.frame_at, r.rain_mm_h, r.rain_class, r.snow_cm_h, r.snow_class, r.covered, r.error))
+                    (
+                        r.fetched_at,
+                        r.frame_at,
+                        r.rain_mm_h,
+                        r.rain_class,
+                        r.snow_cm_h,
+                        r.snow_class,
+                        r.covered,
+                        r.error,
+                    ),
+                )
                 if r.error is None:
                     added += cur.rowcount
     return added
 
 
-SATELLITE_SHADE_VALUES = ["trans_top", "trans_0km", "trans_2km", "trans_5km", "trans_10km",
-                          "prob_0km", "prob_2km", "prob_5km", "prob_10km"]        # the strip values, DB column order
+SATELLITE_SHADE_VALUES = [
+    "trans_top",
+    "trans_0km",
+    "trans_2km",
+    "trans_5km",
+    "trans_10km",
+    "prob_0km",
+    "prob_2km",
+    "prob_5km",
+    "prob_10km",
+]  # the strip values, DB column order
 
 
 def insert_satellite_shade(conn, fetched_at, series, error: Optional[str] = None) -> int:
     """Store a sigen.goes_shade.ShadeSeries, one row per scan (NaN -> NULL), one good row per scan (ON CONFLICT).
     With `error` set, store a single failed-run row (scan_at NULL) instead. Returns how many good rows were added."""
     import math
+
     columns = ["fetched_at", "scan_at", "sun_elevation_deg", *SATELLITE_SHADE_VALUES, "error"]
-    query = (f"INSERT INTO satellite_shade ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))}) "
-             "ON CONFLICT (scan_at) WHERE error IS NULL DO NOTHING")
+    query = (
+        f"INSERT INTO satellite_shade ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))}) "
+        "ON CONFLICT (scan_at) WHERE error IS NULL DO NOTHING"
+    )
     clean = lambda v: None if v is None or (isinstance(v, float) and math.isnan(v)) else v
     added = 0
     with errors_as("storing satellite shade failed"):
@@ -620,7 +752,12 @@ def insert_satellite_shade(conn, fetched_at, series, error: Optional[str] = None
                 conn.execute(query, [fetched_at, None, None, *([None] * len(SATELLITE_SHADE_VALUES)), error])
             elif series is not None:
                 for i, scan_at in enumerate(series.times):
-                    row = [fetched_at, scan_at, clean(series.sun_elevation[i]),
-                           *[clean(series.column(c)[i]) for c in SATELLITE_SHADE_VALUES], None]
+                    row = [
+                        fetched_at,
+                        scan_at,
+                        clean(series.sun_elevation[i]),
+                        *[clean(series.column(c)[i]) for c in SATELLITE_SHADE_VALUES],
+                        None,
+                    ]
                     added += conn.execute(query, row).rowcount
     return added

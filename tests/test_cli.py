@@ -1,4 +1,5 @@
 """Every exit code, exercised end to end against the in-process fake server."""
+
 import json
 import socket
 
@@ -34,10 +35,10 @@ def test_read_json_is_replayable(run, full_server, tmp_path):
     code, out, _ = run("read", *net(full_server), "--json")
     assert code == ExitCode.OK
     doc = json.loads(out)
-    assert doc["errors"] == {}                                  # every register in the map is in this capture
+    assert doc["errors"] == {}  # every register in the map is in this capture
     assert doc["holding_registers"]["40046"]["raw"] == [200]
-    assert doc["holding_registers"]["40032"]["value"] is None   # "not set" sentinel
-    assert doc["input_registers"]["30158"]["value"] == 0.767    # smart load 7 power
+    assert doc["holding_registers"]["40032"]["value"] is None  # "not set" sentinel
+    assert doc["input_registers"]["30158"]["value"] == 0.767  # smart load 7 power
 
 
 def test_read_reports_unreadable_registers(run, server):
@@ -90,8 +91,9 @@ def test_read_with_inverter_units(run, both_server, tmp_path):
 
 
 def test_capture_and_read_json_with_inverter_units(run, both_server, tmp_path):
-    code, out, _ = run("capture", *net(both_server), "--config", write_both_config(tmp_path),
-                       "--out-dir", tmp_path / "caps")
+    code, out, _ = run(
+        "capture", *net(both_server), "--config", write_both_config(tmp_path), "--out-dir", tmp_path / "caps"
+    )
     assert code == ExitCode.OK
     (f,) = (tmp_path / "caps").iterdir()
     doc = json.loads(f.read_text(encoding="utf-8"))
@@ -118,7 +120,7 @@ def test_dry_run_writes_nothing(run, server, journal):
     code, out, _ = run("set", *net(server), "--backup-soc", 20, "--journal", journal)
     assert code == ExitCode.DRY_RUN and "dry run" in out
     assert server.bank.read(247, "holding", 40046, 1) == [0]
-    assert not journal.exists()          # dry runs aren't journaled
+    assert not journal.exists()  # dry runs aren't journaled
 
 
 def test_apply_writes_verifies_and_journals(run, server, journal):
@@ -142,18 +144,15 @@ def test_refused_value(run, server, journal):
 
 
 def test_refused_mode(run, server, journal):
-    code, _, _ = run("set", *net(server), "--remote-ems-mode", "discharge-ess-first",
-                     "--apply", "--journal", journal)
+    code, _, _ = run("set", *net(server), "--remote-ems-mode", "discharge-ess-first", "--apply", "--journal", journal)
     assert code == ExitCode.REFUSED
 
 
 def test_expect_current_guard(run, server, journal):
-    code, out, _ = run("set", *net(server), "--backup-soc", 20, "--expect-current", 10,
-                       "--apply", "--journal", journal)
+    code, out, _ = run("set", *net(server), "--backup-soc", 20, "--expect-current", 10, "--apply", "--journal", journal)
     assert code == ExitCode.PRECONDITION and "expected current value" in out
     assert server.bank.read(247, "holding", 40046, 1) == [0]
-    code, _, _ = run("set", *net(server), "--backup-soc", 20, "--expect-current", 0,
-                     "--apply", "--journal", journal)
+    code, _, _ = run("set", *net(server), "--backup-soc", 20, "--expect-current", 0, "--apply", "--journal", journal)
     assert code == ExitCode.OK
 
 
@@ -169,19 +168,32 @@ def test_write_rejected_by_device(run, rejecting_server, journal):
     assert code == ExitCode.MODBUS and "rejected" in out and "exception 4" in out
     entry = json.loads(journal.read_text())
     assert entry["outcome"] == "write_rejected" and entry["write_sent"] is True
-    assert entry["after_raw"] == [0]                                   # read back after the refusal
+    assert entry["after_raw"] == [0]  # read back after the refusal
     assert rejecting_server.bank.read(247, "holding", 40046, 1) == [0]
 
 
 def test_set_connection_failure(run, journal):
-    code, _, _ = run("set", "--ip", "127.0.0.1", "--port", free_port(), "--timeout", 0.2,
-                     "--backup-soc", 20, "--apply", "--journal", journal)
+    code, _, _ = run(
+        "set",
+        "--ip",
+        "127.0.0.1",
+        "--port",
+        free_port(),
+        "--timeout",
+        0.2,
+        "--backup-soc",
+        20,
+        "--apply",
+        "--journal",
+        journal,
+    )
     assert code == ExitCode.CONNECTION
 
 
 def test_set_json_output(run, server, journal):
-    code, out, _ = run("set", *net(server), "--remote-ems-mode", "max-self-consumption",
-                       "--apply", "--json", "--journal", journal)
+    code, out, _ = run(
+        "set", *net(server), "--remote-ems-mode", "max-self-consumption", "--apply", "--json", "--journal", journal
+    )
     doc = json.loads(out)
     assert code == ExitCode.OK and doc["exit_code"] == 0
     assert doc["after"] == "Max Self-Consumption (2)"
@@ -193,7 +205,7 @@ def test_undo_restores_in_order(run, server, journal):
     run("set", *net(server), "--backup-soc", 20, "--apply", *j)
     run("set", *net(server), "--remote-ems-mode", "max-self-consumption", "--apply", *j)
 
-    assert run("undo", *net(server), *j)[0] == ExitCode.DRY_RUN       # dry run by default
+    assert run("undo", *net(server), *j)[0] == ExitCode.DRY_RUN  # dry run by default
     assert run("undo", *net(server), "--apply", *j)[0] == ExitCode.OK  # undoes the mode first
     assert server.bank.read(247, "holding", 40031, 1) == [0]
     assert server.bank.read(247, "holding", 40046, 1) == [200]
@@ -205,7 +217,7 @@ def test_undo_restores_in_order(run, server, journal):
 def test_undo_refuses_if_changed_since(run, server, journal):
     j = ["--journal", journal]
     run("set", *net(server), "--backup-soc", 20, "--apply", *j)
-    server.bank.write(247, 40046, [300])     # someone changed it in the app meanwhile
+    server.bank.write(247, 40046, [300])  # someone changed it in the app meanwhile
     code, out, _ = run("undo", *net(server), "--apply", *j)
     assert code == ExitCode.PRECONDITION
     assert server.bank.read(247, "holding", 40046, 1) == [300]
@@ -218,10 +230,13 @@ def test_registers_listing(run):
 
 def test_usage_errors_exit_2(run):
     import pytest
-    for argv in (["set", "--ip", "1.2.3.4"],                                  # no setting chosen
-                 ["set", "--ip", "1.2.3.4", "--backup-soc", "1", "--remote-ems-mode", "0"],
-                 ["set", "--backup-soc", "20"],                               # writes need --ip
-                 ["read", "--ip", "1.2.3.4", "--ip-range", "1.2.3.4-5"]):
+
+    for argv in (
+        ["set", "--ip", "1.2.3.4"],  # no setting chosen
+        ["set", "--ip", "1.2.3.4", "--backup-soc", "1", "--remote-ems-mode", "0"],
+        ["set", "--backup-soc", "20"],  # writes need --ip
+        ["read", "--ip", "1.2.3.4", "--ip-range", "1.2.3.4-5"],
+    ):
         with pytest.raises(SystemExit) as e:
             run(*argv)
         assert e.value.code == 2
@@ -230,12 +245,23 @@ def test_usage_errors_exit_2(run):
 # ---------- read-json ----------
 def test_read_json_pretty_prints_and_redecodes(run, tmp_path):
     # An older-format dump: "not set" limits stored as a bogus decoded value
-    doc = {"source": {"ip": "192.168.1.100", "read_at": "2026-10-06T21:48:31+00:00"},
-           "unit_id": 247,
-           "input_registers": {"30003": {"name": "plant_ems_work_mode", "type": "u16", "value": 7, "raw": [7]},
-                               "30014": {"name": "plant_ess_soc", "type": "u16", "gain": 10, "value": 99.9, "raw": [999]}},
-           "holding_registers": {"40032": {"name": "plant_ess_max_charging_limit", "type": "u32", "gain": 1000,
-                                           "value": 4294967.295, "raw": [65535, 65535]}}}
+    doc = {
+        "source": {"ip": "192.168.1.100", "read_at": "2026-10-06T21:48:31+00:00"},
+        "unit_id": 247,
+        "input_registers": {
+            "30003": {"name": "plant_ems_work_mode", "type": "u16", "value": 7, "raw": [7]},
+            "30014": {"name": "plant_ess_soc", "type": "u16", "gain": 10, "value": 99.9, "raw": [999]},
+        },
+        "holding_registers": {
+            "40032": {
+                "name": "plant_ess_max_charging_limit",
+                "type": "u32",
+                "gain": 1000,
+                "value": 4294967.295,
+                "raw": [65535, 65535],
+            }
+        },
+    }
     f = tmp_path / "dump.json"
     f.write_text(json.dumps(doc))
     for cmd in ("read-json", "read_json"):
@@ -273,7 +299,8 @@ def test_read_json_rejects_garbage(run, tmp_path):
 def test_capture_writes_utf8_file(run, midsoc_server, tmp_path):
     import re
     from sigen.data_io import load_document
-    out_dir = tmp_path / "new" / "captures"            # created if missing
+
+    out_dir = tmp_path / "new" / "captures"  # created if missing
     code, out, _ = run("capture", *net(midsoc_server), "--out-dir", out_dir)
     assert code == ExitCode.OK and "55.4%" in out
     (f,) = out_dir.iterdir()
@@ -284,12 +311,13 @@ def test_capture_writes_utf8_file(run, midsoc_server, tmp_path):
     doc = json.loads(data.decode("utf-8"))
     assert doc["input_registers"]["30066"]["raw"] == [0, 880]
     assert doc["derived"]["battery_total_estimate_kwh"] == 15.88
-    assert load_document(f)                            # replayable as fake data
+    assert load_document(f)  # replayable as fake data
     assert run("read-json", "--data-file", f)[0] == ExitCode.OK
 
 
 def test_capture_name_prefix_and_never_overwrites(run, server, tmp_path, monkeypatch):
     import sigen.cli
+
     monkeypatch.setattr(sigen.cli, "capture_filename", lambda doc, prefix: f"{prefix}_fixed.json")
     existing = tmp_path / "garage_fixed.json"
     existing.write_text("keep me")
@@ -299,13 +327,15 @@ def test_capture_name_prefix_and_never_overwrites(run, server, tmp_path, monkeyp
 
 
 def test_capture_connection_failure_writes_nothing(run, tmp_path):
-    code, _, _ = run("capture", "--ip", "127.0.0.1", "--port", free_port(), "--timeout", 0.2,
-                     "--out-dir", tmp_path / "caps")
+    code, _, _ = run(
+        "capture", "--ip", "127.0.0.1", "--port", free_port(), "--timeout", 0.2, "--out-dir", tmp_path / "caps"
+    )
     assert code == ExitCode.CONNECTION and not (tmp_path / "caps").exists()
 
 
 def test_capture_filename_is_utc():
     from sigen.data_io import capture_filename
+
     doc = {"source": {"read_at": "2026-10-07T11:13:34-06:00"}}
     assert capture_filename(doc, "my_system") == "my_system_2026-10-07_17-13-34Z.json"
 

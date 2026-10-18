@@ -18,6 +18,7 @@ non-absorbing cloud at the scan's sun angle, not fitted to any array.
 Cubes are read whole into memory and closed at once (Cube), so `sigen satellite` can swap in a new one at any
 moment. Needs numpy, h5py and pvlib.
 """
+
 import datetime
 import io
 import math
@@ -32,10 +33,10 @@ import numpy as np
 from sigen.goes import DEFAULT_SATELLITE, FixedGrid, cube_path
 
 SAMPLE_DELAY = datetime.timedelta(minutes=1)
-SCAN = datetime.timedelta(minutes=10)      # full-disk scans: one every 10 minutes
-ASYMMETRY = 0.85         # cloud droplets scatter mostly forward; ice cloud is a little lower (~0.75-0.8)
-FIRST_GUESS_KM = 8.0     # starting cloud height for the cloud-top search
-SETTLED_KM = 0.25        # stop when the height changes less than this
+SCAN = datetime.timedelta(minutes=10)  # full-disk scans: one every 10 minutes
+ASYMMETRY = 0.85  # cloud droplets scatter mostly forward; ice cloud is a little lower (~0.75-0.8)
+FIRST_GUESS_KM = 8.0  # starting cloud height for the cloud-top search
+SETTLED_KM = 0.25  # stop when the height changes less than this
 HEIGHTS_KM = (0, 2, 5, 10)
 EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
@@ -86,23 +87,24 @@ class Cube:
     3×3 blocks of any scan."""
 
     def __init__(self, path: Path):
-        self.f = h5py.File(io.BytesIO(Path(path).read_bytes()), "r")   # the file itself is closed again at once
+        self.f = h5py.File(io.BytesIO(Path(path).read_bytes()), "r")  # the file itself is closed again at once
         self.grid = FixedGrid(dict(self.f.attrs), self.f["x"][:], self.f["y"][:])
-        self.times = [EPOCH + datetime.timedelta(seconds=int(ns) // 10 ** 9) for ns in self.f["time"][:]]
+        self.times = [EPOCH + datetime.timedelta(seconds=int(ns) // 10**9) for ns in self.f["time"][:]]
         self.index = {t: i for i, t in enumerate(self.times)}
         self._frames = {}
 
     def block(self, var: str, i: int, row: int, col: int, half: int = 1):
         if (var, i) not in self._frames:
             self._frames[var, i] = decode(self.f[var][i], self.f[var].attrs)
-        return self._frames[var, i][max(row - half, 0):row + half + 1, max(col - half, 0):col + half + 1]
+        return self._frames[var, i][max(row - half, 0) : row + half + 1, max(col - half, 0) : col + half + 1]
 
 
 @dataclass
 class ShadeSeries:
     """One row per scan, in time order: when it was sampled (UTC), the sun, and the cloud columns (see the module's
     docstring; NaN where there was nothing to measure)."""
-    times: List[datetime.datetime] = field(default_factory=list)       # scan start + SAMPLE_DELAY, UTC
+
+    times: List[datetime.datetime] = field(default_factory=list)  # scan start + SAMPLE_DELAY, UTC
     sun_elevation: List[float] = field(default_factory=list)
     sun_azimuth: List[float] = field(default_factory=list)
     columns: Dict[str, List[float]] = field(default_factory=dict)
@@ -111,8 +113,15 @@ class ShadeSeries:
         return self.columns.get(name, [math.nan] * len(self.times))
 
 
-def shade_day(cube_dir: Path, lat: float, lon: float, day: datetime.date, satellite: str = DEFAULT_SATELLITE,
-              sector: str = "F", heights: Sequence[float] = HEIGHTS_KM) -> ShadeSeries:
+def shade_day(
+    cube_dir: Path,
+    lat: float,
+    lon: float,
+    day: datetime.date,
+    satellite: str = DEFAULT_SATELLITE,
+    sector: str = "F",
+    heights: Sequence[float] = HEIGHTS_KM,
+) -> ShadeSeries:
     """The series for one local day's cubes (empty if there are none)."""
     import pandas as pd
     import pvlib
@@ -120,6 +129,7 @@ def shade_day(cube_dir: Path, lat: float, lon: float, day: datetime.date, satell
     def open_cube(short):
         path = cube_path(cube_dir, satellite, f"{short}{sector}", day)
         return Cube(path) if path.exists() else None
+
     acm, cod, acha = open_cube("ACM"), open_cube("COD"), open_cube("ACHA")
     starts = sorted(set().union(*(set(c.times) for c in (acm, cod, acha) if c is not None)))
     if not starts:
@@ -165,19 +175,30 @@ def shade_day(cube_dir: Path, lat: float, lon: float, day: datetime.date, satell
                 h = found
                 if settled:
                     break
-            if not math.isnan(found):        # place the final point at the settled height
+            if not math.isnan(found):  # place the final point at the settled height
                 at_lat, at_lon = toward_sun(lat, lon, azimuth, h / np.tan(np.radians(elevation)))
             row["top_km"] = found
             if i_cod is not None:
                 sample_cod(row, i_cod, at_lat, at_lon, h * 1000, "top", mu0)
         rows.append(row)
     names = sorted(set().union(*rows))
-    return ShadeSeries(samples, [float(e) for e in sun["elevation"]], [float(a) for a in sun["azimuth"]],
-                       {n: [float(r.get(n, math.nan)) for r in rows] for n in names})
+    return ShadeSeries(
+        samples,
+        [float(e) for e in sun["elevation"]],
+        [float(a) for a in sun["azimuth"]],
+        {n: [float(r.get(n, math.nan)) for r in rows] for n in names},
+    )
 
 
-def shade_between(cube_dir: Path, lat: float, lon: float, timezone: str, start: datetime.datetime,
-                  end: datetime.datetime, satellite: str = DEFAULT_SATELLITE) -> ShadeSeries:
+def shade_between(
+    cube_dir: Path,
+    lat: float,
+    lon: float,
+    timezone: str,
+    start: datetime.datetime,
+    end: datetime.datetime,
+    satellite: str = DEFAULT_SATELLITE,
+) -> ShadeSeries:
     """Every scan sampled in [start, end), from the cubes of the local days the window touches."""
     tz = ZoneInfo(timezone)
     day, last = start.astimezone(tz).date(), (end - datetime.timedelta(microseconds=1)).astimezone(tz).date()

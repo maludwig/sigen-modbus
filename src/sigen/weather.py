@@ -12,6 +12,7 @@ described in sigen/migrations/0003_weather.sql.
 Standard library only (urllib). Both services are free and need no key: Open-Meteo is CC BY 4.0;
 GeoMet data is under Environment and Climate Change Canada's Data Server End-use Licence.
 """
+
 import datetime
 import http.client
 import json
@@ -30,26 +31,42 @@ from sigen.config import Site
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 GEOMET_URL = "https://geo.weather.gc.ca/geomet"
-TIMEOUT = 30                          # seconds per HTTP request
+TIMEOUT = 30  # seconds per HTTP request
 USER_AGENT = f"sigen-modbus/{__version__}"
 
 # Column name (= Open-Meteo variable) -> unit, in Open-Meteo's default units. Every one of them
 # is available both hourly and every 15 minutes.
 OPEN_METEO_VARIABLES: Dict[str, str] = {
-    "shortwave_radiation": "W/m²", "direct_radiation": "W/m²", "diffuse_radiation": "W/m²",
-    "direct_normal_irradiance": "W/m²", "sunshine_duration": "s",
-    "cloud_cover": "%", "cloud_cover_low": "%", "cloud_cover_mid": "%", "cloud_cover_high": "%",
-    "temperature_2m": "°C", "relative_humidity_2m": "%", "wind_speed_10m": "km/h", "wind_gusts_10m": "km/h",
-    "visibility": "m", "precipitation": "mm", "rain": "mm", "showers": "mm", "snowfall": "cm",
-    "snow_depth": "m", "weather_code": "WMO", "freezing_level_height": "m", "precipitation_probability": "%",
+    "shortwave_radiation": "W/m²",
+    "direct_radiation": "W/m²",
+    "diffuse_radiation": "W/m²",
+    "direct_normal_irradiance": "W/m²",
+    "sunshine_duration": "s",
+    "cloud_cover": "%",
+    "cloud_cover_low": "%",
+    "cloud_cover_mid": "%",
+    "cloud_cover_high": "%",
+    "temperature_2m": "°C",
+    "relative_humidity_2m": "%",
+    "wind_speed_10m": "km/h",
+    "wind_gusts_10m": "km/h",
+    "visibility": "m",
+    "precipitation": "mm",
+    "rain": "mm",
+    "showers": "mm",
+    "snowfall": "cm",
+    "snow_depth": "m",
+    "weather_code": "WMO",
+    "freezing_level_height": "m",
+    "precipitation_probability": "%",
     "is_day": "",
 }
-RESOLUTIONS = {60: "hourly", 15: "minutely_15"}     # resolution_minutes -> Open-Meteo's block name
-PAST_DAYS, FORECAST_DAYS = 1, 3                     # what each request returns (all of it is captured)
+RESOLUTIONS = {60: "hourly", 15: "minutely_15"}  # resolution_minutes -> Open-Meteo's block name
+PAST_DAYS, FORECAST_DAYS = 1, 3  # what each request returns (all of it is captured)
 
-RADAR_LAYERS = {"rain": "RADAR_1KM_RRAI", "snow": "RADAR_1KM_RSNO"}   # mm/h and cm/h
+RADAR_LAYERS = {"rain": "RADAR_1KM_RRAI", "snow": "RADAR_1KM_RSNO"}  # mm/h and cm/h
 COVERAGE_LAYER = "RADAR_COVERAGE_RRAI"
-RADAR_BOX = 0.01                      # degrees: the query box around the site, sampled at its centre
+RADAR_BOX = 0.01  # degrees: the query box around the site, sampled at its centre
 
 
 def now_utc() -> datetime.datetime:
@@ -59,8 +76,8 @@ def now_utc() -> datetime.datetime:
 # ---------- HTTP ----------
 @dataclass(frozen=True)
 class Response:
-    status: Optional[int]             # None: nothing answered (DNS, refused, timeout)
-    text: str                         # the body, or what went wrong
+    status: Optional[int]  # None: nothing answered (DNS, refused, timeout)
+    text: str  # the body, or what went wrong
 
     @property
     def ok(self) -> bool:
@@ -78,7 +95,7 @@ def http_get(url: str, params: Dict[str, object], timeout: float = TIMEOUT) -> R
             return Response(r.status, r.read().decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as e:
         return Response(e.code, e.read().decode("utf-8", errors="replace"))
-    except (OSError, http.client.HTTPException) as e:      # URLError and timeouts are OSErrors
+    except (OSError, http.client.HTTPException) as e:  # URLError and timeouts are OSErrors
         return Response(None, f"no response from {url}: {type(e).__name__}: {e}")
 
 
@@ -105,15 +122,21 @@ def save_capture(directory: Path, name: str, when: datetime.datetime, text: str)
 class WeatherRow:
     fetched_at: datetime.datetime
     resolution_minutes: int
-    valid_at: Optional[datetime.datetime] = None      # end of the period; None when error is set
+    valid_at: Optional[datetime.datetime] = None  # end of the period; None when error is set
     values: Dict[str, object] = field(default_factory=dict)
     error: Optional[str] = None
 
 
 def open_meteo_params(site: Site, resolution: int) -> Dict[str, object]:
-    return {"latitude": site.latitude, "longitude": site.longitude,
-            RESOLUTIONS[resolution]: ",".join(OPEN_METEO_VARIABLES),
-            "past_days": PAST_DAYS, "forecast_days": FORECAST_DAYS, "timezone": "GMT", "timeformat": "unixtime"}
+    return {
+        "latitude": site.latitude,
+        "longitude": site.longitude,
+        RESOLUTIONS[resolution]: ",".join(OPEN_METEO_VARIABLES),
+        "past_days": PAST_DAYS,
+        "forecast_days": FORECAST_DAYS,
+        "timezone": "GMT",
+        "timeformat": "unixtime",
+    }
 
 
 def _convert(name: str, value):
@@ -138,10 +161,13 @@ def parse_open_meteo(response: Response, resolution: int, fetched_at: datetime.d
         cutoff = fetched_at.timestamp()
         index = max((i for i, t in enumerate(times) if t <= cutoff), default=None)
         if index is None:
-            row.error = f"no {resolution}-minute period ends at or before {fetched_at:%Y-%m-%d %H:%M:%S}Z\n{response.text}"
+            row.error = (
+                f"no {resolution}-minute period ends at or before {fetched_at:%Y-%m-%d %H:%M:%S}Z\n{response.text}"
+            )
             return row
-        row.values = {name: _convert(name, block[name][index]) if name in block else None
-                      for name in OPEN_METEO_VARIABLES}
+        row.values = {
+            name: _convert(name, block[name][index]) if name in block else None for name in OPEN_METEO_VARIABLES
+        }
     except (ValueError, KeyError, TypeError, IndexError) as e:
         row.values = {}
         row.error = f"unexpected response ({type(e).__name__}: {e})\n{response.text}"
@@ -150,8 +176,9 @@ def parse_open_meteo(response: Response, resolution: int, fetched_at: datetime.d
     return row
 
 
-def fetch_open_meteo(site: Site, resolution: int, get: Optional[Getter] = None,
-                     now: Callable[[], datetime.datetime] = now_utc) -> Tuple[WeatherRow, Response]:
+def fetch_open_meteo(
+    site: Site, resolution: int, get: Optional[Getter] = None, now: Callable[[], datetime.datetime] = now_utc
+) -> Tuple[WeatherRow, Response]:
     fetched_at = now()
     response = (get or http_get)(OPEN_METEO_URL, open_meteo_params(site, resolution))
     return parse_open_meteo(response, resolution, fetched_at), response
@@ -162,8 +189,10 @@ def format_open_meteo(row: WeatherRow) -> str:
     if row.error:
         return f"{head}: FAILED: {_first_line(row.error)}"
     lines = [f"{head}: period ending {row.valid_at:%Y-%m-%d %H:%M}Z"]
-    lines += [f"  {name:<26} {'-' if value is None else value} {OPEN_METEO_VARIABLES[name]}".rstrip()
-              for name, value in row.values.items()]
+    lines += [
+        f"  {name:<26} {'-' if value is None else value} {OPEN_METEO_VARIABLES[name]}".rstrip()
+        for name, value in row.values.items()
+    ]
     return "\n".join(lines)
 
 
@@ -196,8 +225,10 @@ def parse_frames(response: Response) -> List[datetime.datetime]:
     match = TIME_DIMENSION.search(response.text)
     if match is None:
         raise ValueError(f"no time dimension in the capabilities\n{response.text}")
-    start, end = (datetime.datetime.strptime(t, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-                  for t in match.group(1, 2))
+    start, end = (
+        datetime.datetime.strptime(t, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+        for t in match.group(1, 2)
+    )
     step = datetime.timedelta(minutes=int(match.group(3)))
     frames = []
     while start <= end:
@@ -208,9 +239,21 @@ def parse_frames(response: Response) -> List[datetime.datetime]:
 
 def feature_info_params(site: Site, layer: str, frame: datetime.datetime) -> Dict[str, object]:
     box = f"{site.latitude - RADAR_BOX},{site.longitude - RADAR_BOX},{site.latitude + RADAR_BOX},{site.longitude + RADAR_BOX}"
-    return {"service": "WMS", "version": "1.3.0", "request": "GetFeatureInfo", "layers": layer, "query_layers": layer,
-            "crs": "EPSG:4326", "bbox": box, "width": 3, "height": 3, "i": 1, "j": 1,
-            "info_format": "application/json", "time": f"{frame:%Y-%m-%dT%H:%M:%SZ}"}
+    return {
+        "service": "WMS",
+        "version": "1.3.0",
+        "request": "GetFeatureInfo",
+        "layers": layer,
+        "query_layers": layer,
+        "crs": "EPSG:4326",
+        "bbox": box,
+        "width": 3,
+        "height": 3,
+        "i": 1,
+        "j": 1,
+        "info_format": "application/json",
+        "time": f"{frame:%Y-%m-%dT%H:%M:%SZ}",
+    }
 
 
 def parse_feature(response: Response, layer: str):
@@ -231,9 +274,14 @@ def parse_feature(response: Response, layer: str):
         raise ValueError(f"unexpected response ({type(e).__name__}: {e})\n{response.text}")
 
 
-def fetch_radar(site: Site, skip: Iterable[datetime.datetime] = (), latest_only: bool = False,
-                get: Optional[Getter] = None, now: Callable[[], datetime.datetime] = now_utc,
-                capture: Optional[Path] = None) -> List[RadarRow]:
+def fetch_radar(
+    site: Site,
+    skip: Iterable[datetime.datetime] = (),
+    latest_only: bool = False,
+    get: Optional[Getter] = None,
+    now: Callable[[], datetime.datetime] = now_utc,
+    capture: Optional[Path] = None,
+) -> List[RadarRow]:
     """Rows for GeoMet's frames, newest first: just the newest with latest_only, otherwise
     every frame not in `skip`. The first failure ends the round with an error row (the rest
     are tried next time), so an outage gives one row per round, not one per frame."""
@@ -283,9 +331,11 @@ def summarize_open_meteo(row: WeatherRow) -> str:
     if row.error:
         return f"{head}: FAILED: {_first_line(row.error)}"
     v = row.values
-    return (f"{head}: period ending {row.valid_at:%Y-%m-%d %H:%M}Z: GHI {v['shortwave_radiation']} W/m², "
-            f"cloud {v['cloud_cover']} %, {v['temperature_2m']} °C, precipitation {v['precipitation']} mm, "
-            f"snowfall {v['snowfall']} cm, code {v['weather_code']}")
+    return (
+        f"{head}: period ending {row.valid_at:%Y-%m-%d %H:%M}Z: GHI {v['shortwave_radiation']} W/m², "
+        f"cloud {v['cloud_cover']} %, {v['temperature_2m']} °C, precipitation {v['precipitation']} mm, "
+        f"snowfall {v['snowfall']} cm, code {v['weather_code']}"
+    )
 
 
 # ---------- storing ----------
@@ -303,6 +353,7 @@ class Store:
         """(True, fn(conn)), or (False, None) if the database is unavailable."""
         from sigen import db
         from sigen.errors import DatabaseError
+
         if self._conn is None or self._conn.closed:
             try:
                 self._conn = db.connect(self._url)
@@ -325,11 +376,17 @@ class Store:
             self._conn = None
 
 
-def record_open_meteo(site: Site, resolution: int, store: Optional[Store] = None, capture: Optional[Path] = None,
-                      get: Optional[Getter] = None) -> Tuple[WeatherRow, bool]:
+def record_open_meteo(
+    site: Site,
+    resolution: int,
+    store: Optional[Store] = None,
+    capture: Optional[Path] = None,
+    get: Optional[Getter] = None,
+) -> Tuple[WeatherRow, bool]:
     """Fetch one resolution; save the whole response under `capture`; store the row.
     Returns (row, whether it was stored)."""
     from sigen import db
+
     row, response = fetch_open_meteo(site, resolution, get)
     if capture is not None:
         save_capture(capture, f"open-meteo_{resolution}min", row.fetched_at, response.text)
@@ -339,20 +396,23 @@ def record_open_meteo(site: Site, resolution: int, store: Optional[Store] = None
     return row, stored
 
 
-RADAR_INTERVAL = 360                            # seconds: GeoMet makes a frame every 6 minutes
-RADAR_LOOKBACK = datetime.timedelta(hours=4)    # longer than GeoMet keeps frames
+RADAR_INTERVAL = 360  # seconds: GeoMet makes a frame every 6 minutes
+RADAR_LOOKBACK = datetime.timedelta(hours=4)  # longer than GeoMet keeps frames
 
 
-def record_radar(site: Site, store: Optional[Store] = None, capture: Optional[Path] = None,
-                 get: Optional[Getter] = None) -> Tuple[List[RadarRow], Optional[int]]:
+def record_radar(
+    site: Site, store: Optional[Store] = None, capture: Optional[Path] = None, get: Optional[Getter] = None
+) -> Tuple[List[RadarRow], Optional[int]]:
     """Without a store: the newest frame. With one: every frame GeoMet has that isn't stored
     yet, stored. Returns (rows, how many good rows were newly stored: None if the database
     was unavailable, 0 without a store)."""
     from sigen import db
+
     if store is None:
         return fetch_radar(site, latest_only=True, get=get, capture=capture), 0
-    ok, stored = store.use("radar frames aren't stored",
-                           lambda conn: db.stored_radar_frames(conn, now_utc() - RADAR_LOOKBACK))
+    ok, stored = store.use(
+        "radar frames aren't stored", lambda conn: db.stored_radar_frames(conn, now_utc() - RADAR_LOOKBACK)
+    )
     if not ok:
         return fetch_radar(site, latest_only=True, get=get, capture=capture), None
     rows = fetch_radar(site, skip=stored, get=get, capture=capture)
@@ -376,7 +436,7 @@ def summarize_radar(rows: Sequence[RadarRow], added: Optional[int]) -> str:
 @dataclass
 class Job:
     name: str
-    interval: float                   # seconds; the first run is immediate
+    interval: float  # seconds; the first run is immediate
     run: Callable[[], None]
 
 
@@ -409,7 +469,7 @@ class Background:
                 return
             try:
                 job.run()
-            except Exception as e:            # never let the weather stop the polling
+            except Exception as e:  # never let the weather stop the polling
                 self._err(f"warning: {job.name} failed: {type(e).__name__}: {e}")
             due[id(job)] += job.interval
             while due[id(job)] <= self._monotonic():

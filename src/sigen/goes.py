@@ -26,6 +26,7 @@ refuses (exit 7) while that process is alive.
 
 Needs numpy, h5py and fsspec[http] (dependencies of the package).
 """
+
 import concurrent.futures
 import datetime
 import math
@@ -45,12 +46,12 @@ import numpy as np
 
 from sigen.errors import ConnectionFailed, PreconditionFailed, SigenError
 
-DEFAULT_SATELLITE = "18"                 # GOES-West: western North America and the Pacific
+DEFAULT_SATELLITE = "18"  # GOES-West: western North America and the Pacific
 PRODUCTS = ("ACM", "COD", "ACHA")
-DEFAULT_KM = 200                         # box half-width: a 10 km cloud's shade at 10° sun is ~57 km away
+DEFAULT_KM = 200  # box half-width: a 10 km cloud's shade at 10° sun is ~57 km away
 DEFAULT_WORKERS = 8
-DEFAULT_DAYLIGHT_MINUTES = 60            # an hour either side of sunrise..sunset: when clouds shade panels
-BLOCK_SIZE = 128 * 1024                  # Range request size: ACMF ~1.4 MB a scan (256 KiB: 2.4, 1 MiB: 6.3)
+DEFAULT_DAYLIGHT_MINUTES = 60  # an hour either side of sunrise..sunset: when clouds shade panels
+BLOCK_SIZE = 128 * 1024  # Range request size: ACMF ~1.4 MB a scan (256 KiB: 2.4, 1 MiB: 6.3)
 PROJECTION_ATTRS = ("semi_major_axis", "semi_minor_axis", "perspective_point_height", "longitude_of_projection_origin")
 SKIP_ATTRS = {"DIMENSION_LIST", "REFERENCE_LIST", "_Netcdf4Dimid", "_Netcdf4Coordinates", "CLASS", "NAME"}
 S3_NS = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
@@ -65,17 +66,21 @@ def bucket_url(satellite: str) -> str:
 def list_keys(satellite: str, prefix: str, get=None) -> List[Tuple[str, int]]:
     """(key, size) of every object under `prefix` in the satellite's bucket."""
     from sigen.weather import http_get
+
     get = get or http_get
     keys, token = [], None
     while True:
         params = {"list-type": "2", "prefix": prefix, **({"continuation-token": token} if token else {})}
         response = get(bucket_url(satellite), params)
         if not response.ok:
-            raise ConnectionFailed(f"listing {prefix} in {bucket_url(satellite)} failed: "
-                                   f"{response.describe().splitlines()[0]}")
+            raise ConnectionFailed(
+                f"listing {prefix} in {bucket_url(satellite)} failed: " f"{response.describe().splitlines()[0]}"
+            )
         root = ET.fromstring(response.text)
-        keys += [(c.find("s3:Key", S3_NS).text, int(c.find("s3:Size", S3_NS).text))
-                 for c in root.findall("s3:Contents", S3_NS)]
+        keys += [
+            (c.find("s3:Key", S3_NS).text, int(c.find("s3:Size", S3_NS).text))
+            for c in root.findall("s3:Contents", S3_NS)
+        ]
         if root.findtext("s3:IsTruncated", namespaces=S3_NS) != "true":
             return keys
         token = root.findtext("s3:NextContinuationToken", namespaces=S3_NS)
@@ -93,11 +98,12 @@ def scan_start(key: str) -> datetime.datetime:
 def nanoseconds(t: datetime.datetime) -> int:
     """A UTC datetime as int64 nanoseconds since the epoch (the cubes' time axis)."""
     delta = t - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
-    return (delta.days * 86400 + delta.seconds) * 10 ** 9 + delta.microseconds * 1000
+    return (delta.days * 86400 + delta.seconds) * 10**9 + delta.microseconds * 1000
 
 
-def keys_between(satellite: str, product: str, start: datetime.datetime, end: datetime.datetime,
-                 lister: Optional[Callable] = None) -> List[Tuple[str, int]]:
+def keys_between(
+    satellite: str, product: str, start: datetime.datetime, end: datetime.datetime, lister: Optional[Callable] = None
+) -> List[Tuple[str, int]]:
     """(key, size) of the `product` files (e.g. "ABI-L2-ACMF") whose scan starts in [start, end), by time."""
     lister = lister or list_keys
     found = []
@@ -123,37 +129,41 @@ class FixedGrid:
     @classmethod
     def from_netcdf(cls, f):
         """The grid of a GOES NetCDF file opened with h5py."""
+
         def axis(d):
             return d[:] * float(d.attrs["scale_factor"][0]) + float(d.attrs["add_offset"][0])
+
         return cls(f["goes_imager_projection"].attrs, axis(f["x"]), axis(f["y"]))
 
     def scan_angles(self, lat, lon, height_m=0.0):
         """Scan angles (x, y) in radians at which the satellite sees a point `height_m` above (lat, lon)."""
         phi, lam = np.radians(lat), np.radians(lon)
-        phi_c = np.arctan((self.r_pol ** 2 / self.r_eq ** 2) * np.tan(phi))
-        e2 = (self.r_eq ** 2 - self.r_pol ** 2) / self.r_eq ** 2
+        phi_c = np.arctan((self.r_pol**2 / self.r_eq**2) * np.tan(phi))
+        e2 = (self.r_eq**2 - self.r_pol**2) / self.r_eq**2
         r_c = self.r_pol / np.sqrt(1 - e2 * np.cos(phi_c) ** 2) + height_m
         s_x = self.H - r_c * np.cos(phi_c) * np.cos(lam - self.lon0)
         s_y = -r_c * np.cos(phi_c) * np.sin(lam - self.lon0)
         s_z = r_c * np.sin(phi_c)
-        return np.arcsin(-s_y / np.sqrt(s_x ** 2 + s_y ** 2 + s_z ** 2)), np.arctan(s_z / s_x)
+        return np.arcsin(-s_y / np.sqrt(s_x**2 + s_y**2 + s_z**2)), np.arctan(s_z / s_x)
 
     def lat_lon(self, x, y):
         """Ground (lat, lon) in degrees seen at scan angles x, y (radians)."""
-        a = np.sin(x) ** 2 + np.cos(x) ** 2 * (np.cos(y) ** 2 + (self.r_eq ** 2 / self.r_pol ** 2) * np.sin(y) ** 2)
+        a = np.sin(x) ** 2 + np.cos(x) ** 2 * (np.cos(y) ** 2 + (self.r_eq**2 / self.r_pol**2) * np.sin(y) ** 2)
         b = -2 * self.H * np.cos(x) * np.cos(y)
-        c = self.H ** 2 - self.r_eq ** 2
-        r_s = (-b - np.sqrt(b ** 2 - 4 * a * c)) / (2 * a)
+        c = self.H**2 - self.r_eq**2
+        r_s = (-b - np.sqrt(b**2 - 4 * a * c)) / (2 * a)
         s_x, s_y, s_z = r_s * np.cos(x) * np.cos(y), -r_s * np.sin(x), r_s * np.cos(x) * np.sin(y)
-        lat = np.degrees(np.arctan((self.r_eq ** 2 / self.r_pol ** 2) * s_z / np.sqrt((self.H - s_x) ** 2 + s_y ** 2)))
+        lat = np.degrees(np.arctan((self.r_eq**2 / self.r_pol**2) * s_z / np.sqrt((self.H - s_x) ** 2 + s_y**2)))
         return lat, np.degrees(self.lon0 - np.arctan(s_y / (self.H - s_x)))
 
     def pixel(self, lat, lon, height_m=0.0):
         """(row, col) of the pixel showing a point `height_m` above (lat, lon), or None if outside the grid."""
         x, y = self.scan_angles(lat, lon, height_m)
         step_x, step_y = abs(self.x[1] - self.x[0]), abs(self.y[1] - self.y[0])
-        if not (self.x.min() - step_x / 2 <= x <= self.x.max() + step_x / 2
-                and self.y.min() - step_y / 2 <= y <= self.y.max() + step_y / 2):
+        if not (
+            self.x.min() - step_x / 2 <= x <= self.x.max() + step_x / 2
+            and self.y.min() - step_y / 2 <= y <= self.y.max() + step_y / 2
+        ):
             return None
         return int(np.abs(self.y - y).argmin()), int(np.abs(self.x - x).argmin())
 
@@ -176,18 +186,32 @@ def sun_rise_set(day: datetime.date, lat: float, lon: float) -> Optional[Tuple[d
     """Sunrise and sunset (UTC) on `day` at (lat, lon), NOAA's approximation (within ~2 minutes); None if the sun
     doesn't rise or doesn't set that day."""
     g = 2 * math.pi / 365 * (day.timetuple().tm_yday - 1 + 0.5)
-    eqtime = 229.18 * (0.000075 + 0.001868 * math.cos(g) - 0.032077 * math.sin(g)
-                       - 0.014615 * math.cos(2 * g) - 0.040849 * math.sin(2 * g))              # minutes
-    decl = (0.006918 - 0.399912 * math.cos(g) + 0.070257 * math.sin(g) - 0.006758 * math.cos(2 * g)
-            + 0.000907 * math.sin(2 * g) - 0.002697 * math.cos(3 * g) + 0.00148 * math.sin(3 * g))
+    eqtime = 229.18 * (
+        0.000075
+        + 0.001868 * math.cos(g)
+        - 0.032077 * math.sin(g)
+        - 0.014615 * math.cos(2 * g)
+        - 0.040849 * math.sin(2 * g)
+    )  # minutes
+    decl = (
+        0.006918
+        - 0.399912 * math.cos(g)
+        + 0.070257 * math.sin(g)
+        - 0.006758 * math.cos(2 * g)
+        + 0.000907 * math.sin(2 * g)
+        - 0.002697 * math.cos(3 * g)
+        + 0.00148 * math.sin(3 * g)
+    )
     phi = math.radians(lat)
     cos_ha = math.cos(math.radians(90.833)) / (math.cos(phi) * math.cos(decl)) - math.tan(phi) * math.tan(decl)
     if not -1 <= cos_ha <= 1:
         return None
     ha = math.degrees(math.acos(cos_ha))
     midnight = datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc)
-    return (midnight + datetime.timedelta(minutes=720 - 4 * (lon + ha) - eqtime),
-            midnight + datetime.timedelta(minutes=720 - 4 * (lon - ha) - eqtime))
+    return (
+        midnight + datetime.timedelta(minutes=720 - 4 * (lon + ha) - eqtime),
+        midnight + datetime.timedelta(minutes=720 - 4 * (lon - ha) - eqtime),
+    )
 
 
 def in_daylight(t: datetime.datetime, lat: float, lon: float, timezone: str, margin_minutes: float) -> bool:
@@ -203,12 +227,13 @@ def in_daylight(t: datetime.datetime, lat: float, lon: float, timezone: str, mar
 @dataclass
 class Box:
     """One scan's box, in memory: what gets appended to the cube."""
+
     rows: slice
     cols: slice
-    x: np.ndarray                  # the box's scan angles
+    x: np.ndarray  # the box's scan angles
     y: np.ndarray
     projection: dict
-    variables: dict                # name -> (raw array, attributes, dtype), in the file's order
+    variables: dict  # name -> (raw array, attributes, dtype), in the file's order
 
 
 def cut_box(src, lat: float, lon: float, km: float, window=None) -> Box:
@@ -216,8 +241,11 @@ def cut_box(src, lat: float, lon: float, km: float, window=None) -> Box:
     grid = FixedGrid.from_netcdf(src)
     rows, cols = window if window is not None else box_window(grid, lat, lon, km)
     shape = (len(grid.y), len(grid.x))
-    variables = {name: (d[rows, cols], {k: v for k, v in d.attrs.items() if k not in SKIP_ATTRS}, d.dtype)
-                 for name, d in src.items() if isinstance(d, h5py.Dataset) and d.shape == shape}
+    variables = {
+        name: (d[rows, cols], {k: v for k, v in d.attrs.items() if k not in SKIP_ATTRS}, d.dtype)
+        for name, d in src.items()
+        if isinstance(d, h5py.Dataset) and d.shape == shape
+    }
     projection = {k: src["goes_imager_projection"].attrs[k] for k in PROJECTION_ATTRS}
     return Box(rows, cols, grid.x[cols], grid.y[rows], projection, variables)
 
@@ -227,6 +255,7 @@ def fetch_box(url: str, lat: float, lon: float, km: float, window=None, opener=N
     seekable binary file with a `.cache.total_requested_bytes` (default: fsspec over HTTP)."""
     if opener is None:
         import fsspec
+
         f = fsspec.filesystem("http").open(url, "rb", block_size=BLOCK_SIZE, cache_type="blockcache")
     else:
         f = opener(url)
@@ -241,20 +270,38 @@ def cube_path(cube_dir: Path, satellite: str, product: str, day: datetime.date) 
     return Path(cube_dir) / f"goes{satellite}_{product}_{day:%Y-%m-%d}.h5"
 
 
-def append_box(path: Path, box: Box, t0: datetime.datetime, product: str, satellite: str, km: float,
-               lat: float, lon: float) -> None:
+def append_box(
+    path: Path, box: Box, t0: datetime.datetime, product: str, satellite: str, km: float, lat: float, lon: float
+) -> None:
     """Append one scan's box to the cube at `path` (created on first use)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "a") as cube:
         if "time" not in cube:
-            cube.attrs.update({"satellite": f"GOES-{satellite}", "product": product, "box_half_km": km,
-                               "center_lat": lat, "center_lon": lon, "row0": box.rows.start, "col0": box.cols.start,
-                               **box.projection})
+            cube.attrs.update(
+                {
+                    "satellite": f"GOES-{satellite}",
+                    "product": product,
+                    "box_half_km": km,
+                    "center_lat": lat,
+                    "center_lon": lon,
+                    "row0": box.rows.start,
+                    "col0": box.cols.start,
+                    **box.projection,
+                }
+            )
             cube["x"], cube["y"] = box.x, box.y
             cube.create_dataset("time", shape=(0,), maxshape=(None,), dtype="int64")
             for name, (data, attrs, dtype) in box.variables.items():
-                out = cube.create_dataset(name, shape=(0, *data.shape), maxshape=(None, *data.shape), dtype=dtype,
-                                          chunks=(1, *data.shape), compression="gzip", compression_opts=6, shuffle=True)
+                out = cube.create_dataset(
+                    name,
+                    shape=(0, *data.shape),
+                    maxshape=(None, *data.shape),
+                    dtype=dtype,
+                    chunks=(1, *data.shape),
+                    compression="gzip",
+                    compression_opts=6,
+                    shuffle=True,
+                )
                 out.attrs.update(attrs)
         elif not (np.allclose(cube["x"][:], box.x) and np.allclose(cube["y"][:], box.y)):
             raise SigenError(f"{product} {t0:%Y-%m-%d %H:%M}Z: its grid doesn't match {path.name}")
@@ -267,7 +314,7 @@ def append_box(path: Path, box: Box, t0: datetime.datetime, product: str, satell
                 cube[name][n] = data
 
 
-SWAP_TRIES, SWAP_WAIT = 50, 0.1          # a reader holding the cube open (Windows won't replace it): up to ~5 s
+SWAP_TRIES, SWAP_WAIT = 50, 0.1  # a reader holding the cube open (Windows won't replace it): up to ~5 s
 
 
 def working_copy(path: Path) -> Path:
@@ -276,7 +323,7 @@ def working_copy(path: Path) -> Path:
     if path.exists():
         shutil.copyfile(path, tmp)
     elif tmp.exists():
-        tmp.unlink()                     # left by a run that crashed before its first swap
+        tmp.unlink()  # left by a run that crashed before its first swap
     return tmp
 
 
@@ -289,8 +336,10 @@ def swap_in(tmp: Path, path: Path, tries: int = SWAP_TRIES, wait: float = SWAP_W
             return
         except PermissionError:
             if attempt == tries - 1:
-                raise SigenError(f"couldn't replace {path.name}: something has it open; the new scans are in "
-                                 f"{tmp.name}, and the next run starts over from {path.name}")
+                raise SigenError(
+                    f"couldn't replace {path.name}: something has it open; the new scans are in "
+                    f"{tmp.name}, and the next run starts over from {path.name}"
+                )
             time.sleep(wait)
 
 
@@ -306,21 +355,22 @@ def process_alive(pid: int) -> bool:
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
+
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        handle = kernel32.OpenProcess(0x1000, False, pid)            # PROCESS_QUERY_LIMITED_INFORMATION
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
         if not handle:
-            return ctypes.get_last_error() == 5                       # access denied: it exists, it isn't ours
+            return ctypes.get_last_error() == 5  # access denied: it exists, it isn't ours
         try:
             code = wintypes.DWORD()
             return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
         finally:
             kernel32.CloseHandle(handle)
     try:
-        os.kill(pid, 0)                  # signal 0: only checks (on Windows os.kill would terminate it instead)
+        os.kill(pid, 0)  # signal 0: only checks (on Windows os.kill would terminate it instead)
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -342,10 +392,12 @@ def claim_pid_file(cube_dir: Path, pid: Optional[int] = None) -> Path:
                 owner = int(path.read_text(encoding="ascii").strip() or 0)
                 age = time.time() - path.stat().st_mtime
             except (OSError, ValueError):
-                owner, age = 0, 0.0      # unreadable or half-written: treat as stale
+                owner, age = 0, 0.0  # unreadable or half-written: treat as stale
             if owner != pid and process_alive(owner) and age < PID_STALE.total_seconds():
-                raise PreconditionFailed(f"sigen satellite is already running (process {owner}, {path}); "
-                                         "it will pick up everything this run would have")
+                raise PreconditionFailed(
+                    f"sigen satellite is already running (process {owner}, {path}); "
+                    "it will pick up everything this run would have"
+                )
             path.unlink(missing_ok=True)
             continue
         with os.fdopen(fd, "w", encoding="ascii") as f:
@@ -369,6 +421,7 @@ def _network_errors() -> tuple:
     aiohttp's own errors, which aren't all OSErrors."""
     try:
         import aiohttp
+
         return OSError, aiohttp.ClientError
     except ImportError:
         return (OSError,)
@@ -382,30 +435,42 @@ def _existing(path: Path):
         if "time" not in cube:
             return set(), None
         row0, col0 = int(cube.attrs["row0"]), int(cube.attrs["col0"])
-        return (set(cube["time"][:].tolist()),
-                (slice(row0, row0 + len(cube["y"])), slice(col0, col0 + len(cube["x"]))))
+        return (set(cube["time"][:].tolist()), (slice(row0, row0 + len(cube["y"])), slice(col0, col0 + len(cube["x"]))))
 
 
 @dataclass
 class ProductResult:
     product: str
-    scans: int            # in the time window (after the daylight filter)
+    scans: int  # in the time window (after the daylight filter)
     added: int
     fetched_bytes: int
     seconds: float
     cubes: List[Path]
 
 
-def build_cubes(*, lat: float, lon: float, timezone: str, start: datetime.datetime, end: datetime.datetime,
-                cube_dir: Path, products: Sequence[str] = PRODUCTS, km: float = DEFAULT_KM,
-                satellite: str = DEFAULT_SATELLITE, sector: str = "F", workers: int = DEFAULT_WORKERS,
-                daylight_minutes: Optional[float] = DEFAULT_DAYLIGHT_MINUTES,
-                lister: Optional[Callable] = None, opener=None, log=lambda msg: None) -> List[ProductResult]:
+def build_cubes(
+    *,
+    lat: float,
+    lon: float,
+    timezone: str,
+    start: datetime.datetime,
+    end: datetime.datetime,
+    cube_dir: Path,
+    products: Sequence[str] = PRODUCTS,
+    km: float = DEFAULT_KM,
+    satellite: str = DEFAULT_SATELLITE,
+    sector: str = "F",
+    workers: int = DEFAULT_WORKERS,
+    daylight_minutes: Optional[float] = DEFAULT_DAYLIGHT_MINUTES,
+    lister: Optional[Callable] = None,
+    opener=None,
+    log=lambda msg: None,
+) -> List[ProductResult]:
     """Add every scan in [start, end) to its day's cube, per product; scans already there are skipped.
     With `daylight_minutes`, only scans within that many minutes of the site's sunrise..sunset.
     `lister` and `opener` are for tests (an opener runs everything in this process)."""
     results = []
-    pool = (concurrent.futures.ProcessPoolExecutor(workers) if workers > 1 and opener is None else None)
+    pool = concurrent.futures.ProcessPoolExecutor(workers) if workers > 1 and opener is None else None
     try:
         for short in products:
             product = f"{short}{sector}"
@@ -428,9 +493,9 @@ def build_cubes(*, lat: float, lon: float, timezone: str, start: datetime.dateti
                 boxes = pool.map(fetch_box, *zip(*calls))
             else:
                 boxes = (fetch_box(*call, opener=opener) for call in calls)
-            fetched, working, failed, boxes = 0, {}, None, iter(boxes)      # working: cube -> its <cube>.tmp
+            fetched, working, failed, boxes = 0, {}, None, iter(boxes)  # working: cube -> its <cube>.tmp
             try:
-                for key, t0, path in todo:                                     # in time order
+                for key, t0, path in todo:  # in time order
                     try:
                         box, n_bytes = next(boxes)
                     except _network_errors() as e:
@@ -441,18 +506,26 @@ def build_cubes(*, lat: float, lon: float, timezone: str, start: datetime.dateti
                     append_box(working[path], box, t0, product, satellite, km, lat, lon)
                     fetched += n_bytes
             except BaseException:
-                for tmp in working.values():          # a scan may be half-written: the cubes stay as they were
+                for tmp in working.values():  # a scan may be half-written: the cubes stay as they were
                     tmp.unlink(missing_ok=True)
                 raise
-            for path, tmp in working.items():         # every scan appended so far is whole: swap them in
+            for path, tmp in working.items():  # every scan appended so far is whole: swap them in
                 swap_in(tmp, path)
             if failed is not None:
                 raise failed
-            result = ProductResult(product, len(keys), len(todo), fetched, time.perf_counter() - began,
-                                   sorted(p for p in present if p.exists()))
-            log(f"{product}: {result.scans} scans, {result.added} added, {result.scans - result.added} already in "
+            result = ProductResult(
+                product,
+                len(keys),
+                len(todo),
+                fetched,
+                time.perf_counter() - began,
+                sorted(p for p in present if p.exists()),
+            )
+            log(
+                f"{product}: {result.scans} scans, {result.added} added, {result.scans - result.added} already in "
                 f"cubes; {fetched / 1e6:.0f} MB fetched in {result.seconds:.0f} s; "
-                + ", ".join(f"{p.name} {p.stat().st_size / 1e6:.1f} MB" for p in result.cubes))
+                + ", ".join(f"{p.name} {p.stat().st_size / 1e6:.1f} MB" for p in result.cubes)
+            )
             results.append(result)
     finally:
         if pool:

@@ -1,4 +1,5 @@
 """tools/extract_table.py, on the conversion slips found in the marker output of the V2.9 doc."""
+
 import sys
 from pathlib import Path
 
@@ -6,8 +7,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import pytest  # noqa: E402
 from extract_table import MergeConflict, extract  # noqa: E402
 
-HEADER = ["| No | Name | Add. | QTY | Perm. | Data Type | Gain | Unit | Hyb | PV | Comment |",
-          "|----|------|------|-----|-------|-----------|------|------|-----|----|---------|"]
+HEADER = [
+    "| No | Name | Add. | QTY | Perm. | Data Type | Gain | Unit | Hyb | PV | Comment |",
+    "|----|------|------|-----|-------|-----------|------|------|-----|----|---------|",
+]
 
 # Trimmed from V2.9 lines 340-371: the multi-row header with lookalike letters, "\$32",
 # a quantity pushed into the permission cell, and a separator after a data row.
@@ -29,23 +32,37 @@ Page 15
 
 def test_fixes_and_columns():
     names, rows, problems, _ = extract(SAMPLE, 340)
-    assert names == ["no", "name", "address", "quantity", "permission", "data_type", "gain", "unit",
-                     "hybrid_inv", "pv_inv", "comment", "source_line"]
+    assert names == [
+        "no",
+        "name",
+        "address",
+        "quantity",
+        "permission",
+        "data_type",
+        "gain",
+        "unit",
+        "hybrid_inv",
+        "pv_inv",
+        "comment",
+        "source_line",
+    ]
     by_no = {r["no"]: r for r in rows}
-    assert list(by_no) == ["1", "5", "7", "14"]                       # row 7 is data, not a header
+    assert list(by_no) == ["1", "5", "7", "14"]  # row 7 is data, not a header
     assert by_no["1"]["unit"] == "s" and by_no["1"]["pv_inv"] == "Y"
     assert by_no["5"]["data_type"] == "S32" and by_no["5"]["name"] == "[Grid sensor] Active power"
     assert by_no["7"]["comment"] == "0: on grid" and by_no["7"]["pv_inv"] == ""
     assert (by_no["14"]["quantity"], by_no["14"]["permission"]) == ("2", "RO")
-    assert by_no["14"]["source_line"] == "351"                        # 12th sample line, from 340
+    assert by_no["14"]["source_line"] == "351"  # 12th sample line, from 340
     # Only the gaps in numbering are reported (this sample skips rows on purpose).
     assert all("row number" in p for p in problems) and len(problems) == 3
 
 
 def test_reports_bad_rows():
-    bad = ["| No | Name | Add. | QTY | Perm. | Data Type | Gain | Unit |",
-           "| 1  | x    | 30000 | 1  | RO    | U32       | 1    | s    |",
-           "| 2  | y    | 3000O | 2  | RX    | S32       | 1O   | kW   |"]
+    bad = [
+        "| No | Name | Add. | QTY | Perm. | Data Type | Gain | Unit |",
+        "| 1  | x    | 30000 | 1  | RO    | U32       | 1    | s    |",
+        "| 2  | y    | 3000O | 2  | RX    | S32       | 1O   | kW   |",
+    ]
     _, _, problems, _ = extract(bad, 1)
     text = "\n".join(problems)
     assert "doesn't match U32" in text and "address '3000O'" in text
@@ -92,10 +109,16 @@ def test_continuation_conflict_is_an_error():
 
 def test_leading_words_move_up():
     # V2.9 lines 471-475: "Power" drifts down a row.
-    names = ["[Smart<br>load<br>1]", "Power<br>[Smart<br>load<br>2]", "Power<br>[Smart<br>load<br>3]",
-             "Power<br>[Smart<br>load<br>4]<br>Power", "[Smart<br>load<br>5]<br>Power"]
-    lines = HEADER + [f"| {75 + i} | {n} | {30146 + 2 * i} | 2 | RO | S32 | 1000 | kW | √ | √ |  |"
-                      for i, n in enumerate(names)]
+    names = [
+        "[Smart<br>load<br>1]",
+        "Power<br>[Smart<br>load<br>2]",
+        "Power<br>[Smart<br>load<br>3]",
+        "Power<br>[Smart<br>load<br>4]<br>Power",
+        "[Smart<br>load<br>5]<br>Power",
+    ]
+    lines = HEADER + [
+        f"| {75 + i} | {n} | {30146 + 2 * i} | 2 | RO | S32 | 1000 | kW | √ | √ |  |" for i, n in enumerate(names)
+    ]
     _, rows, problems, notes = extract(lines, 1)
     assert [r["name"] for r in rows] == [f"[Smart load {n}] Power" for n in range(1, 6)]
     assert problems == [] and len(notes) == 3 and "moved 'Power'" in notes[0]

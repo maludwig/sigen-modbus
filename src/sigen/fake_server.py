@@ -16,6 +16,7 @@ Testing modes:
   reject_writes=True   answer every write with exception 04 (device failure)
                        (exercises the write-rejected path, exit code 4)
 """
+
 import logging
 import socketserver
 import struct
@@ -43,8 +44,8 @@ class RegisterBank:
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
         self.lock = threading.Lock()
-        self.image = {}       # (unit, table) -> {address: word}
-        self.writes = {}      # (unit, address) -> word; survive reloads
+        self.image = {}  # (unit, table) -> {address: word}
+        self.writes = {}  # (unit, address) -> word; survive reloads
         self._mtimes = None
         self.reload_if_changed(force=True)
 
@@ -84,11 +85,11 @@ class RegisterBank:
             spans = REGISTER_SPANS.get(table, {})
             end = address + count - 1
             if word(address) is None:
-                return None                                   # starts on an unsupported address
+                return None  # starts on an unsupported address
             if address in spans and spans[address][0] != address:
-                return None                                   # starts mid-register
+                return None  # starts mid-register
             if end in spans and sum(spans[end]) - 1 != end:
-                return None                                   # ends mid-register
+                return None  # ends mid-register
             return [UNSUPPORTED_WORD if word(a) is None else word(a) for a in range(address, end + 1)]
 
     def write(self, unit, address, words, store=True) -> bool:
@@ -128,7 +129,7 @@ class _Handler(socketserver.BaseRequestHandler):
                 break
             reply = self.server.process(unit, pdu, peer)
             if reply is None:
-                continue                      # no such unit: stay silent, like the real device
+                continue  # no such unit: stay silent, like the real device
             self.request.sendall(struct.pack(">HHHB", tid, 0, len(reply) + 1, unit) + reply)
         log.debug("Client disconnected: %s", peer)
 
@@ -137,8 +138,7 @@ class FakeSigenServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, host: str, port: int, data_dir: Path, ignore_writes: bool = False,
-                 reject_writes: bool = False):
+    def __init__(self, host: str, port: int, data_dir: Path, ignore_writes: bool = False, reject_writes: bool = False):
         self.bank = RegisterBank(data_dir)
         self.ignore_writes = ignore_writes
         self.reject_writes = reject_writes
@@ -185,7 +185,7 @@ class FakeSigenServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 address, count, nbytes = struct.unpack(">HHB", pdu[1:6])
                 if not 1 <= count <= 123 or nbytes != count * 2 or len(pdu) != 6 + nbytes:
                     return exc(EXC_ILLEGAL_VALUE, "bad count/byte count")
-                words = list(struct.unpack(f">{count}H", pdu[6:6 + nbytes]))
+                words = list(struct.unpack(f">{count}H", pdu[6 : 6 + nbytes]))
                 reply = struct.pack(">BHH", fn, address, count)
             if self.reject_writes:
                 return exc(EXC_DEVICE_FAILURE, f"rejecting write to holding {address} (--reject-writes)")
@@ -198,8 +198,9 @@ class FakeSigenServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         return exc(EXC_ILLEGAL_FUNCTION, "unsupported function")
 
 
-def start_in_thread(data_dir: Path, host: str = "127.0.0.1", port: int = 0,
-                    ignore_writes: bool = False, reject_writes: bool = False) -> FakeSigenServer:
+def start_in_thread(
+    data_dir: Path, host: str = "127.0.0.1", port: int = 0, ignore_writes: bool = False, reject_writes: bool = False
+) -> FakeSigenServer:
     """Start a fake server on a background thread (port 0 = pick a free port). For tests."""
     server = FakeSigenServer(host, port, data_dir, ignore_writes, reject_writes)
     # A short poll interval: shutdown() waits up to one of them (the default 0.5 s, per test).

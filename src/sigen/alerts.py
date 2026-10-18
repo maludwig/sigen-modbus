@@ -23,6 +23,7 @@
 
 Nothing here can stop the polling: a failure is a warning line (the same warning at most once an hour).
 """
+
 import datetime
 import queue
 import sys
@@ -35,26 +36,26 @@ from sigen import battery_watch as bw
 from sigen import db, glitches, ntfy
 from sigen.config import Alerts
 
-SPAN = datetime.timedelta(hours=6)              # history the detectors see (a plateau needs 2 h)
-COOLDOWN = datetime.timedelta(hours=1)          # per kind, between notifications
-RECENT = datetime.timedelta(minutes=2)          # an event that ended longer ago than this is history
-AIR_HOLD = datetime.timedelta(minutes=30)       # the newest air temperature holds this long after its period
-WARN_EVERY = datetime.timedelta(hours=1)        # the same warning, at most this often
-UNREACHABLE_POLLS = 20                          # polls in a row with no reading at all: 5 min at --interval 15
+SPAN = datetime.timedelta(hours=6)  # history the detectors see (a plateau needs 2 h)
+COOLDOWN = datetime.timedelta(hours=1)  # per kind, between notifications
+RECENT = datetime.timedelta(minutes=2)  # an event that ended longer ago than this is history
+AIR_HOLD = datetime.timedelta(minutes=30)  # the newest air temperature holds this long after its period
+WARN_EVERY = datetime.timedelta(hours=1)  # the same warning, at most this often
+UNREACHABLE_POLLS = 20  # polls in a row with no reading at all: 5 min at --interval 15
 COLUMN_SET = frozenset(bw.COLUMNS)
 
 
 @dataclass(frozen=True)
 class Notice:
     title: str
-    priority: str                   # ntfy: min, low, default, high, urgent (breaks through Do Not Disturb)
-    tags: Tuple[str, ...]           # ntfy shows emoji short codes as icons
+    priority: str  # ntfy: min, low, default, high, urgent (breaks through Do Not Disturb)
+    tags: Tuple[str, ...]  # ntfy shows emoji short codes as icons
 
 
 NOTICES: Dict[str, Notice] = {
     "fault": Notice("The SigenStor reports a fault", "urgent", ("rotating_light",)),
     "unreachable": Notice("Lost contact with the SigenStor", "high", ("satellite",)),
-    "alarm": Notice("SigenStor alarm", "high", ("warning",)),       # each alarm bit brings its own title
+    "alarm": Notice("SigenStor alarm", "high", ("warning",)),  # each alarm bit brings its own title
     "below_reserve": Notice("Battery below its backup reserve", "urgent", ("battery",)),
     "cold_charging": Notice("Battery charging while near freezing", "urgent", ("rotating_light",)),
     "cold": Notice("Battery is cold: blanket time", "high", ("snowflake",)),
@@ -66,8 +67,8 @@ NOTICES: Dict[str, Notice] = {
     "idle_drain": Notice("Battery heater? Energy leaving while idle", "high", ("battery",)),
     "glitch": Notice("SigenStor reading glitch", "default", ("zap",)),
 }
-LOGGED_GLITCHES = {glitches.PV_ZERO}            # sure glitches logged in alert_log, never sent
-REACHABLE = Notice("In contact with the SigenStor again", "default", ("white_check_mark",))   # logged, never sent
+LOGGED_GLITCHES = {glitches.PV_ZERO}  # sure glitches logged in alert_log, never sent
+REACHABLE = Notice("In contact with the SigenStor again", "default", ("white_check_mark",))  # logged, never sent
 
 
 def stamp(t: datetime.datetime, tz) -> str:
@@ -94,11 +95,11 @@ class Buffer:
 
     def add_row(self, t: datetime.datetime, values: Dict[str, float]) -> None:
         if self._rows and t <= self._rows[-1][0]:
-            return                                       # keep times ascending (a Window insists)
+            return  # keep times ascending (a Window insists)
         self._rows.append((t, values))
         while self._rows and self._rows[0][0] < t - self.span:
             self._rows.popleft()
-        with self._lock:                                 # keep one air point before the rows, to interpolate from
+        with self._lock:  # keep one air point before the rows, to interpolate from
             while len(self._air) > 1 and self._air[1][0] <= t - self.span:
                 self._air.popleft()
 
@@ -107,7 +108,7 @@ class Buffer:
             return
         with self._lock:
             if self._air and t == self._air[-1][0]:
-                self._air[-1] = (t, float(value))       # a later fetch of the same period wins
+                self._air[-1] = (t, float(value))  # a later fetch of the same period wins
             elif not self._air or t > self._air[-1][0]:
                 self._air.append((t, float(value)))
 
@@ -126,7 +127,7 @@ def poll_values(results, units: Dict[int, str]) -> Tuple[Optional[datetime.datet
     the gain}) for the columns the detectors read. (None, {}) if no unit gave values."""
     values: Dict[str, float] = {}
     plant = [r for u, r in results.items() if units.get(u) == "plant"]
-    when =plant[0].started_at if plant else min((r.started_at for r in results.values()), default=None)
+    when = plant[0].started_at if plant else min((r.started_at for r in results.values()), default=None)
     for result in results.values():
         for address, raw in result.values:
             reg = db.BY_ADDRESS.get(address)
@@ -141,8 +142,14 @@ class Sender:
     """Posts alerts to ntfy and logs each one (sent or suppressed) in alert_log, from its own daemon thread, in the
     order they were raised. `store` is a weather.Store (its own database connection), or None to log nowhere."""
 
-    def __init__(self, alerts: Alerts, store=None, out=print, err=lambda msg: print(msg, file=sys.stderr),
-                 post: Callable[..., ntfy.Attempt] = ntfy.post):
+    def __init__(
+        self,
+        alerts: Alerts,
+        store=None,
+        out=print,
+        err=lambda msg: print(msg, file=sys.stderr),
+        post: Callable[..., ntfy.Attempt] = ntfy.post,
+    ):
         self.alerts, self._store, self._out, self._err, self._post = alerts, store, out, err, post
         self._queue: queue.Queue = queue.Queue()
         self._thread = threading.Thread(target=self._loop, name="sigen-alerts", daemon=True)
@@ -174,8 +181,10 @@ class Sender:
                 fields = dict(title=notice.title, priority=notice.priority, tags=notice.tags, kind=kind)
                 if what != "send":
                     attempt = ntfy.suppressed(message, **fields)
-                    self._out(f"alert {'logged' if what == 'log only' else 'suppressed'} ({kind}, {what}): "
-                              f"{notice.title}: {one_line}")
+                    self._out(
+                        f"alert {'logged' if what == 'log only' else 'suppressed'} ({kind}, {what}): "
+                        f"{notice.title}: {one_line}"
+                    )
                 else:
                     attempt = self._post(self.alerts, message, **fields)
                     if attempt.ok:
@@ -184,29 +193,38 @@ class Sender:
                         self._err(f"warning: alert NOT sent ({kind}): {attempt.problem()}")
                 if self._store is not None:
                     self._store.use("this alert isn't logged", lambda conn: db.insert_alert(conn, attempt))
-            except Exception as e:                       # never let an alert take anything else down
+            except Exception as e:  # never let an alert take anything else down
                 self._err(f"warning: alert ({kind}) failed: {type(e).__name__}: {e}")
 
 
 class Watcher:
     """Poll's side of --alerts: keeps the Buffer, runs the detectors after each poll, hands alerts to the Sender."""
 
-    def __init__(self, sender: Sender, *, cooldown: datetime.timedelta = COOLDOWN, recent: datetime.timedelta = RECENT,
-                 span: datetime.timedelta = SPAN, detect: Optional[Callable[[bw.Window], List[bw.Event]]] = None,
-                 tz=None, unreachable_polls: int = UNREACHABLE_POLLS,
-                 out=print, err=lambda msg: print(msg, file=sys.stderr)):
+    def __init__(
+        self,
+        sender: Sender,
+        *,
+        cooldown: datetime.timedelta = COOLDOWN,
+        recent: datetime.timedelta = RECENT,
+        span: datetime.timedelta = SPAN,
+        detect: Optional[Callable[[bw.Window], List[bw.Event]]] = None,
+        tz=None,
+        unreachable_polls: int = UNREACHABLE_POLLS,
+        out=print,
+        err=lambda msg: print(msg, file=sys.stderr),
+    ):
         self.buffer = Buffer(span)
         self._sender, self._cooldown, self._recent = sender, cooldown, recent
         self._detect = detect or bw.detect_all
-        self.tz = tz or datetime.datetime.now().astimezone().tzinfo      # for the timestamps in messages
+        self.tz = tz or datetime.datetime.now().astimezone().tzinfo  # for the timestamps in messages
         self._unreachable_polls = unreachable_polls
         self._out, self._err = out, err
-        self.last_sent: Dict[Optional[str], datetime.datetime] = {}     # kind or key -> last notification
-        self._seen_until: Dict[str, datetime.datetime] = {}             # kind or key -> where its last event got to
+        self.last_sent: Dict[Optional[str], datetime.datetime] = {}  # kind or key -> last notification
+        self._seen_until: Dict[str, datetime.datetime] = {}  # kind or key -> where its last event got to
         self._warned: Dict[str, datetime.datetime] = {}
-        self.failed_polls = 0                                           # in a row, no unit giving a reading
+        self.failed_polls = 0  # in a row, no unit giving a reading
         self.outage_start: Optional[datetime.datetime] = None
-        self.outage_alerted = False                                     # this outage's "unreachable" was raised
+        self.outage_alerted = False  # this outage's "unreachable" was raised
 
     # ---------- start / stop ----------
     def start(self, conn, units: Dict[int, str], now: datetime.datetime) -> None:
@@ -216,8 +234,10 @@ class Watcher:
             self.preload(conn, units, now)
             self.last_sent.update(db.last_alerts_sent(conn))
             self.preload_outage(conn)
-            self._out(f"alerts: {len(self.buffer)} poll(s) of history loaded; notifying {self._sender.alerts.ntfy_server}/"
-                      f"{ntfy.masked(self._sender.alerts.ntfy_topic)}")
+            self._out(
+                f"alerts: {len(self.buffer)} poll(s) of history loaded; notifying {self._sender.alerts.ntfy_server}/"
+                f"{ntfy.masked(self._sender.alerts.ntfy_topic)}"
+            )
         except Exception as e:
             self._warn(f"alerts start without history: {type(e).__name__}: {e}", now)
         self._sender.start()
@@ -229,8 +249,9 @@ class Watcher:
         with db.errors_as("loading the polls' recent outcome failed"):
             failed, start = conn.execute(
                 "SELECT count(DISTINCT poll_id), min(started_at) FROM readings WHERE poll_id > "
-                "coalesce((SELECT max(poll_id) FROM readings WHERE error IS NULL), 0)").fetchone()
-        self.failed_polls, self.outage_start = failed, start      # every poll after the last one with a reading
+                "coalesce((SELECT max(poll_id) FROM readings WHERE error IS NULL), 0)"
+            ).fetchone()
+        self.failed_polls, self.outage_start = failed, start  # every poll after the last one with a reading
         sent = self.last_sent.get("unreachable")
         self.outage_alerted = bool(failed) and sent is not None and sent >= start
 
@@ -239,6 +260,7 @@ class Watcher:
 
     def preload(self, conn, units: Dict[int, str], now: datetime.datetime) -> None:
         from psycopg import sql
+
         plant = next(u for u, d in units.items() if d == "plant")
         inverter = next((u for u, d in units.items() if d == "inverter"), -1)
         plant_cols = [c for c in bw.COLUMNS if c.startswith("plant_")]
@@ -247,16 +269,21 @@ class Watcher:
             "SELECT rp.started_at, {} FROM readings rp JOIN plant_register_values p ON p.reading_id = rp.id "
             "LEFT JOIN readings ri ON ri.poll_id = rp.poll_id AND ri.unit_id = %s "
             "LEFT JOIN inverter_register_values i ON i.reading_id = ri.id "
-            "WHERE rp.unit_id = %s AND rp.started_at >= %s AND rp.glitch IS NULL ORDER BY rp.started_at").format(
-            sql.SQL(", ").join([sql.Identifier("p", c) for c in plant_cols]
-                               + [sql.Identifier("i", c) for c in inverter_cols]))
+            "WHERE rp.unit_id = %s AND rp.started_at >= %s AND rp.glitch IS NULL ORDER BY rp.started_at"
+        ).format(
+            sql.SQL(", ").join(
+                [sql.Identifier("p", c) for c in plant_cols] + [sql.Identifier("i", c) for c in inverter_cols]
+            )
+        )
         since = now - self.buffer.span
         with db.errors_as("loading the alerts' history failed"):
             rows = conn.execute(query, (inverter, plant, since)).fetchall()
             air = conn.execute(
                 "SELECT DISTINCT ON (valid_at) valid_at, temperature_2m FROM open_meteo_weather "
                 "WHERE resolution_minutes = 15 AND error IS NULL AND temperature_2m IS NOT NULL AND valid_at >= %s "
-                "ORDER BY valid_at, fetched_at DESC", (since - datetime.timedelta(hours=1),)).fetchall()
+                "ORDER BY valid_at, fetched_at DESC",
+                (since - datetime.timedelta(hours=1),),
+            ).fetchall()
         for t, value in air:
             self.buffer.add_air(t, value)
         names = plant_cols + inverter_cols
@@ -267,8 +294,9 @@ class Watcher:
     def add_air(self, t: datetime.datetime, value: Optional[float]) -> None:
         self.buffer.add_air(t, value)
 
-    def observe(self, results, units: Dict[int, str], now: datetime.datetime,
-                glitch: Optional[glitches.Verdict] = None) -> None:
+    def observe(
+        self, results, units: Dict[int, str], now: datetime.datetime, glitch: Optional[glitches.Verdict] = None
+    ) -> None:
         """After a poll is stored: add it to the buffer (or, if poll flagged it as a glitch, leave it out and, for a
         sure glitch, alert), count it towards an outage, and check. Never raises."""
         try:
@@ -303,9 +331,12 @@ class Watcher:
             back = self.outage_alerted
             if back:
                 minutes = (now - self.outage_start).total_seconds() / 60
-                self._sender.suppress("reachable", REACHABLE,
-                                      f"Readings again, after {minutes:.0f} min without.\n{stamp(now, self.tz)}",
-                                      why="log only")
+                self._sender.suppress(
+                    "reachable",
+                    REACHABLE,
+                    f"Readings again, after {minutes:.0f} min without.\n{stamp(now, self.tz)}",
+                    why="log only",
+                )
             self.failed_polls, self.outage_start, self.outage_alerted = 0, None, False
             return "reachable" if back else None
         self.failed_polls += 1
@@ -316,9 +347,14 @@ class Watcher:
         self.outage_alerted = True
         last_error = next(iter(results.values())).error
         minutes = (now - self.outage_start).total_seconds() / 60
-        self._raise("unreachable", NOTICES["unreachable"],
-                    f"No reading from the SigenStor for {minutes:.0f} min ({self.failed_polls} polls in a row). "
-                    f"Last error: {last_error}", self.outage_start, now)
+        self._raise(
+            "unreachable",
+            NOTICES["unreachable"],
+            f"No reading from the SigenStor for {minutes:.0f} min ({self.failed_polls} polls in a row). "
+            f"Last error: {last_error}",
+            self.outage_start,
+            now,
+        )
         return "unreachable"
 
     def check(self, now: datetime.datetime) -> List[Tuple[str, bw.Event]]:
@@ -326,11 +362,11 @@ class Watcher:
         raised = []
         for e in sorted(self._detect(self.buffer.window()), key=lambda e: (e.start, e.kind)):
             if e.end < now - self._recent:
-                continue                                 # history
+                continue  # history
             last = self._seen_until.get(e.ident)
             self._seen_until[e.ident] = max(min(e.end, now), last or e.start)
             if last is not None and e.start <= last + bw.MAX_GAP:
-                continue                                 # the same event carrying on: already handled
+                continue  # the same event carrying on: already handled
             notice = NOTICES.get(e.kind)
             if notice is None:
                 continue
@@ -338,8 +374,7 @@ class Watcher:
             raised.append((self._raise(e.ident, notice, e.summary, e.start, now), e))
         return raised
 
-    def _raise(self, ident: str, notice: Notice, summary: str, start: datetime.datetime,
-               now: datetime.datetime) -> str:
+    def _raise(self, ident: str, notice: Notice, summary: str, start: datetime.datetime, now: datetime.datetime) -> str:
         """Send it, or log it as suppressed inside its cooldown; the message ends with the event's start."""
         message = f"{summary}\n{stamp(start, self.tz)}"
         sent = self.last_sent.get(ident)

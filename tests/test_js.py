@@ -1,5 +1,6 @@
 """The pages' JavaScript (src/sigen/static): the tests in tests/js run in Node, one pytest test per file; skipped
 without Node."""
+
 import shutil
 import subprocess
 from pathlib import Path

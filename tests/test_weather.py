@@ -1,4 +1,5 @@
 """sigen.weather without the network or a database: Open-Meteo and GeoMet are faked."""
+
 import datetime
 import json
 import threading
@@ -31,15 +32,21 @@ def open_meteo_body(resolution, missing=(), start=None):
     return json.dumps({"latitude": 51.05, "longitude": -114.06, weather.RESOLUTIONS[resolution]: block})
 
 
-CAPABILITIES = ('<WMS_Capabilities><Layer><Name>RADAR_1KM_RRAI</Name>'
-                '<Dimension name="time" units="ISO8601" default="2026-10-10T14:18:00Z" nearestValue="0">'
-                '2026-10-10T14:06:00Z/2026-10-10T14:18:00Z/PT6M</Dimension></Layer></WMS_Capabilities>')
+CAPABILITIES = (
+    "<WMS_Capabilities><Layer><Name>RADAR_1KM_RRAI</Name>"
+    '<Dimension name="time" units="ISO8601" default="2026-10-10T14:18:00Z" nearestValue="0">'
+    "2026-10-10T14:06:00Z/2026-10-10T14:18:00Z/PT6M</Dimension></Layer></WMS_Capabilities>"
+)
 FRAMES = [at(14, 6), at(14, 12), at(14, 18)]
 
 
 def feature(value, cls):
-    return json.dumps({"type": "FeatureCollection", "features": [
-        {"type": "Feature", "properties": {"value": value, "class": cls, "time": "x"}}]})
+    return json.dumps(
+        {
+            "type": "FeatureCollection",
+            "features": [{"type": "Feature", "properties": {"value": value, "class": cls, "time": "x"}}],
+        }
+    )
 
 
 class FakeWeb:
@@ -50,7 +57,7 @@ class FakeWeb:
         self.fail = fail
         self.covered = covered
         self.rain = rain
-        self.start = start         # of the Open-Meteo periods; None = 12:00 on the test day
+        self.start = start  # of the Open-Meteo periods; None = 12:00 on the test day
 
     @classmethod
     def around_now(cls, **kw):
@@ -70,8 +77,10 @@ class FakeWeb:
         if params["request"] == "GetCapabilities":
             return Response(200, CAPABILITIES)
         if params["layers"] == COVERAGE_LAYER:
-            return Response(200, json.dumps({"type": "FeatureCollection",
-                                             "features": [{"type": "Feature"}] if self.covered else []}))
+            return Response(
+                200,
+                json.dumps({"type": "FeatureCollection", "features": [{"type": "Feature"}] if self.covered else []}),
+            )
         if self.rain:
             return Response(200, feature(self.rain, "0.5-1"))
         return Response(200, feature(0, "Undetected"))
@@ -160,13 +169,13 @@ def test_radar_failure_ends_the_round_with_one_error_row():
     def fail(url, params):
         if params.get("time") == "2026-10-10T14:12:00Z":
             return Response(502, "Bad Gateway")
+
     rows = weather.fetch_radar(SITE, get=FakeWeb(fail=fail), now=lambda: NOW)
     assert [(r.frame_at, r.error) for r in rows] == [(at(14, 18), None), (at(14, 12), "HTTP 502\nBad Gateway")]
 
 
 def test_radar_listing_failure():
-    rows = weather.fetch_radar(SITE, get=FakeWeb(fail=lambda u, p: Response(None, "no response: DNS")),
-                               now=lambda: NOW)
+    rows = weather.fetch_radar(SITE, get=FakeWeb(fail=lambda u, p: Response(None, "no response: DNS")), now=lambda: NOW)
     assert len(rows) == 1 and rows[0].frame_at is None and "listing the radar frames failed" in rows[0].error
     assert "no response: DNS" in rows[0].error
 
@@ -188,7 +197,7 @@ def test_background_runs_each_job_at_once_then_on_its_interval():
     time.sleep(0.3)
     started = time.monotonic()
     bg.stop()
-    assert time.monotonic() - started < 0.5          # doesn't wait for the hourly job
+    assert time.monotonic() - started < 0.5  # doesn't wait for the hourly job
     assert runs.count("slow") == 1 and runs.count("quick") >= 3
 
 
@@ -208,6 +217,7 @@ def test_background_survives_a_failing_job():
     def boom():
         runs.append(1)
         raise RuntimeError("kaboom")
+
     bg = weather.Background([weather.Job("boom", 0.05, boom)], err=errors.append)
     bg.start()
     time.sleep(0.2)
@@ -223,20 +233,24 @@ def write_config(tmp_path, doc):
 
 
 def test_config_site(tmp_path):
-    config = load_config(write_config(tmp_path, {"site": {"latitude": 51.04, "longitude": -114, "timezone":
-                                                          "America/Edmonton"}}))
+    config = load_config(
+        write_config(tmp_path, {"site": {"latitude": 51.04, "longitude": -114, "timezone": "America/Edmonton"}})
+    )
     assert config.require_site() == Site(51.04, -114.0, "America/Edmonton")
     with pytest.raises(ConfigError, match='add "site"'):
         load_config(write_config(tmp_path, {})).require_site()
 
 
-@pytest.mark.parametrize("site, message", [
-    ({"latitude": 50, "longitude": -114}, '"site" must be'),
-    ({"latitude": 91, "longitude": -114, "timezone": "UTC"}, "site.latitude must be a number from -90 to 90"),
-    ({"latitude": 50, "longitude": "west", "timezone": "UTC"}, "site.longitude"),
-    ({"latitude": True, "longitude": -114, "timezone": "UTC"}, "site.latitude"),
-    ({"latitude": 50, "longitude": -114, "timezone": "MST"}, "IANA name"),
-])
+@pytest.mark.parametrize(
+    "site, message",
+    [
+        ({"latitude": 50, "longitude": -114}, '"site" must be'),
+        ({"latitude": 91, "longitude": -114, "timezone": "UTC"}, "site.latitude must be a number from -90 to 90"),
+        ({"latitude": 50, "longitude": "west", "timezone": "UTC"}, "site.longitude"),
+        ({"latitude": True, "longitude": -114, "timezone": "UTC"}, "site.latitude"),
+        ({"latitude": 50, "longitude": -114, "timezone": "MST"}, "IANA name"),
+    ],
+)
 def test_config_site_rejects(tmp_path, site, message):
     with pytest.raises(ConfigError, match=message):
         load_config(write_config(tmp_path, {"site": site}))
@@ -245,8 +259,9 @@ def test_config_site_rejects(tmp_path, site, message):
 # ---------- CLI (no database) ----------
 @pytest.fixture
 def site_config(tmp_path):
-    return write_config(tmp_path, {"site": {"latitude": 51.0443, "longitude": -114.0631,
-                                            "timezone": "America/Edmonton"}})
+    return write_config(
+        tmp_path, {"site": {"latitude": 51.0443, "longitude": -114.0631, "timezone": "America/Edmonton"}}
+    )
 
 
 def test_cli_weather(run, site_config, monkeypatch, tmp_path):
@@ -254,8 +269,10 @@ def test_cli_weather(run, site_config, monkeypatch, tmp_path):
     code, out, _ = run("weather", "--config", site_config, "--capture", tmp_path / "cap")
     assert code == ExitCode.OK and "Open-Meteo 60 min" in out and "Open-Meteo 15 min" in out
     assert "stored" not in out
-    assert sorted(p.name.split("_2026")[0] for p in (tmp_path / "cap").iterdir()) == \
-        ["open-meteo_15min", "open-meteo_60min"]
+    assert sorted(p.name.split("_2026")[0] for p in (tmp_path / "cap").iterdir()) == [
+        "open-meteo_15min",
+        "open-meteo_60min",
+    ]
 
 
 def test_cli_weather_one_resolution_and_failure(run, site_config, monkeypatch):
@@ -268,7 +285,7 @@ def test_cli_radar(run, site_config, monkeypatch, tmp_path):
     monkeypatch.setattr(weather, "http_get", FakeWeb())
     code, out, _ = run("radar", "--config", site_config, "--capture", tmp_path / "cap")
     assert code == ExitCode.OK and out.startswith("radar frame 2026-10-10 14:18Z: rain 0 mm/h (Undetected)")
-    assert len(list((tmp_path / "cap").iterdir())) == 3       # rain, snow, coverage
+    assert len(list((tmp_path / "cap").iterdir())) == 3  # rain, snow, coverage
 
 
 def test_cli_weather_needs_a_site(run, tmp_path):

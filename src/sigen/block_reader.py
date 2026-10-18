@@ -14,6 +14,7 @@ mapped registers are bridged regardless of size, unless max_gap says otherwise.
 Consequence: a block read can't tell you a register is unsupported; it just reads 0xFFFF.
 Only a read that starts on it is rejected. Check new registers one at a time.
 """
+
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -39,14 +40,15 @@ class Block:
 
     def words_for(self, words: List[int], reg: Register) -> List[int]:
         offset = reg.address - self.start
-        return words[offset:offset + reg.words]
+        return words[offset : offset + reg.words]
 
     def __str__(self) -> str:
         return f"{self.table} {self.start}-{self.end} ({self.count} words, {len(self.registers)} registers)"
 
 
-def plan_blocks(registers: Sequence[Register], max_words: int = MAX_WORDS,
-                max_gap: Optional[int] = None) -> List[Block]:
+def plan_blocks(
+    registers: Sequence[Register], max_words: int = MAX_WORDS, max_gap: Optional[int] = None
+) -> List[Block]:
     """The fewest reads that cover `registers`, input table first, then holding.
 
     Greedy: walk the registers in address order and extend the current block while the
@@ -68,8 +70,9 @@ def plan_blocks(registers: Sequence[Register], max_words: int = MAX_WORDS,
             reg_end = reg.address + reg.words - 1
             if current:
                 if reg.address <= end:
-                    raise ValueError(f"{reg.name} ({reg.address}) overlaps {current[-1].name} "
-                                     f"({current[-1].address}-{end})")
+                    raise ValueError(
+                        f"{reg.name} ({reg.address}) overlaps {current[-1].name} " f"({current[-1].address}-{end})"
+                    )
                 if reg.address - end - 1 <= gap_limit and reg_end - start + 1 <= max_words:
                     current.append(reg)
                     end = reg_end
@@ -110,8 +113,15 @@ class BlockReader:
     always raise.
     """
 
-    def __init__(self, connector: Callable, registers: Sequence[Register] = PLANT_REGISTERS, *,
-                 strict: bool = False, max_words: int = MAX_WORDS, max_gap: Optional[int] = None):
+    def __init__(
+        self,
+        connector: Callable,
+        registers: Sequence[Register] = PLANT_REGISTERS,
+        *,
+        strict: bool = False,
+        max_words: int = MAX_WORDS,
+        max_gap: Optional[int] = None,
+    ):
         self.connector = connector
         self.registers = list(registers)
         self.strict = strict

@@ -21,6 +21,7 @@ holding_registers / errors layout:
     {"unit_id": 247, "input_registers": {…}, …,
      "other_units": [{"unit_id": 1, "input_registers": {"30500": …}, "errors": {}}]}
 """
+
 import datetime
 import json
 from pathlib import Path
@@ -106,15 +107,18 @@ def _section(readings: dict, unit: int) -> dict:
     return section
 
 
-def build_document(readings: dict, *, ip: str, port: int, unit: int, derived: dict,
-                   other_units: Optional[Dict[int, dict]] = None) -> dict:
+def build_document(
+    readings: dict, *, ip: str, port: int, unit: int, derived: dict, other_units: Optional[Dict[int, dict]] = None
+) -> dict:
     """Readings (from BlockReader.read_all) -> a dump document. `readings` is the plant's;
     other_units maps further unit IDs (inverters) to their readings."""
     plant = _section(readings, unit)
     doc = {
         "_comment": "Written by sigen-modbus. Also loadable as fake data by `sigen fake-server`.",
         "source": {
-            "ip": ip, "port": port, "tool": f"sigen-modbus {__version__}",
+            "ip": ip,
+            "port": port,
+            "tool": f"sigen-modbus {__version__}",
             "read_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         },
         "unit_id": unit,

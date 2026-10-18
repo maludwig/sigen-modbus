@@ -3,8 +3,7 @@ import json
 import pytest
 
 from conftest import REPO
-from sigen.registers import (BY_NAME, PLANT_REGISTERS, WRITABLE, decode_int, decode_string,
-                             encode_int, encode_string)
+from sigen.registers import BY_NAME, PLANT_REGISTERS, WRITABLE, decode_int, decode_string, encode_int, encode_string
 
 
 def _fake_data_strings():
@@ -24,11 +23,22 @@ def test_fake_data_strings_match_their_words(raw, value):
     assert decode_string(raw) == value
 
 
-@pytest.mark.parametrize("rtype,n", [
-    ("u16", 0), ("u16", 65535), ("s16", -420), ("s16", 32767),
-    ("u32", 0), ("u32", 1791301710), ("s32", -40), ("s32", -2147483648),
-    ("u64", 1538), ("u64", 2**64 - 2), ("s64", -1),
-])
+@pytest.mark.parametrize(
+    "rtype,n",
+    [
+        ("u16", 0),
+        ("u16", 65535),
+        ("s16", -420),
+        ("s16", 32767),
+        ("u32", 0),
+        ("u32", 1791301710),
+        ("s32", -40),
+        ("s32", -2147483648),
+        ("u64", 1538),
+        ("u64", 2**64 - 2),
+        ("s64", -1),
+    ],
+)
 def test_int_round_trip(rtype, n):
     assert decode_int(encode_int(n, rtype), rtype) == n
 
@@ -56,8 +66,8 @@ def test_alarm_bit_fields():
     assert pcs1.decode([0]) == (0, "none")
     assert pcs1.describe([0]) == "none (0)"
     assert pcs1.decode([(1 << 2) | (1 << 9)]) == (516, "Over-temperature; Grid power outage")
-    assert pcs2.decode([1 << 6])[1] == "undefined bit 6"          # the protocol skips bit 6 here
-    assert pcs1.decode([0xFFFF])[1].startswith("Not available")   # unsupported, read inside a block
+    assert pcs2.decode([1 << 6])[1] == "undefined bit 6"  # the protocol skips bit 6 here
+    assert pcs1.decode([0xFFFF])[1].startswith("Not available")  # unsupported, read inside a block
     assert {r.name for r in PLANT_REGISTERS if r.flags} == {f"plant_merged_alarm_{n}" for n in range(1, 7)}
 
 
@@ -68,6 +78,7 @@ def test_not_set_sentinel():
 
 def test_unique_addresses_and_names_across_devices():
     from sigen.registers import ALL_REGISTERS
+
     keys = [(r.table, r.address) for r in ALL_REGISTERS]
     assert len(keys) == len(set(keys))
     assert len({r.name for r in ALL_REGISTERS}) == len(ALL_REGISTERS)
@@ -78,9 +89,11 @@ def test_unique_addresses_and_names_across_devices():
 
 def test_inverter_map():
     from sigen.registers import INVERTER_REGISTERS
+
     assert len(INVERTER_REGISTERS) == 65
-    assert all(r.device == "inverter" and r.table == "input" and r.name.startswith("inverter_")
-               for r in INVERTER_REGISTERS)
+    assert all(
+        r.device == "inverter" and r.table == "input" and r.name.startswith("inverter_") for r in INVERTER_REGISTERS
+    )
     assert all(r.device == "plant" for r in PLANT_REGISTERS)
     model = BY_NAME["inverter_model_type"]
     assert model.words == 15 and not model.stored
@@ -107,7 +120,7 @@ def test_validate_remote_ems_mode():
     reg = BY_NAME["plant_remote_ems_control_mode"]
     assert reg.validate(reg.parse_value("max-self-consumption")) == [2]
     assert reg.validate(reg.parse_value("0")) == [0]
-    with pytest.raises(ValueError):          # forced discharge: not allowed yet
+    with pytest.raises(ValueError):  # forced discharge: not allowed yet
         reg.validate(reg.parse_value("discharge-ess-first"))
     with pytest.raises(ValueError):
         reg.parse_value("turbo")

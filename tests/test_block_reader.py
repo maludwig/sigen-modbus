@@ -5,6 +5,7 @@ for, or splits a mapped register, is rejected (exception 2); addresses without d
 accepted read come back as 0xFFFF. The 10-06 fake data predates most of the register map,
 so it exercises both: some blocks are rejected (-> one-by-one fallback), some read 0xFFFF.
 """
+
 import functools
 
 import pytest
@@ -26,8 +27,8 @@ def spans(plan):
 # ---------- planner ----------
 def test_plan_for_the_real_register_map():
     assert spans(plan_blocks(PLANT_REGISTERS)) == [
-        ("input", 30000, 124),     # 30124-30125 would make it 126
-        ("input", 30124, 124),     # ends on 30244-30247
+        ("input", 30000, 124),  # 30124-30125 would make it 126
+        ("input", 30124, 124),  # ends on 30244-30247
         ("input", 30248, 39),
         ("holding", 40029, 20),
     ]
@@ -44,12 +45,12 @@ def test_plan_covers_every_register_once_on_boundaries():
 
 
 def test_no_gap_limit_by_default():
-    assert spans(plan_blocks([R(1), R(100)])) == [("input", 1, 100)]          # a 98-word gap: one read
-    assert spans(plan_blocks([R(1), R(200)])) == [("input", 1, 1), ("input", 200, 1)]   # too far for 125
+    assert spans(plan_blocks([R(1), R(100)])) == [("input", 1, 100)]  # a 98-word gap: one read
+    assert spans(plan_blocks([R(1), R(200)])) == [("input", 1, 1), ("input", 200, 1)]  # too far for 125
 
 
 def test_optional_gap_limit():
-    regs = [R(1), R(3), R(10)]                                     # gaps of 1 and 6
+    regs = [R(1), R(3), R(10)]  # gaps of 1 and 6
     assert spans(plan_blocks(regs, max_gap=6)) == [("input", 1, 10)]
     assert spans(plan_blocks(regs, max_gap=5)) == [("input", 1, 3), ("input", 10, 1)]
     assert spans(plan_blocks(regs, max_gap=0)) == [("input", 1, 1), ("input", 3, 1), ("input", 10, 1)]
@@ -88,18 +89,18 @@ def read(server, start, count):
 
 def test_fake_rejects_reads_starting_on_missing_data(server):
     with pytest.raises(ModbusError) as e:
-        read(server, 30098, 2)                   # smart load 1: not in the 10-06 data
+        read(server, 30098, 2)  # smart load 1: not in the 10-06 data
     assert e.value.code == 2
 
 
 def test_fake_rejects_split_registers(server):
-    for start, count in ((30001, 1), (30001, 3), (30000, 1), (30004, 2)):   # 30000-01 and 30005-06 are u32/s32
+    for start, count in ((30001, 1), (30001, 3), (30000, 1), (30004, 2)):  # 30000-01 and 30005-06 are u32/s32
         with pytest.raises(ModbusError):
             read(server, start, count)
 
 
 def test_fake_fills_missing_data_inside_a_read_with_ffff(server):
-    words = read(server, 30004, 5)               # 30004, 30005-06, then 30007-08 (no data in 10-06)
+    words = read(server, 30004, 5)  # 30004, 30005-06, then 30007-08 (no data in 10-06)
     assert words[3:] == [0xFFFF, 0xFFFF]
 
 
@@ -124,7 +125,7 @@ def test_blocks_match_single_reads(full_server, strict):
     reader = BlockReader(connector(full_server, CountingClient), strict=strict)
     readings = reader.read_all()
     assert readings == single_reads(full_server)
-    assert list(readings) == [r.name for r in PLANT_REGISTERS]       # same order as the map
+    assert list(readings) == [r.name for r in PLANT_REGISTERS]  # same order as the map
     assert CountingClient.requests == len(reader.plan) == 4
 
 
@@ -133,8 +134,9 @@ def test_non_strict_falls_back_one_by_one_for_rejected_blocks(server):
     assert set(readings) == {r.name for r in PLANT_REGISTERS}
     # Block 30124-30247 starts on a register the 10-06 data lacks, so it's re-read one by one:
     assert "error" in readings["plant_smart_load_14_total_consumption"]
-    assert readings["plant_accumulated_battery_charge_energy"]["raw"] == \
-        single_reads_one(server, "plant_accumulated_battery_charge_energy")
+    assert readings["plant_accumulated_battery_charge_energy"]["raw"] == single_reads_one(
+        server, "plant_accumulated_battery_charge_energy"
+    )
     # Block 30000-30123 starts on data it has, so registers it lacks read 0xFFFF, like the device:
     assert readings["plant_smart_load_1_total_consumption"]["raw"] == [0xFFFF, 0xFFFF]
     assert readings["plant_ess_soc"]["value"] == pytest.approx(99.9)
@@ -161,9 +163,9 @@ def test_wrong_unit_id_times_out_like_the_real_device(full_server):
 
 def test_plan_for_the_inverter_map():
     assert spans(plan_blocks(INVERTER_REGISTERS)) == [
-        ("input", 30500, 122),     # model/serial/firmware strings through the cluster temperatures
-        ("input", 31000, 42),      # grid, PV strings 1-4, PV power, startup/shutdown time
-        ("input", 31509, 4),       # PV daily and total generation
+        ("input", 30500, 122),  # model/serial/firmware strings through the cluster temperatures
+        ("input", 31000, 42),  # grid, PV strings 1-4, PV power, startup/shutdown time
+        ("input", 31509, 4),  # PV daily and total generation
     ]
 
 

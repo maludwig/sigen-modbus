@@ -37,6 +37,7 @@ Measured on one system on cold nights: with no sun and the battery idle the inve
 (σ 2 W) and the DC balance (PV − battery − AC) is the same 26 W; discharging at 1–3 kW it's 150–220 W (conversion
 losses, ~5–7 %). The cells cooled 0.2–0.4 °C/h at night (time constant ~13 h); temperatures come in 0.1 °C steps.
 """
+
 import datetime
 from collections import deque
 from dataclasses import dataclass, field
@@ -48,16 +49,16 @@ from sigen import registers
 COOLEST = "inverter_ess_min_cluster_temperature_c"
 WARMEST = "inverter_ess_max_cluster_temperature_c"
 AVERAGE_CELL = "inverter_ess_average_cell_temperature_c"
-PV = "inverter_pv_power_kw"                                     # DC from the panels
-BATTERY = "inverter_ess_power_kw"                               # >0 charging, <0 discharging
-INVERTER_AC = "inverter_active_power_kw"                        # >0 the inverter supplies the AC side
+PV = "inverter_pv_power_kw"  # DC from the panels
+BATTERY = "inverter_ess_power_kw"  # >0 charging, <0 discharging
+INVERTER_AC = "inverter_active_power_kw"  # >0 the inverter supplies the AC side
 SOC = "plant_ess_soc_pct"
 RESERVE = "plant_backup_soc_pct"
-DELIVERABLE = "plant_ess_available_max_discharging_capacity_kwh"    # kWh the battery can still deliver
-MAX_CHARGE = "plant_ess_available_max_charging_power_kw"           # what the BMS allows now
+DELIVERABLE = "plant_ess_available_max_discharging_capacity_kwh"  # kWh the battery can still deliver
+MAX_CHARGE = "plant_ess_available_max_charging_power_kw"  # what the BMS allows now
 RATED_CHARGE = "plant_ess_rated_charging_power_kw"
-GRID_STATUS = "plant_on_off_grid_status"                        # 0 on-grid, 1 off-grid (auto), 2 off-grid (manual)
-PLANT_STATE = "plant_running_state"                             # 2 = Fault (registers.RUNNING_STATES)
+GRID_STATUS = "plant_on_off_grid_status"  # 0 on-grid, 1 off-grid (auto), 2 off-grid (manual)
+PLANT_STATE = "plant_running_state"  # 2 = Fault (registers.RUNNING_STATES)
 INVERTER_STATE = "inverter_running_state"
 AIR = "air_temperature_c"
 RUNNING, FAULT = 1, 2
@@ -74,45 +75,83 @@ ALARM_REGISTERS = {
 # Each alarm bit in plain words, for the notification's title. Written from the protocol's names (kept in the message
 # for looking things up); a bit missing here falls back to the protocol's name.
 ALARM_TEXT = {
-    ("pcs1", 0): "Inverter software versions don't match", ("pcs1", 1): "Low insulation resistance on the PV side",
-    ("pcs1", 2): "The inverter is overheating", ("pcs1", 3): "Inverter equipment fault",
-    ("pcs1", 4): "System grounding fault", ("pcs1", 5): "A PV string's voltage is too high",
-    ("pcs1", 6): "A PV string is wired backwards", ("pcs1", 7): "Current is flowing back into a PV string",
-    ("pcs1", 8): "Arc fault detected (AFCI)", ("pcs1", 9): "The grid is down",
-    ("pcs1", 10): "Grid voltage too high", ("pcs1", 11): "Grid voltage too low",
-    ("pcs1", 12): "Grid frequency too high", ("pcs1", 13): "Grid frequency too low",
-    ("pcs1", 14): "Grid voltage unbalanced between the legs", ("pcs1", 15): "Too much DC in the inverter's AC output",
-    ("pcs2", 0): "Leakage current too high", ("pcs2", 1): "Internal communication fault",
-    ("pcs2", 2): "Internal protection tripped", ("pcs2", 3): "The arc-fault detector failed its self-test",
+    ("pcs1", 0): "Inverter software versions don't match",
+    ("pcs1", 1): "Low insulation resistance on the PV side",
+    ("pcs1", 2): "The inverter is overheating",
+    ("pcs1", 3): "Inverter equipment fault",
+    ("pcs1", 4): "System grounding fault",
+    ("pcs1", 5): "A PV string's voltage is too high",
+    ("pcs1", 6): "A PV string is wired backwards",
+    ("pcs1", 7): "Current is flowing back into a PV string",
+    ("pcs1", 8): "Arc fault detected (AFCI)",
+    ("pcs1", 9): "The grid is down",
+    ("pcs1", 10): "Grid voltage too high",
+    ("pcs1", 11): "Grid voltage too low",
+    ("pcs1", 12): "Grid frequency too high",
+    ("pcs1", 13): "Grid frequency too low",
+    ("pcs1", 14): "Grid voltage unbalanced between the legs",
+    ("pcs1", 15): "Too much DC in the inverter's AC output",
+    ("pcs2", 0): "Leakage current too high",
+    ("pcs2", 1): "Internal communication fault",
+    ("pcs2", 2): "Internal protection tripped",
+    ("pcs2", 3): "The arc-fault detector failed its self-test",
     ("pcs2", 4): "Off-grid protection tripped",
     ("pcs2", 5): "Stopped by hand: the rapid-shutdown button, or a manual stop",
-    ("pcs2", 7): "Grid phases in the wrong order", ("pcs2", 8): "Short circuit to ground (PE)",
+    ("pcs2", 7): "Grid phases in the wrong order",
+    ("pcs2", 8): "Short circuit to ground (PE)",
     ("pcs2", 9): "The inverter failed to soft-start",
-    ("ess", 0): "Battery software versions don't match", ("ess", 1): "Battery: low insulation resistance to ground",
-    ("ess", 2): "The battery is too hot", ("ess", 3): "Battery equipment fault", ("ess", 4): "The battery is too cold",
-    ("ess", 5): "Battery internal protection tripped", ("ess", 6): "BATTERY THERMAL RUNAWAY",
-    ("gateway", 0): "Gateway software versions don't match", ("gateway", 1): "The gateway is overheating",
-    ("gateway", 2): "Gateway equipment fault", ("gateway", 3): "Too much leakage current on the backup output",
-    ("gateway", 4): "Neutral grounding fault", ("gateway", 5): "Grid wiring: phases in the wrong order",
-    ("gateway", 6): "Inverter wiring: phases in the wrong order", ("gateway", 7): "A grid phase is missing",
+    ("ess", 0): "Battery software versions don't match",
+    ("ess", 1): "Battery: low insulation resistance to ground",
+    ("ess", 2): "The battery is too hot",
+    ("ess", 3): "Battery equipment fault",
+    ("ess", 4): "The battery is too cold",
+    ("ess", 5): "Battery internal protection tripped",
+    ("ess", 6): "BATTERY THERMAL RUNAWAY",
+    ("gateway", 0): "Gateway software versions don't match",
+    ("gateway", 1): "The gateway is overheating",
+    ("gateway", 2): "Gateway equipment fault",
+    ("gateway", 3): "Too much leakage current on the backup output",
+    ("gateway", 4): "Neutral grounding fault",
+    ("gateway", 5): "Grid wiring: phases in the wrong order",
+    ("gateway", 6): "Inverter wiring: phases in the wrong order",
+    ("gateway", 7): "A grid phase is missing",
     ("dc_charger", 0): "DC charger software versions don't match",
-    ("dc_charger", 1): "DC charger: low insulation resistance to ground", ("dc_charger", 2): "The DC charger is overheating",
-    ("dc_charger", 3): "DC charger equipment fault", ("dc_charger", 4): "DC charging fault",
+    ("dc_charger", 1): "DC charger: low insulation resistance to ground",
+    ("dc_charger", 2): "The DC charger is overheating",
+    ("dc_charger", 3): "DC charger equipment fault",
+    ("dc_charger", 4): "DC charging fault",
     ("dc_charger", 5): "DC charger protection tripped",
-    ("plant", 0): "Lost contact with the gateway", ("plant", 1): "Lost contact with the grid meter",
+    ("plant", 0): "Lost contact with the gateway",
+    ("plant", 1): "Lost contact with the grid meter",
     ("plant", 2): "Lost contact with the AC power sensor",
-    ("plant", 6): "Export limit exceeded: hard protection tripped", ("plant", 8): "The generator failed to start",
+    ("plant", 6): "Export limit exceeded: hard protection tripped",
+    ("plant", 8): "The generator failed to start",
     ("plant", 10): "CLS fault",
 }
-URGENT_ALARMS = {("pcs1", 9), ("ess", 6)}       # the grid down; thermal runaway
-GRID_DOWN_KEY = "alarm:pcs1.9"                   # the off-grid status shares it: one grid outage, one alert
+URGENT_ALARMS = {("pcs1", 9), ("ess", 6)}  # the grid down; thermal runaway
+GRID_DOWN_KEY = "alarm:pcs1.9"  # the off-grid status shares it: one grid outage, one alert
 
-COLUMNS = (COOLEST, WARMEST, AVERAGE_CELL, PV, BATTERY, INVERTER_AC, SOC, RESERVE, DELIVERABLE, MAX_CHARGE,
-           RATED_CHARGE, GRID_STATUS, PLANT_STATE, INVERTER_STATE, *ALARM_REGISTERS)   # every view column read
+COLUMNS = (
+    COOLEST,
+    WARMEST,
+    AVERAGE_CELL,
+    PV,
+    BATTERY,
+    INVERTER_AC,
+    SOC,
+    RESERVE,
+    DELIVERABLE,
+    MAX_CHARGE,
+    RATED_CHARGE,
+    GRID_STATUS,
+    PLANT_STATE,
+    INVERTER_STATE,
+    *ALARM_REGISTERS,
+)  # every view column read
 
-STANDBY_KW = 0.026          # the inverter's DC-side draw with no sun and the battery idle (measured, above)
-MAX_GAP = datetime.timedelta(minutes=2)     # readings further apart than this break a run (poll is every 15 s)
-NOT_AVAILABLE = 0xFFFF      # an alarm register reading all ones means "not available", not 16 alarms
+STANDBY_KW = 0.026  # the inverter's DC-side draw with no sun and the battery idle (measured, above)
+MAX_GAP = datetime.timedelta(minutes=2)  # readings further apart than this break a run (poll is every 15 s)
+NOT_AVAILABLE = 0xFFFF  # an alarm register reading all ones means "not available", not 16 alarms
 AFTER_FAULT = datetime.timedelta(minutes=1)  # readings this soon after one not Running aren't trusted either
 
 
@@ -120,6 +159,7 @@ AFTER_FAULT = datetime.timedelta(minutes=1)  # readings this soon after one not 
 class Window:
     """Readings over a stretch of time: `times` ascending and timezone-aware, each column as long as `times`, None
     where a reading has no value. Columns a detector needs but the window lacks count as all None."""
+
     times: Sequence[datetime.datetime]
     columns: Mapping[str, Sequence[Optional[float]]]
 
@@ -139,13 +179,13 @@ class Window:
 
 @dataclass(frozen=True)
 class Event:
-    kind: str                       # "plateau", "warming", "sawtooth", "unexplained_power", "cold", "alarm", …
+    kind: str  # "plateau", "warming", "sawtooth", "unexplained_power", "cold", "alarm", …
     start: datetime.datetime
     end: datetime.datetime
-    summary: str                    # one line, for a notification (no clock times: the sender appends the start)
+    summary: str  # one line, for a notification (no clock times: the sender appends the start)
     details: Dict[str, float] = field(default_factory=dict)
-    key: Optional[str] = None       # what one event and its cooldown are keyed by, when finer than the kind
-    title: Optional[str] = None     # the notification's title, when the kind's fixed one won't do
+    key: Optional[str] = None  # what one event and its cooldown are keyed by, when finer than the kind
+    title: Optional[str] = None  # the notification's title, when the kind's fixed one won't do
     priority: Optional[str] = None  # likewise, the ntfy priority
 
     @property
@@ -158,9 +198,9 @@ def _hours(a: datetime.datetime, b: datetime.datetime) -> float:
     return (b - a).total_seconds() / 3600
 
 
-
-def runs(times: Sequence[datetime.datetime], ok: Sequence[bool],
-         max_gap: datetime.timedelta = MAX_GAP) -> List[Tuple[int, int]]:
+def runs(
+    times: Sequence[datetime.datetime], ok: Sequence[bool], max_gap: datetime.timedelta = MAX_GAP
+) -> List[Tuple[int, int]]:
     """(first, last) index pairs, inclusive, of stretches where `ok` holds without readings further apart than
     `max_gap` (a gap in the polling ends a stretch: nothing is known about the time in between)."""
     out, start = [], None
@@ -178,21 +218,30 @@ def runs(times: Sequence[datetime.datetime], ok: Sequence[bool],
 def quiet(w: Window, max_pv_kw: float = 0.05, max_battery_kw: float = 0.5, max_ac_kw: float = 0.5) -> List[bool]:
     """Readings with no sun on the panels and the inverter nearly idle: then nothing but the surroundings (and a
     heater) changes the cells' temperature. A small heater still fits under the limits; a missing value is not quiet."""
-    return [pv is not None and b is not None and ac is not None
-            and pv <= max_pv_kw and abs(b) <= max_battery_kw and abs(ac) <= max_ac_kw
-            for pv, b, ac in zip(w[PV], w[BATTERY], w[INVERTER_AC])]
+    return [
+        pv is not None
+        and b is not None
+        and ac is not None
+        and pv <= max_pv_kw
+        and abs(b) <= max_battery_kw
+        and abs(ac) <= max_ac_kw
+        for pv, b, ac in zip(w[PV], w[BATTERY], w[INVERTER_AC])
+    ]
 
 
-def interpolate(times: Sequence[datetime.datetime], points: Sequence[Tuple[datetime.datetime, float]],
-                max_gap: datetime.timedelta = datetime.timedelta(hours=1),
-                hold: datetime.timedelta = datetime.timedelta(0)) -> List[Optional[float]]:
+def interpolate(
+    times: Sequence[datetime.datetime],
+    points: Sequence[Tuple[datetime.datetime, float]],
+    max_gap: datetime.timedelta = datetime.timedelta(hours=1),
+    hold: datetime.timedelta = datetime.timedelta(0),
+) -> List[Optional[float]]:
     """Values at `times` by straight lines between `points` (time, value), ascending: e.g. Open-Meteo's 15-minute
     air temperatures onto the 15-second readings. None outside the points or between points further apart than
     `max_gap`, except that the last point's value holds for `hold` after it (the newest readings come after the
     newest air temperature)."""
     out, k = [], 0
     for t in times:
-        while k + 1 < len(points) and points[k + 1][0] <= t:     # points[k] ≤ t < points[k + 1]
+        while k + 1 < len(points) and points[k + 1][0] <= t:  # points[k] ≤ t < points[k + 1]
             k += 1
         if points and points[-1][0] < t <= points[-1][0] + hold:
             out.append(points[-1][1])
@@ -208,16 +257,21 @@ def interpolate(times: Sequence[datetime.datetime], points: Sequence[Tuple[datet
 
 def _air_note(air: Sequence[Optional[float]], i: int, j: int) -> Tuple[Optional[float], Optional[float], str]:
     """Outside air at the start and end of [i, j] (the nearest known values inside it), and a phrase for summaries."""
-    known = [a for a in air[i:j + 1] if a is not None]
+    known = [a for a in air[i : j + 1] if a is not None]
     if not known:
         return None, None, "outside air unknown"
     return known[0], known[-1], f"outside air {known[0]:.1f} → {known[-1]:.1f} °C"
 
 
 # ---------- heater signatures ----------
-def detect_plateau(w: Window, column: str = COOLEST, tolerance: float = 0.1,
-                   min_duration: datetime.timedelta = datetime.timedelta(hours=2),
-                   min_above_air: float = 8.0, min_air_drop: float = 2.0) -> List[Event]:
+def detect_plateau(
+    w: Window,
+    column: str = COOLEST,
+    tolerance: float = 0.1,
+    min_duration: datetime.timedelta = datetime.timedelta(hours=2),
+    min_above_air: float = 8.0,
+    min_air_drop: float = 2.0,
+) -> List[Event]:
     """The cells held within `tolerance` °C (0.1 = one sensor step) for at least `min_duration` while quiet, AND
     the outside air says they should have kept cooling: the cells were at least `min_above_air` °C above it on
     average, or the air fell at least `min_air_drop` °C meanwhile. (An unheated space can run several °C above the
@@ -229,7 +283,7 @@ def detect_plateau(w: Window, column: str = COOLEST, tolerance: float = 0.1,
     found: List[Tuple[int, int]] = []
     tol = tolerance + 1e-9
     for a, b in runs(w.times, ok):
-        lo, highs, lows = a, deque(), deque()        # indices of the window's max / min candidates
+        lo, highs, lows = a, deque(), deque()  # indices of the window's max / min candidates
         for hi in range(a, b + 1):
             v = temps[hi]
             while highs and temps[highs[-1]] <= v:
@@ -238,7 +292,7 @@ def detect_plateau(w: Window, column: str = COOLEST, tolerance: float = 0.1,
                 lows.pop()
             highs.append(hi)
             lows.append(hi)
-            while temps[highs[0]] - temps[lows[0]] > tol:      # shortest stretch ending at hi that fits
+            while temps[highs[0]] - temps[lows[0]] > tol:  # shortest stretch ending at hi that fits
                 lo += 1
                 if highs[0] < lo:
                     highs.popleft()
@@ -253,24 +307,34 @@ def detect_plateau(w: Window, column: str = COOLEST, tolerance: float = 0.1,
                     found.append((lo, hi))
     events = []
     for i, j in found:
-        held = temps[i:j + 1]
+        held = temps[i : j + 1]
         mean = sum(held) / len(held)
         a0, a1, note = _air_note(air, i, j)
         if a0 is not None:
-            known = [a for a in air[i:j + 1] if a is not None]
+            known = [a for a in air[i : j + 1] if a is not None]
             above = mean - sum(known) / len(known)
             if above < min_above_air and a0 - min(known) < min_air_drop:
                 continue
-        events.append(Event("plateau", w.times[i], w.times[j],
-                            f"{column} held at {min(held):.1f}–{max(held):.1f} °C for {_hours(w.times[i], w.times[j]):.1f} h, "
-                            f"{note}",
-                            {"low_c": min(held), "high_c": max(held), "hours": _hours(w.times[i], w.times[j])}))
+        events.append(
+            Event(
+                "plateau",
+                w.times[i],
+                w.times[j],
+                f"{column} held at {min(held):.1f}–{max(held):.1f} °C for {_hours(w.times[i], w.times[j]):.1f} h, "
+                f"{note}",
+                {"low_c": min(held), "high_c": max(held), "hours": _hours(w.times[i], w.times[j])},
+            )
+        )
     return events
 
 
-def detect_warming(w: Window, column: str = COOLEST, min_rise: float = 0.3,
-                   max_rise_duration: datetime.timedelta = datetime.timedelta(minutes=45),
-                   air_margin: float = 6.0) -> List[Event]:
+def detect_warming(
+    w: Window,
+    column: str = COOLEST,
+    min_rise: float = 0.3,
+    max_rise_duration: datetime.timedelta = datetime.timedelta(minutes=45),
+    air_margin: float = 6.0,
+) -> List[Event]:
     """The cells warmed by at least `min_rise` °C within `max_rise_duration` while quiet (no sun, inverter idle),
     with the outside air at least `air_margin` °C below them (so warmer surroundings can't explain it: a warm
     wind can warm an unheated space fast). A zigzag with a `min_rise` threshold finds each rise ("tooth"); the
@@ -300,7 +364,7 @@ def detect_warming(w: Window, column: str = COOLEST, min_rise: float = 0.3,
         for t0, t1 in teeth:
             if w.times[t1] - w.times[t0] > max_rise_duration:
                 continue
-            a_end = next((x for x in reversed(air[t0:t1 + 1]) if x is not None), None)
+            a_end = next((x for x in reversed(air[t0 : t1 + 1]) if x is not None), None)
             if a_end is not None and temps[t1] - a_end < air_margin:
                 continue
             kept.append((t0, t1))
@@ -309,19 +373,27 @@ def detect_warming(w: Window, column: str = COOLEST, min_rise: float = 0.3,
         rises = [temps[t1] - temps[t0] for t0, t1 in kept]
         first, last = kept[0][0], kept[-1][1]
         _, _, note = _air_note(air, first, last)
-        details = {"teeth": len(kept), "mean_rise_c": sum(rises) / len(rises), "max_rise_c": max(rises),
-                   "low_c": min(temps[t0] for t0, _ in kept)}
+        details = {
+            "teeth": len(kept),
+            "mean_rise_c": sum(rises) / len(rises),
+            "max_rise_c": max(rises),
+            "low_c": min(temps[t0] for t0, _ in kept),
+        }
         if len(kept) == 1:
-            (t0, t1), = kept
-            text = (f"{column} rose {rises[0]:.1f} °C ({temps[t0]:.1f} → {temps[t1]:.1f}) in "
-                    f"{(w.times[t1] - w.times[t0]).total_seconds() / 60:.0f} min with no sun and the inverter idle, "
-                    f"{note}")
+            ((t0, t1),) = kept
+            text = (
+                f"{column} rose {rises[0]:.1f} °C ({temps[t0]:.1f} → {temps[t1]:.1f}) in "
+                f"{(w.times[t1] - w.times[t0]).total_seconds() / 60:.0f} min with no sun and the inverter idle, "
+                f"{note}"
+            )
             events.append(Event("warming", w.times[t0], w.times[t1], text, details))
         else:
             period = _hours(w.times[kept[0][0]], w.times[kept[-1][0]]) / (len(kept) - 1) * 60
             details["period_min"] = period
-            text = (f"{column} sawtooth: {len(kept)} rises of ~{details['mean_rise_c']:.1f} °C every ~{period:.0f} "
-                    f"min over {_hours(w.times[first], w.times[last]):.1f} h, low {details['low_c']:.1f} °C, {note}")
+            text = (
+                f"{column} sawtooth: {len(kept)} rises of ~{details['mean_rise_c']:.1f} °C every ~{period:.0f} "
+                f"min over {_hours(w.times[first], w.times[last]):.1f} h, low {details['low_c']:.1f} °C, {note}"
+            )
             events.append(Event("sawtooth", w.times[first], w.times[last], text, details))
     return events
 
@@ -332,9 +404,14 @@ def dc_balance(w: Window) -> List[Optional[float]]:
     return [None if None in (pv, b, ac) else pv - b - ac for pv, b, ac in zip(w[PV], w[BATTERY], w[INVERTER_AC])]
 
 
-def detect_unexplained_power(w: Window, standby_kw: float = STANDBY_KW, min_excess_kw: float = 0.04,
-                             loss_fraction: float = 0.08, max_busy_kw: float = 0.2,
-                             min_duration: datetime.timedelta = datetime.timedelta(seconds=30)) -> List[Event]:
+def detect_unexplained_power(
+    w: Window,
+    standby_kw: float = STANDBY_KW,
+    min_excess_kw: float = 0.04,
+    loss_fraction: float = 0.08,
+    max_busy_kw: float = 0.2,
+    min_duration: datetime.timedelta = datetime.timedelta(seconds=30),
+) -> List[Event]:
     """The DC side used more than `standby_kw` plus `loss_fraction` of the power it converts, by at least
     `min_excess_kw`, for at least `min_duration` (≥ 3 readings at 15 s: a single reading can be a load change caught
     mid-way). Only while the inverter isn't converting between the battery and the AC side (one of them within
@@ -354,29 +431,44 @@ def detect_unexplained_power(w: Window, standby_kw: float = STANDBY_KW, min_exce
     for i, j in runs(w.times, ok):
         if w.times[j] - w.times[i] < min_duration:
             continue
-        used = balance[i:j + 1]
+        used = balance[i : j + 1]
         mean = sum(used) / len(used)
-        kwh = sum((max(d - standby_kw, 0)) * (w.times[k + 1] - w.times[k]).total_seconds() / 3600
-                  for k, d in zip(range(i, j), used))
+        kwh = sum(
+            (max(d - standby_kw, 0)) * (w.times[k + 1] - w.times[k]).total_seconds() / 3600
+            for k, d in zip(range(i, j), used)
+        )
         source = "the grid" if -w[INVERTER_AC][i] > abs(w[BATTERY][i]) else "the battery"
-        events.append(Event("unexplained_power", w.times[i], w.times[j],
-                            f"the inverter's DC side drew {mean * 1000:.0f} W (standby {standby_kw * 1000:.0f} W) for "
-                            f"{(w.times[j] - w.times[i]).total_seconds() / 60:.1f} min, from {source}: "
-                            f"{kwh * 1000:.0f} Wh",
-                            {"mean_kw": mean, "peak_kw": max(used), "excess_kwh": kwh}))
+        events.append(
+            Event(
+                "unexplained_power",
+                w.times[i],
+                w.times[j],
+                f"the inverter's DC side drew {mean * 1000:.0f} W (standby {standby_kw * 1000:.0f} W) for "
+                f"{(w.times[j] - w.times[i]).total_seconds() / 60:.1f} min, from {source}: "
+                f"{kwh * 1000:.0f} Wh",
+                {"mean_kw": mean, "peak_kw": max(used), "excess_kwh": kwh},
+            )
+        )
     return events
 
 
-def detect_idle_drain(w: Window, min_kwh: float = 0.05, max_battery_kw: float = 0.02, max_soc: float = 95.0,
-                      min_duration: datetime.timedelta = datetime.timedelta(minutes=30)) -> List[Event]:
+def detect_idle_drain(
+    w: Window,
+    min_kwh: float = 0.05,
+    max_battery_kw: float = 0.02,
+    max_soc: float = 95.0,
+    min_duration: datetime.timedelta = datetime.timedelta(minutes=30),
+) -> List[Event]:
     """The battery's deliverable energy fell by at least `min_kwh` (its steps are 0.01 kWh) over a stretch of at
     least `min_duration` in which it read idle (|power| ≤ `max_battery_kw`) below `max_soc`: energy leaving that the
     battery's power reading doesn't show, e.g. a heater behind the BMS's meter. Not near full: right after a full
     charge the BMS's estimate settles by ~0.25 kWh within the hour (seen twice, idle at ~100 %). Caveat: the
     BMS may also lower its estimate as the cells get cold; the summary gives the temperatures."""
     energy, temps = w[DELIVERABLE], w[COOLEST]
-    ok = [None not in (b, e, s) and abs(b) <= max_battery_kw and s < max_soc
-          for b, e, s in zip(w[BATTERY], energy, w[SOC])]
+    ok = [
+        None not in (b, e, s) and abs(b) <= max_battery_kw and s < max_soc
+        for b, e, s in zip(w[BATTERY], energy, w[SOC])
+    ]
     events = []
     for i, j in runs(w.times, ok):
         drop = energy[i] - energy[j]
@@ -385,18 +477,28 @@ def detect_idle_drain(w: Window, min_kwh: float = 0.05, max_battery_kw: float = 
         hours = _hours(w.times[i], w.times[j])
         t0, t1 = temps[i], temps[j]
         cells = f", coolest cluster {t0:.1f} → {t1:.1f} °C" if None not in (t0, t1) else ""
-        events.append(Event("idle_drain", w.times[i], w.times[j],
-                            f"deliverable energy fell {drop:.2f} kWh ({energy[i]:.2f} → {energy[j]:.2f}) in {hours:.1f} h "
-                            f"while the battery read idle (~{drop / hours * 1000:.0f} W){cells}",
-                            {"kwh": drop, "mean_w": drop / hours * 1000}))
+        events.append(
+            Event(
+                "idle_drain",
+                w.times[i],
+                w.times[j],
+                f"deliverable energy fell {drop:.2f} kWh ({energy[i]:.2f} → {energy[j]:.2f}) in {hours:.1f} h "
+                f"while the battery read idle (~{drop / hours * 1000:.0f} W){cells}",
+                {"kwh": drop, "mean_w": drop / hours * 1000},
+            )
+        )
     return events
 
 
 # ---------- cold, charging, grid ----------
-def detect_cold(w: Window, column: str = COOLEST, threshold: float = 5.0,
-                horizon: datetime.timedelta = datetime.timedelta(hours=6),
-                trend: datetime.timedelta = datetime.timedelta(hours=1)) -> List[Event]:
-    """"cold" if the latest value is at or below `threshold`; otherwise "cooling" if the straight-line trend over
+def detect_cold(
+    w: Window,
+    column: str = COOLEST,
+    threshold: float = 5.0,
+    horizon: datetime.timedelta = datetime.timedelta(hours=6),
+    trend: datetime.timedelta = datetime.timedelta(hours=1),
+) -> List[Event]:
+    """ "cold" if the latest value is at or below `threshold`; otherwise "cooling" if the straight-line trend over
     the last `trend` reaches it within `horizon`. The cells move slowly (time constant ~13 h), so a straight line
     over a few hours ahead is a fair guess; it overestimates the fall as they near their surroundings' temperature."""
     pts = [(t, v) for t, v in zip(w.times, w[column]) if v is not None]
@@ -404,8 +506,11 @@ def detect_cold(w: Window, column: str = COOLEST, threshold: float = 5.0,
         return []
     now, latest = pts[-1]
     if latest <= threshold:
-        return [Event("cold", now, now, f"{column} is {latest:.1f} °C (≤ {threshold:g} °C): blanket time",
-                      {"value_c": latest})]
+        return [
+            Event(
+                "cold", now, now, f"{column} is {latest:.1f} °C (≤ {threshold:g} °C): blanket time", {"value_c": latest}
+            )
+        ]
     recent = [(t, v) for t, v in pts if now - t <= trend]
     if len(recent) < 2 or now - recent[0][0] < trend / 2:
         return []
@@ -413,20 +518,30 @@ def detect_cold(w: Window, column: str = COOLEST, threshold: float = 5.0,
     ys = [v for _, v in recent]
     mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
     sxx = sum((x - mx) ** 2 for x in xs)
-    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx if sxx else 0.0   # °C per hour
+    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx if sxx else 0.0  # °C per hour
     if slope >= 0:
         return []
     eta = datetime.timedelta(hours=(latest - threshold) / -slope)
     if eta > horizon:
         return []
-    return [Event("cooling", now, now + eta,
-                  f"{column} is {latest:.1f} °C, falling {-slope:.2f} °C/h: {threshold:g} °C in "
-                  f"~{_hours(now, now + eta):.1f} h",
-                  {"value_c": latest, "slope_c_per_h": slope, "hours_to_threshold": _hours(now, now + eta)})]
+    return [
+        Event(
+            "cooling",
+            now,
+            now + eta,
+            f"{column} is {latest:.1f} °C, falling {-slope:.2f} °C/h: {threshold:g} °C in "
+            f"~{_hours(now, now + eta):.1f} h",
+            {"value_c": latest, "slope_c_per_h": slope, "hours_to_threshold": _hours(now, now + eta)},
+        )
+    ]
 
 
-def detect_cold_charging(w: Window, threshold: float = 2.0, min_kw: float = 0.1,
-                         min_duration: datetime.timedelta = datetime.timedelta(minutes=1)) -> List[Event]:
+def detect_cold_charging(
+    w: Window,
+    threshold: float = 2.0,
+    min_kw: float = 0.1,
+    min_duration: datetime.timedelta = datetime.timedelta(minutes=1),
+) -> List[Event]:
     """The battery charging at `min_kw` or more for at least `min_duration` while the coolest cluster is at or below
     `threshold` °C. The damage alarm: charging cold LiFePO4 plates lithium (permanent), and the BMS is supposed to
     prevent it (it already cuts the charge rate from ~16 °C down), so this says the protection isn't holding."""
@@ -436,16 +551,23 @@ def detect_cold_charging(w: Window, threshold: float = 2.0, min_kw: float = 0.1,
     for i, j in runs(w.times, ok):
         if w.times[j] - w.times[i] < min_duration:
             continue
-        charging = power[i:j + 1]
-        events.append(Event("cold_charging", w.times[i], w.times[j],
-                            f"the battery charged at up to {max(charging):.2f} kW with the coolest cluster at "
-                            f"{min(temps[i:j + 1]):.1f} °C for {(w.times[j] - w.times[i]).total_seconds() / 60:.0f} min",
-                            {"max_kw": max(charging), "coolest_c": min(temps[i:j + 1])}))
+        charging = power[i : j + 1]
+        events.append(
+            Event(
+                "cold_charging",
+                w.times[i],
+                w.times[j],
+                f"the battery charged at up to {max(charging):.2f} kW with the coolest cluster at "
+                f"{min(temps[i:j + 1]):.1f} °C for {(w.times[j] - w.times[i]).total_seconds() / 60:.0f} min",
+                {"max_kw": max(charging), "coolest_c": min(temps[i : j + 1])},
+            )
+        )
     return events
 
 
-def detect_charge_limited(w: Window, min_fraction: float = 0.5, rated_kw: Optional[float] = None,
-                          max_soc: float = 90.0) -> List[Event]:
+def detect_charge_limited(
+    w: Window, min_fraction: float = 0.5, rated_kw: Optional[float] = None, max_soc: float = 90.0
+) -> List[Event]:
     """The BMS allowed charging at less than `min_fraction` of the rated power (`rated_kw`, else the window's rated
     charging power column) while the SOC was below `max_soc` (near full it tapers anyway: ~3.1–3.6 kW at 95 %).
     What the cold costs. Measured on one system below 90 % SOC: the full 7.3 kW with the coolest cluster at 16 °C
@@ -458,18 +580,25 @@ def detect_charge_limited(w: Window, min_fraction: float = 0.5, rated_kw: Option
         ok.append(None not in (m, s, r) and s < max_soc and m < min_fraction * r)
     events = []
     for i, j in runs(w.times, ok):
-        lowest = min(allowed[i:j + 1])
-        known = [t for t in temps[i:j + 1] if t is not None]
+        lowest = min(allowed[i : j + 1])
+        known = [t for t in temps[i : j + 1] if t is not None]
         cells = f", coolest cluster {min(known):.1f} °C" if known else ""
         r = rated_kw if rated_kw is not None else rated[i]
-        events.append(Event("charge_limited", w.times[i], w.times[j],
-                            f"the battery may charge at only {lowest:.2f} kW of {r:g} kW (SOC {socs[i]:.0f} %){cells}",
-                            {"min_kw": lowest}))
+        events.append(
+            Event(
+                "charge_limited",
+                w.times[i],
+                w.times[j],
+                f"the battery may charge at only {lowest:.2f} kW of {r:g} kW (SOC {socs[i]:.0f} %){cells}",
+                {"min_kw": lowest},
+            )
+        )
     return events
 
 
-def detect_below_reserve(w: Window, margin: float = 2.0,
-                         min_duration: datetime.timedelta = datetime.timedelta(minutes=1)) -> List[Event]:
+def detect_below_reserve(
+    w: Window, margin: float = 2.0, min_duration: datetime.timedelta = datetime.timedelta(minutes=1)
+) -> List[Event]:
     """The SOC at least `margin` points below the backup reserve for at least `min_duration`. With the grid up the
     battery charges from it at full power up to the reserve, so this means the grid is down (the battery is backing
     up the house), or something drains it faster than the grid refills it."""
@@ -479,12 +608,18 @@ def detect_below_reserve(w: Window, margin: float = 2.0,
     for i, j in runs(w.times, ok):
         if w.times[j] - w.times[i] < min_duration:
             continue
-        off = any(s not in (None, 0) for s in status[i:j + 1])
+        off = any(s not in (None, 0) for s in status[i : j + 1])
         why = "the grid is down (off-grid status)" if off else "the grid status says on-grid"
-        events.append(Event("below_reserve", w.times[i], w.times[j],
-                            f"SOC {socs[j]:.1f} % is below the {reserves[j]:g} % backup reserve for "
-                            f"{(w.times[j] - w.times[i]).total_seconds() / 60:.0f} min: {why}",
-                            {"soc_pct": socs[j], "reserve_pct": reserves[j], "off_grid": float(off)}))
+        events.append(
+            Event(
+                "below_reserve",
+                w.times[i],
+                w.times[j],
+                f"SOC {socs[j]:.1f} % is below the {reserves[j]:g} % backup reserve for "
+                f"{(w.times[j] - w.times[i]).total_seconds() / 60:.0f} min: {why}",
+                {"soc_pct": socs[j], "reserve_pct": reserves[j], "off_grid": float(off)},
+            )
+        )
     return events
 
 
@@ -522,15 +657,33 @@ def detect_alarms(w: Window) -> List[Event]:
             ok = [bit in alarm_bits(v) for v in values]
             title, protocol = alarm_text(short, name, flags, bit)
             for i, j in runs(w.times, ok):
-                events.append(Event("alarm", w.times[i], w.times[j], f"{title}. {protocol}", {"bit": bit},
-                                    key=f"alarm:{short}.{bit}", title=title,
-                                    priority="urgent" if (short, bit) in URGENT_ALARMS else None))
+                events.append(
+                    Event(
+                        "alarm",
+                        w.times[i],
+                        w.times[j],
+                        f"{title}. {protocol}",
+                        {"bit": bit},
+                        key=f"alarm:{short}.{bit}",
+                        title=title,
+                        priority="urgent" if (short, bit) in URGENT_ALARMS else None,
+                    )
+                )
     status = w[GRID_STATUS]
     for i, j in runs(w.times, [s is not None and s != 0 for s in status]):
         label = registers.GRID_STATUS.get(int(status[j]), f"status {status[j]:g}")
-        events.append(Event("alarm", w.times[i], w.times[j],
-                            f"The grid is down. The plant's on/off-grid status: {label}", {"status": status[j]},
-                            key=GRID_DOWN_KEY, title="The grid is down", priority="urgent"))
+        events.append(
+            Event(
+                "alarm",
+                w.times[i],
+                w.times[j],
+                f"The grid is down. The plant's on/off-grid status: {label}",
+                {"status": status[j]},
+                key=GRID_DOWN_KEY,
+                title="The grid is down",
+                priority="urgent",
+            )
+        )
     return events
 
 
@@ -551,9 +704,16 @@ def detect_fault(w: Window) -> List[Event]:
     for i, j in runs(w.times, in_fault(w)):
         alarms = active_alarms(w, j)
         why = "; ".join(alarms) if alarms else "no alarm bit set"
-        events.append(Event("fault", w.times[i], w.times[j],
-                            f"The SigenStor reports a fault, for {_hours(w.times[i], w.times[j]) * 60:.0f} min so "
-                            f"far. Alarms: {why}", {"minutes": _hours(w.times[i], w.times[j]) * 60}))
+        events.append(
+            Event(
+                "fault",
+                w.times[i],
+                w.times[j],
+                f"The SigenStor reports a fault, for {_hours(w.times[i], w.times[j]) * 60:.0f} min so "
+                f"far. Alarms: {why}",
+                {"minutes": _hours(w.times[i], w.times[j]) * 60},
+            )
+        )
     return events
 
 
@@ -569,8 +729,17 @@ def after_faults(w: Window) -> Window:
     return Window([w.times[k] for k in keep], {c: [v[k] for k in keep] for c, v in w.columns.items()})
 
 
-DETECTORS = (detect_plateau, detect_warming, detect_unexplained_power, detect_idle_drain, detect_cold,
-             detect_cold_charging, detect_charge_limited, detect_below_reserve, detect_alarms)
+DETECTORS = (
+    detect_plateau,
+    detect_warming,
+    detect_unexplained_power,
+    detect_idle_drain,
+    detect_cold,
+    detect_cold_charging,
+    detect_charge_limited,
+    detect_below_reserve,
+    detect_alarms,
+)
 
 
 def detect_all(w: Window) -> List[Event]:

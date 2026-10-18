@@ -1,4 +1,5 @@
 """The --config file: loading, validation, and how names show up."""
+
 import json
 from pathlib import Path
 
@@ -32,14 +33,14 @@ def test_example_config_is_valid():
 def test_satellite_cube_dir_is_relative_to_the_config_file(tmp_path, monkeypatch):
     folder = tmp_path / "conf"
     folder.mkdir()
-    monkeypatch.chdir(tmp_path)                                   # not the config's folder
+    monkeypatch.chdir(tmp_path)  # not the config's folder
     default = folder.resolve() / "captures" / "satellite" / "cubes"
-    assert load_config(write(folder, {})).cube_dir() == default    # no satellite section: the default, there
+    assert load_config(write(folder, {})).cube_dir() == default  # no satellite section: the default, there
     assert load_config(write(folder, {"satellite": {}})).cube_dir() == default
     assert load_config(write(folder, {"satellite": {"cube_dir": "../data"}})).cube_dir() == folder.resolve() / "../data"
     absolute = tmp_path / "elsewhere"
     assert load_config(write(folder, {"satellite": {"cube_dir": str(absolute)}})).cube_dir() == absolute
-    assert Config().cube_dir() == Path("captures/satellite/cubes")   # no config file: the current directory
+    assert Config().cube_dir() == Path("captures/satellite/cubes")  # no config file: the current directory
     for bad in ({"dir": "x"}, {"cube_dir": ""}, {"cube_dir": 3}, ["x"]):
         with pytest.raises(ConfigError, match="satellite"):
             load_config(write(folder, {"satellite": bad}))
@@ -52,7 +53,7 @@ def test_find_config_walks_up(tmp_path):
     assert find_config(tmp_path) == f.resolve()
     assert find_config(deep) == f.resolve()
     (deep / "config.json").write_text("{}", encoding="utf-8")
-    assert find_config(deep) == (deep / "config.json").resolve()      # the nearest wins
+    assert find_config(deep) == (deep / "config.json").resolve()  # the nearest wins
 
 
 def no_config_above(path):
@@ -75,11 +76,11 @@ def test_get_config_precedence(tmp_path, monkeypatch):
     deep.mkdir(parents=True)
     monkeypatch.chdir(deep)
     monkeypatch.setenv("SIGEN_CONFIG", str(env))
-    assert get_config(named).smart_load_names == {1: "named"}                 # --config wins
-    assert get_config().smart_load_names == {1: "env"}                        # then $SIGEN_CONFIG
+    assert get_config(named).smart_load_names == {1: "named"}  # --config wins
+    assert get_config().smart_load_names == {1: "env"}  # then $SIGEN_CONFIG
     assert get_config().origin == str(env)
-    monkeypatch.setenv("SIGEN_CONFIG", "  ")                                  # blank = not set
-    assert get_config().smart_load_names == {1: "found"}                      # then the search upward
+    monkeypatch.setenv("SIGEN_CONFIG", "  ")  # blank = not set
+    assert get_config().smart_load_names == {1: "found"}  # then the search upward
     assert get_config().origin == str(found.resolve())
 
 
@@ -117,18 +118,21 @@ def test_loads_names(tmp_path):
     assert cfg.register_alias("plant_ess_soc") is None
 
 
-@pytest.mark.parametrize("doc,match", [
-    ([], "JSON object"),
-    ({"smart_load": []}, "unknown key"),
-    ({"smart_loads": {}}, "must be a list"),
-    ({"smart_loads": [{"slot": 1}]}, "expected"),
-    ({"smart_loads": [{"slot": 0, "name": "x"}]}, "1 to 24"),
-    ({"smart_loads": [{"slot": 25, "name": "x"}]}, "1 to 24"),
-    ({"smart_loads": [{"slot": "7", "name": "x"}]}, "whole number"),
-    ({"smart_loads": [{"slot": True, "name": "x"}]}, "whole number"),
-    ({"smart_loads": [{"slot": 7, "name": "  "}]}, "non-empty"),
-    ({"smart_loads": [{"slot": 7, "name": "a"}, {"slot": 7, "name": "b"}]}, "named twice"),
-])
+@pytest.mark.parametrize(
+    "doc,match",
+    [
+        ([], "JSON object"),
+        ({"smart_load": []}, "unknown key"),
+        ({"smart_loads": {}}, "must be a list"),
+        ({"smart_loads": [{"slot": 1}]}, "expected"),
+        ({"smart_loads": [{"slot": 0, "name": "x"}]}, "1 to 24"),
+        ({"smart_loads": [{"slot": 25, "name": "x"}]}, "1 to 24"),
+        ({"smart_loads": [{"slot": "7", "name": "x"}]}, "whole number"),
+        ({"smart_loads": [{"slot": True, "name": "x"}]}, "whole number"),
+        ({"smart_loads": [{"slot": 7, "name": "  "}]}, "non-empty"),
+        ({"smart_loads": [{"slot": 7, "name": "a"}, {"slot": 7, "name": "b"}]}, "named twice"),
+    ],
+)
 def test_rejects_bad_config(tmp_path, doc, match):
     with pytest.raises(ConfigError, match=match):
         load_config(write(tmp_path, doc))
@@ -146,10 +150,10 @@ def test_read_json_uses_names(run, tmp_path):
     assert code == ExitCode.OK
     assert "Smart loads:" in out
     assert "Basement Plugs (7)" in out and "0.77 kW" in out
-    assert "Spare (2)" in out                                   # named slots show even when idle
-    assert "slot 8" in out                                      # unnamed but in use
-    assert "slot 9" not in out                                  # unnamed and never used
-    assert "plant_smart_load_7_power (Basement Plugs)" in out   # the full table too
+    assert "Spare (2)" in out  # named slots show even when idle
+    assert "slot 8" in out  # unnamed but in use
+    assert "slot 9" not in out  # unnamed and never used
+    assert "plant_smart_load_7_power (Basement Plugs)" in out  # the full table too
 
 
 def test_summary_without_config_lists_used_slots(run):
@@ -166,8 +170,9 @@ def test_read_with_config(run, full_server, tmp_path):
 def test_bad_config_fails_before_touching_the_device(run, tmp_path):
     f = write(tmp_path, {"smart_loads": [{"slot": 99, "name": "x"}]})
     # Port 9 on localhost: if the config weren't checked first, this would be a connection error (3).
-    code, _, err = run("capture", "--ip", "127.0.0.1", "--port", 9, "--timeout", 1,
-                       "--out-dir", tmp_path / "caps", "--config", f)
+    code, _, err = run(
+        "capture", "--ip", "127.0.0.1", "--port", 9, "--timeout", 1, "--out-dir", tmp_path / "caps", "--config", f
+    )
     assert code == ExitCode.USAGE and "1 to 24" in err
     assert not (tmp_path / "caps").exists()
     code, _, _ = run("read-json", "--data-file", SOURCE, "--config", tmp_path / "missing.json")

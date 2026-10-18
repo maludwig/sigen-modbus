@@ -20,6 +20,7 @@ row: an ordinary poll in every way (its own poll_id, every unit, counted by --co
 the schedule. A sure glitch is always flagged; a suspect only when a retry follows, which replaces
 it (the last attempt is kept as the interval's reading).
 """
+
 import datetime
 import sys
 import time
@@ -31,9 +32,11 @@ from sigen.block_reader import BlockReader
 from sigen.errors import ConnectionFailed, DatabaseError, ExitCode, ModbusError
 from sigen.registers import REGISTERS_BY_DEVICE
 
-TRANSIENT_MODBUS_CODES = {6}     # "device busy": worth another try next interval
-GLITCH_RETRIES = 2               # extra polls in a row after a glitched poll
-GLITCH_RETRY_DELAY = 1.0         # seconds: the glitch lasted under ~12 s (2026-10-15: the Pi's readings 6 s either side were right)
+TRANSIENT_MODBUS_CODES = {6}  # "device busy": worth another try next interval
+GLITCH_RETRIES = 2  # extra polls in a row after a glitched poll
+GLITCH_RETRY_DELAY = (
+    1.0  # seconds: the glitch lasted under ~12 s (2026-10-15: the Pi's readings 6 s either side were right)
+)
 
 
 def now_utc() -> datetime.datetime:
@@ -79,13 +82,28 @@ def seconds_to_boundary(interval: float, wall_now: float, offset: float = 0.0) -
     return interval - ((wall_now - offset) % interval)
 
 
-def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[int, str], db_url: str,
-        interval: float, count: Optional[int] = None, offset: float = 0.0,
-        rediscover: Optional[Callable[[str], Optional[str]]] = None, rediscover_after: int = 3,
-        background=None, watcher=None, cloud_heater=None,
-        glitch_retries: int = GLITCH_RETRIES, glitch_retry_delay: float = GLITCH_RETRY_DELAY,
-        out=print, err=lambda msg: print(msg, file=sys.stderr),
-        monotonic=time.monotonic, sleep=time.sleep, wall=time.time) -> int:
+def run(
+    *,
+    connector_for: Callable[[str, int], Callable],
+    ip: str,
+    units: Dict[int, str],
+    db_url: str,
+    interval: float,
+    count: Optional[int] = None,
+    offset: float = 0.0,
+    rediscover: Optional[Callable[[str], Optional[str]]] = None,
+    rediscover_after: int = 3,
+    background=None,
+    watcher=None,
+    cloud_heater=None,
+    glitch_retries: int = GLITCH_RETRIES,
+    glitch_retry_delay: float = GLITCH_RETRY_DELAY,
+    out=print,
+    err=lambda msg: print(msg, file=sys.stderr),
+    monotonic=time.monotonic,
+    sleep=time.sleep,
+    wall=time.time,
+) -> int:
     """Poll until Ctrl+C, or `count` polls. The first poll is immediate; later ones line up
     with the wall clock (on the minute for --interval 60), `offset` seconds after it: a second poller
     of the same device, offset, doesn't read it at the same instant. Waiting uses the monotonic clock,
@@ -109,9 +127,12 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
     next scheduled poll anyway. Each is a whole poll, counted towards `count`. The verdict is
     stored in readings.glitch when it's sure, or when a retry follows (a suspect the retry
     replaces); the watcher is told, and leaves flagged polls out."""
+
     def readers_for(address):
-        return {unit: BlockReader(connector_for(address, unit), REGISTERS_BY_DEVICE[device], strict=True)
-                for unit, device in units.items()}
+        return {
+            unit: BlockReader(connector_for(address, unit), REGISTERS_BY_DEVICE[device], strict=True)
+            for unit, device in units.items()
+        }
 
     readers = readers_for(ip)
     conn = db.connect(db_url)
@@ -125,9 +146,9 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
             background.start()
         if cloud_heater is not None:
             cloud_heater.start()
-        deadline = monotonic()             # the next scheduled poll
-        retry_at: Optional[float] = None   # a glitch retry, sooner than that
-        retries = 0                        # glitch retries in a row so far
+        deadline = monotonic()  # the next scheduled poll
+        retry_at: Optional[float] = None  # a glitch retry, sooner than that
+        retries = 0  # glitch retries in a row so far
         while count is None or polls < count:
             retrying = retry_at is not None
             delay = (retry_at if retrying else deadline) - monotonic()
@@ -147,8 +168,9 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
                     skipped += 1
                 if skipped:
                     err(f"warning: a poll took longer than --interval; skipped {skipped}")
-            will_retry = (verdict is not None and retries < glitch_retries
-                          and monotonic() + glitch_retry_delay < deadline)
+            will_retry = (
+                verdict is not None and retries < glitch_retries and monotonic() + glitch_retry_delay < deadline
+            )
             glitch = verdict.rule if verdict is not None and (verdict.sure or will_retry) else None
             conn, reading_ids = _store(conn, db_url, ip, results, err, glitch)
             stored += len(reading_ids)
@@ -157,8 +179,10 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
                 stamp = f"{result.started_at:%Y-%m-%d %H:%M:%S.%f}Z"
                 where = f"unit {unit}: " + (f"reading {reading_ids[unit]}" if unit in reading_ids else "not stored")
                 if result.error is None:
-                    out(f"{stamp}  {where}: {len(result.values)} registers in {seconds:.2f}s"
-                        + (f" (glitch: {glitch})" if glitch else ""))
+                    out(
+                        f"{stamp}  {where}: {len(result.values)} registers in {seconds:.2f}s"
+                        + (f" (glitch: {glitch})" if glitch else "")
+                    )
                 else:
                     failed += 1
                     err(f"{stamp}  {where}: FAILED after {seconds:.2f}s: {result.error}")
@@ -167,8 +191,10 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
             if cloud_heater is not None:
                 cloud_heater.observe(results, units)
             if any(r.fatal for r in results.values()):
-                err("Stopping: the device rejected a register that should exist. That's more likely "
-                    "a bug in sigen's register map than a device problem.")
+                err(
+                    "Stopping: the device rejected a register that should exist. That's more likely "
+                    "a bug in sigen's register map than a device problem."
+                )
                 return ExitCode.MODBUS
             all_unreachable = all(r.connection_failed for r in results.values())
             connection_failures = connection_failures + 1 if all_unreachable else 0
@@ -182,12 +208,17 @@ def run(*, connector_for: Callable[[str, int], Callable], ip: str, units: Dict[i
             if will_retry:
                 retries += 1
                 retry_at = monotonic() + glitch_retry_delay
-                err(f"{'warning: the reading looks wrong' if verdict.sure else 'note: a suspect reading'} "
-                    f"({verdict.why}); polling again in {glitch_retry_delay:g} s (retry {retries} of {glitch_retries})")
+                err(
+                    f"{'warning: the reading looks wrong' if verdict.sure else 'note: a suspect reading'} "
+                    f"({verdict.why}); polling again in {glitch_retry_delay:g} s (retry {retries} of {glitch_retries})"
+                )
             else:
                 if verdict is not None:
-                    err(f"warning: the reading looks wrong ({verdict.why}); back to the schedule" if verdict.sure
-                        else f"note: a suspect reading ({verdict.why}); keeping it, back to the schedule")
+                    err(
+                        f"warning: the reading looks wrong ({verdict.why}); back to the schedule"
+                        if verdict.sure
+                        else f"note: a suspect reading ({verdict.why}); keeping it, back to the schedule"
+                    )
                 retries = 0
     except KeyboardInterrupt:
         out("")
@@ -235,8 +266,16 @@ def _store(conn, db_url: str, ip: str, results: Dict[int, PollResult], err, glit
         poll_id = db.next_poll_id(conn)
         for unit, result in results.items():
             reading_ids[unit] = db.insert_reading(
-                conn, ip=ip, unit_id=unit, poll_id=poll_id, started_at=result.started_at,
-                ended_at=result.ended_at, values=result.values, error=result.error, glitch=glitch)
+                conn,
+                ip=ip,
+                unit_id=unit,
+                poll_id=poll_id,
+                started_at=result.started_at,
+                ended_at=result.ended_at,
+                values=result.values,
+                error=result.error,
+                glitch=glitch,
+            )
     except DatabaseError as e:
         if not e.transient:
             raise

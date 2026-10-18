@@ -12,27 +12,31 @@ from sigen.fake_server import start_in_thread
 
 REPO = Path(__file__).resolve().parent.parent
 REAL_DATA = REPO / "fake_data" / "real-2026-10-06"
-MIDSOC_DATA = REPO / "fake_data" / "real-2026-10-07-midsoc"   # 55.4 %, not pinned at full
-FULL_DATA = REPO / "fake_data" / "real-2026-10-07-full"        # every plant register (137)
+MIDSOC_DATA = REPO / "fake_data" / "real-2026-10-07-midsoc"  # 55.4 %, not pinned at full
+FULL_DATA = REPO / "fake_data" / "real-2026-10-07-full"  # every plant register (137)
 BOTH_DATA = REPO / "fake_data" / "real-2026-10-08-both-units"  # plant (247) + inverter (unit 1)
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "fresh_schema: the database test gets a new, empty schema of its own "
-                                       "(not yet migrated) instead of the shared migrated one")
+    config.addinivalue_line(
+        "markers",
+        "fresh_schema: the database test gets a new, empty schema of its own "
+        "(not yet migrated) instead of the shared migrated one",
+    )
 
 
 # ---------- the test database (the fixtures that use these are in test_db.py) ----------
 # A commit doesn't wait for the disk (seconds, at times, on a Raspberry Pi's SD card). A crash could lose the last few
 # commits, which doesn't matter in a throwaway schema.
 FAST_COMMITS = "-c synchronous_commit=off"
-KEPT_TABLES = ("schema_migrations", "register_meta")     # what a migration leaves in them is part of the schema
+KEPT_TABLES = ("schema_migrations", "register_meta")  # what a migration leaves in them is part of the schema
 
 
 def base_database_url():
     """SIGEN_TEST_DB_URL, or database.test_url from the repo's config.json, or None."""
     from sigen.config import load_config
     from sigen.errors import SigenError
+
     if os.environ.get("SIGEN_TEST_DB_URL"):
         return os.environ["SIGEN_TEST_DB_URL"]
     if (REPO / "config.json").exists():
@@ -45,6 +49,7 @@ def base_database_url():
 
 def new_schema(base: str) -> str:
     import psycopg
+
     schema = f"sigen_test_{uuid.uuid4().hex[:12]}"
     with psycopg.connect(base, autocommit=True, options=FAST_COMMITS) as c:
         c.execute(f'CREATE SCHEMA "{schema}"')
@@ -53,27 +58,37 @@ def new_schema(base: str) -> str:
 
 def drop_schema(base: str, schema: str) -> None:
     import psycopg
+
     with psycopg.connect(base, autocommit=True, options=FAST_COMMITS) as c:
         c.execute(f'DROP SCHEMA "{schema}" CASCADE')
 
 
 def schema_url(base: str, schema: str) -> str:
     import psycopg
+
     return psycopg.conninfo.make_conninfo(base, options=f"-c search_path={schema} {FAST_COMMITS}")
 
 
 def fingerprint(conn) -> tuple:
     """The schema's shape: its tables, views, indexes, sequences and functions, every column, the migrations applied
     and register_meta. Not the other tables' rows."""
+
     def rows(query):
         return tuple(conn.execute(query).fetchall())
-    return (rows("SELECT relname, relkind FROM pg_class WHERE relnamespace = current_schema()::regnamespace "
-                 "ORDER BY relname"),
-            rows("SELECT table_name, ordinal_position, column_name, data_type FROM information_schema.columns "
-                 "WHERE table_schema = current_schema() ORDER BY table_name, ordinal_position"),
-            rows("SELECT proname FROM pg_proc WHERE pronamespace = current_schema()::regnamespace ORDER BY proname"),
-            rows("SELECT * FROM schema_migrations ORDER BY version"),
-            rows("SELECT * FROM register_meta ORDER BY address"))
+
+    return (
+        rows(
+            "SELECT relname, relkind FROM pg_class WHERE relnamespace = current_schema()::regnamespace "
+            "ORDER BY relname"
+        ),
+        rows(
+            "SELECT table_name, ordinal_position, column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = current_schema() ORDER BY table_name, ordinal_position"
+        ),
+        rows("SELECT proname FROM pg_proc WHERE pronamespace = current_schema()::regnamespace ORDER BY proname"),
+        rows("SELECT * FROM schema_migrations ORDER BY version"),
+        rows("SELECT * FROM register_meta ORDER BY address"),
+    )
 
 
 def empty_tables(conn) -> None:
@@ -82,9 +97,15 @@ def empty_tables(conn) -> None:
     slows pg_database_size (db status) a little more with every test."""
     import psycopg
     from psycopg import sql
-    tables = [t for t, in conn.execute("SELECT tablename FROM pg_tables WHERE schemaname = current_schema() "
-                                       "ORDER BY tablename") if t not in KEPT_TABLES]
-    for _ in range(len(tables)):              # a table another refers to empties once that one has
+
+    tables = [
+        t
+        for t, in conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = current_schema() " "ORDER BY tablename"
+        )
+        if t not in KEPT_TABLES
+    ]
+    for _ in range(len(tables)):  # a table another refers to empties once that one has
         left = []
         for table in tables:
             try:
@@ -96,8 +117,10 @@ def empty_tables(conn) -> None:
             break
     if tables:
         raise RuntimeError(f"couldn't empty {', '.join(tables)}")
-    conn.execute("SELECT setval(format('%I', sequencename)::regclass, start_value, false) FROM pg_sequences "
-                 "WHERE schemaname = current_schema()")
+    conn.execute(
+        "SELECT setval(format('%I', sequencename)::regclass, start_value, false) FROM pg_sequences "
+        "WHERE schemaname = current_schema()"
+    )
 
 
 class SharedSchema:
@@ -111,6 +134,7 @@ class SharedSchema:
 
     def _build(self) -> None:
         from sigen import db
+
         self.schema = new_schema(self.base)
         self.url = schema_url(self.base, self.schema)
         with db.connect(self.url) as conn:
@@ -119,8 +143,9 @@ class SharedSchema:
 
     def reset(self) -> None:
         from sigen import db
+
         with db.connect(self.url) as conn:
-            conn.execute("SET lock_timeout = '10s'")      # a connection a test left open fails here, not hangs
+            conn.execute("SET lock_timeout = '10s'")  # a connection a test left open fails here, not hangs
             empty_tables(conn)
             changed = fingerprint(conn) != self.shape
         if changed:
@@ -217,6 +242,7 @@ def hangs_up():
     """A localhost port whose server closes every connection at once: a database or ntfy server that's down,
     failing fast everywhere. A closed port won't do on Windows, which retries a refused connection for ~2 s
     (and libpq there waits out its whole connect_timeout, 10 s)."""
+
     class HangUp(socketserver.BaseRequestHandler):
         def handle(self):
             pass
@@ -234,6 +260,7 @@ def quick_polls(monkeypatch):
     """`sigen poll` without the waits between polls: they run back to back. The pacing itself is tested on its
     own (test_seconds_to_boundary)."""
     from sigen import poll
+
     monkeypatch.setattr(poll, "run", functools.partial(poll.run, sleep=lambda seconds: None))
 
 
@@ -251,4 +278,5 @@ def run(capsys):
         code = main([str(a) for a in argv])
         out = capsys.readouterr()
         return code, out.out, out.err
+
     return _run

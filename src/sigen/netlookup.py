@@ -15,6 +15,7 @@ Raspberry Pi, 2026-10-12).
 
 Elsewhere (macOS, …) every function here raises PlatformNotSupported.
 """
+
 import ctypes
 import json
 import re
@@ -29,7 +30,7 @@ from typing import Callable, Dict, Iterable, Optional, Tuple
 
 from sigen.errors import PlatformNotSupported
 
-LINUX_TIMEOUT = 8.0                 # a STALE entry's re-check: 5 s of DELAY, then unicast probes
+LINUX_TIMEOUT = 8.0  # a STALE entry's re-check: 5 s of DELAY, then unicast probes
 CONFIRMED = {"REACHABLE", "PERMANENT", "NOARP"}
 PENDING = {"INCOMPLETE", "DELAY", "PROBE"}
 
@@ -39,7 +40,7 @@ def normalize_mac(text: str) -> str:
     raw = re.sub(r"[:\-.\s]", "", text)
     if not re.fullmatch(r"[0-9a-fA-F]{12}", raw):
         raise ValueError(f"'{text}' isn't a MAC address (expected 6 hex bytes, e.g. 02:ab:cd:ef:00:01)")
-    return ":".join(raw[i:i + 2] for i in range(0, 12, 2)).lower()
+    return ":".join(raw[i : i + 2] for i in range(0, 12, 2)).lower()
 
 
 def require_supported() -> None:
@@ -48,8 +49,9 @@ def require_supported() -> None:
         return
     if sys.platform.startswith("linux"):
         if shutil.which("ip") is None:
-            raise PlatformNotSupported("MAC lookup on Linux needs the `ip` command (iproute2), which isn't "
-                                       "installed or isn't on PATH")
+            raise PlatformNotSupported(
+                "MAC lookup on Linux needs the `ip` command (iproute2), which isn't " "installed or isn't on PATH"
+            )
         return
     raise PlatformNotSupported(f"MAC lookup works on Windows and Linux, not {sys.platform}")
 
@@ -87,8 +89,14 @@ def _poke(ips: Iterable[str]) -> None:
                 pass
 
 
-def _linux_mac_for_ip(ip: str, timeout: float = LINUX_TIMEOUT, neigh: Callable = neighbours,
-                      poke: Callable = _poke, sleep=time.sleep, monotonic=time.monotonic) -> Optional[str]:
+def _linux_mac_for_ip(
+    ip: str,
+    timeout: float = LINUX_TIMEOUT,
+    neigh: Callable = neighbours,
+    poke: Callable = _poke,
+    sleep=time.sleep,
+    monotonic=time.monotonic,
+) -> Optional[str]:
     poke([ip])
     deadline, resolving = monotonic() + timeout, False
     while True:
@@ -97,15 +105,22 @@ def _linux_mac_for_ip(ip: str, timeout: float = LINUX_TIMEOUT, neigh: Callable =
             return mac
         if any(s in PENDING for s in state.split("/")):
             resolving = True
-        elif "FAILED" in state and resolving:          # a FAILED left over from before the poke doesn't count
+        elif "FAILED" in state and resolving:  # a FAILED left over from before the poke doesn't count
             return None
         if monotonic() >= deadline:
             return None
         sleep(0.1)
 
 
-def _linux_find(mac: str, ips: Iterable[str], timeout: float = LINUX_TIMEOUT, neigh: Callable = neighbours,
-                poke: Callable = _poke, sleep=time.sleep, monotonic=time.monotonic) -> Optional[str]:
+def _linux_find(
+    mac: str,
+    ips: Iterable[str],
+    timeout: float = LINUX_TIMEOUT,
+    neigh: Callable = neighbours,
+    poke: Callable = _poke,
+    sleep=time.sleep,
+    monotonic=time.monotonic,
+) -> Optional[str]:
     """The first of `ips` confirmed (REACHABLE) to have `mac`; a STALE match only counts once the kernel has
     re-checked it."""
     ips = list(ips)
@@ -117,7 +132,7 @@ def _linux_find(mac: str, ips: Iterable[str], timeout: float = LINUX_TIMEOUT, ne
             state, found = table.get(ip, ("absent", None))
             if found == mac and _confirmed(state):
                 return ip
-        waiting = PENDING | {"STALE"}                  # still being resolved or re-checked
+        waiting = PENDING | {"STALE"}  # still being resolved or re-checked
         unsettled = [ip for ip in ips if any(s in waiting for s in table.get(ip, ("absent",))[0].split("/"))]
         if not unsettled or monotonic() >= deadline:
             return None
@@ -128,7 +143,7 @@ def _linux_find(mac: str, ips: Iterable[str], timeout: float = LINUX_TIMEOUT, ne
 def _windows_mac_for_ip(ip: str) -> Optional[str]:
     send_arp = ctypes.WinDLL("iphlpapi").SendARP
     send_arp.argtypes = [ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
-    dest = struct.unpack("<I", socket.inet_aton(ip))[0]     # same bytes as network order
+    dest = struct.unpack("<I", socket.inet_aton(ip))[0]  # same bytes as network order
     buf = (ctypes.c_ubyte * 8)()
     length = ctypes.c_ulong(6)
     if send_arp(dest, 0, buf, ctypes.byref(length)) != 0 or length.value != 6:
@@ -136,8 +151,9 @@ def _windows_mac_for_ip(ip: str) -> Optional[str]:
     return ":".join(f"{b:02x}" for b in buf[:6])
 
 
-def _parallel_find(target: str, ips: Iterable[str], lookup: Callable[[str], Optional[str]],
-                   workers: int) -> Optional[str]:
+def _parallel_find(
+    target: str, ips: Iterable[str], lookup: Callable[[str], Optional[str]], workers: int
+) -> Optional[str]:
     pool = ThreadPoolExecutor(max_workers=workers)
     try:
         futures = {pool.submit(lookup, ip): ip for ip in ips}
@@ -146,7 +162,7 @@ def _parallel_find(target: str, ips: Iterable[str], lookup: Callable[[str], Opti
                 return futures[future]
         return None
     finally:
-        pool.shutdown(wait=False, cancel_futures=True)   # lookups already running finish on their own
+        pool.shutdown(wait=False, cancel_futures=True)  # lookups already running finish on their own
 
 
 # ---------- the interface ----------
@@ -156,8 +172,9 @@ def mac_for_ip(ip: str) -> Optional[str]:
     return _windows_mac_for_ip(ip) if sys.platform == "win32" else _linux_mac_for_ip(ip)
 
 
-def find_ip_for_mac(mac: str, ips: Iterable[str], workers: int = 64,
-                    lookup: Optional[Callable[[str], Optional[str]]] = None) -> Optional[str]:
+def find_ip_for_mac(
+    mac: str, ips: Iterable[str], workers: int = 64, lookup: Optional[Callable[[str], Optional[str]]] = None
+) -> Optional[str]:
     """The first of `ips` whose MAC is `mac`; None if none of them. `lookup` (ip -> MAC) replaces the
     platform's own (for tests): it's then asked for every address in parallel."""
     target = normalize_mac(mac)
