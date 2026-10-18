@@ -2,8 +2,8 @@
 Modbus link can't give us -- above all the LoadHub/gateway's grid and contactor data, and each battery pack's
 heating status (the LoadHub has no Modbus at all).
 
-Standard library for HTTP (urllib), like sigen.ntfy; the only heavier need is AES for the password, and that is
-imported lazily inside login(), so refresh / query / poll run on the standard library alone.
+Standard library for HTTP (urllib), like sigen.ntfy; the only heavier need is AES for the password (the
+cryptography package, a dependency of sigen).
 
 **Auth.** A password login returns a short-lived access token (~12 h) and a refresh token; the cloud may first ask
 for an emailed security code (MFA). The refresh token is **single-use**: each refresh issues a new one, so we must
@@ -18,6 +18,7 @@ shipped in this code; they come from the config (cloud.obfuscation_key, cloud.cl
 neither. We never store the password.
 """
 
+import base64
 import datetime
 import json
 import os
@@ -25,10 +26,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from pathlib import Path
-from typing import Any
 from collections.abc import Callable
+from pathlib import Path
+from typing import Any, Self
 
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+from sigen.config import Cloud
 from sigen.errors import CloudError
 
 DEFAULT_BASE_URL = "https://api-us.sigencloud.com"
@@ -44,16 +49,6 @@ DEVICE_AIO, DEVICE_INVERTER, DEVICE_BATTERY, DEVICE_GATEWAY = 2, 3, 4, 8
 def encode_password(password: str, key: bytes) -> str:
     """The password as the app encodes it: AES-128-CBC, key = IV = `key` (the app's 16-byte static key), PKCS7,
     base64. `key` is NOT shipped in this code -- it comes from the config via CloudClient. Only login() calls this."""
-    import base64
-
-    try:
-        from cryptography.hazmat.primitives import padding
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    except ImportError:
-        raise CloudError(
-            "`sigen cloud login` needs the cryptography package: pip install cryptography "
-            '(or pip install -e ".[dev]").'
-        )
     if len(key) != 16:
         raise CloudError(f"cloud.obfuscation_key must be 16 bytes (it is the AES-128 key and the IV), got {len(key)}")
     padder = padding.PKCS7(128).padder()
@@ -117,6 +112,17 @@ class CloudClient:
         # Basic credential (login + refresh). They come from the config, so they aren't committed here.
         self.obfuscation_key = obfuscation_key
         self.client_basic = client_basic
+
+    @classmethod
+    def from_config(cls, cloud: Cloud) -> Self:
+        """A client for the config's cloud section (its token file, hosts and the app's two constants)."""
+        return cls(
+            cloud.token_file,
+            cloud.base_url,
+            app_base_url=cloud.app_base_url,
+            obfuscation_key=cloud.obfuscation_key,
+            client_basic=cloud.client_basic,
+        )
 
     # ---------- token file ----------
     def load(self) -> Tokens:

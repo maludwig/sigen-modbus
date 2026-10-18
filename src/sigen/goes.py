@@ -36,18 +36,20 @@ import shutil
 import sys
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Self
-from collections.abc import Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+import aiohttp
+import fsspec
 import h5py
 import numpy as np
 import numpy.typing as npt
 
 from sigen.errors import ConnectionFailed, PreconditionFailed, SigenError
-from sigen.weather import Response
+from sigen.fetch import Response, http_get
 
 DEFAULT_SATELLITE = "18"  # GOES-West: western North America and the Pacific
 PRODUCTS = ("ACM", "COD", "ACHA")
@@ -71,8 +73,6 @@ def list_keys(
     satellite: str, prefix: str, get: Callable[[str, Mapping[str, object]], Response] | None = None
 ) -> list[tuple[str, int]]:
     """(key, size) of every object under `prefix` in the satellite's bucket."""
-    from sigen.weather import http_get
-
     get = get or http_get
     keys, token = [], None
     while True:
@@ -278,8 +278,6 @@ def fetch_box(
     """(Box, bytes fetched) for the file at `url`, reading only what the box needs. `opener(url)` returns a
     seekable binary file with a `.cache.total_requested_bytes` (default: fsspec over HTTP)."""
     if opener is None:
-        import fsspec
-
         f = fsspec.filesystem("http").open(url, "rb", block_size=BLOCK_SIZE, cache_type="blockcache")
     else:
         f = opener(url)
@@ -377,7 +375,7 @@ def process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if sys.platform == "win32":
-        import ctypes
+        import ctypes  # imported here on purpose: Windows only (wintypes may not import elsewhere)
         from ctypes import wintypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -443,12 +441,7 @@ def release_pid_file(path: Path, pid: int | None = None) -> None:
 def _network_errors() -> tuple[type[BaseException], ...]:
     """What a failed read raises: OSError (incl. timeouts and fsspec's FileNotFoundError for a 404), and
     aiohttp's own errors, which aren't all OSErrors."""
-    try:
-        import aiohttp
-
-        return OSError, aiohttp.ClientError
-    except ImportError:
-        return (OSError,)
+    return OSError, aiohttp.ClientError
 
 
 def _existing(path: Path) -> tuple[set[int], tuple[slice, slice] | None]:

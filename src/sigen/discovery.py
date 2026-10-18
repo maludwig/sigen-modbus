@@ -23,6 +23,11 @@ def local_subnet() -> ipaddress.IPv4Network:
     return ipaddress.ip_network(f"{ip}/24", strict=False)
 
 
+def local_hosts() -> list[str]:
+    """Every host address of local_subnet(), as strings: what a scan or a MAC search sweeps by default."""
+    return [str(h) for h in local_subnet().hosts()]
+
+
 def parse_ip_range(text: str) -> list[str]:
     """'192.168.1.170-192.168.1.180', '192.168.1.170-180', '192.168.1.0/24' or one IP -> list."""
     text = text.strip()

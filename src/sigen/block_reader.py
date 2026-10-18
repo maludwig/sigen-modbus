@@ -15,8 +15,8 @@ Consequence: a block read can't tell you a register is unsupported; it just read
 Only a read that starts on it is rejected. Check new registers one at a time.
 """
 
-from dataclasses import dataclass
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 from sigen.errors import ModbusError
 from sigen.modbus import ModbusClient
@@ -96,7 +96,7 @@ def entry_for(reg: Register, words: list[int] | None = None, error: str | None =
     if error is not None:
         entry["error"] = error
         return entry
-    value, label = reg.decode(words)
+    value, label = (reg.decode_text(words), None) if reg.type == "string" else reg.decode(words)
     entry["value"] = value
     if label is not None:
         entry["label"] = label

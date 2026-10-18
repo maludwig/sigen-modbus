@@ -67,21 +67,6 @@ class ModbusError(SigenError):
         super().__init__(f"Modbus exception {code} ({names.get(code, 'unknown')}) for function {function}{where}")
 
 
-class VerifyFailed(SigenError):
-    """Read-back after a write didn't match. Nothing raises it yet: control.py
-    reports this as an outcome ("verify_failed") instead."""
-
-    exit_code = ExitCode.VERIFY_FAILED
-
-
-class Refused(SigenError):
-    """A write isn't allowed (register not writable, value out of range).
-    Nothing raises it yet: control.py reports this as an outcome ("refused")
-    instead."""
-
-    exit_code = ExitCode.REFUSED
-
-
 class PreconditionFailed(SigenError):
     """The state isn't what the command needs, e.g. `sigen satellite` is
     already running (its satellite.pid names a live process)."""

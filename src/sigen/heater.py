@@ -18,8 +18,8 @@ refreshed once at launch and kept fresh (>1 h of life) by the thread, so queries
 
 import datetime
 import threading
-from typing import Any
 from collections.abc import Callable
+from typing import Any
 
 import psycopg
 
@@ -109,14 +109,7 @@ class HeaterPoller:
         if not cloud.station_id or not cloud.batteries:
             err("warning: cloud heater polling off: the config's cloud section needs station_id and batteries")
             return None
-        client = CloudClient(
-            cloud.token_file,
-            cloud.base_url,
-            app_base_url=cloud.app_base_url,
-            obfuscation_key=cloud.obfuscation_key,
-            client_basic=cloud.client_basic,
-        )
-        return cls(client, cloud.station_id, list(cloud.batteries), db_url, out=out, err=err)
+        return cls(CloudClient.from_config(cloud), cloud.station_id, list(cloud.batteries), db_url, out=out, err=err)
 
     # ---------- the main poll feeds the gate ----------
     def observe(self, results: dict[int, PollResult], units: dict[int, str]) -> None:
@@ -157,11 +150,15 @@ class HeaterPoller:
         try:
             return db.connect(self._db_url)
         except Exception as e:
-            msg = f"{type(e).__name__}: {e}"
-            if msg != self._last_db_error:
-                self._err(f"warning: cloud heater can't reach the database ({msg}); will keep polling the cloud")
-                self._last_db_error = msg
+            self._warn_db("can't reach the database", e)
             return None
+
+    def _warn_db(self, trouble: str, e: Exception) -> None:
+        """Warn about a database problem once: the same error again (every poll, through an outage) stays quiet."""
+        msg = f"{type(e).__name__}: {e}"
+        if msg != self._last_db_error:
+            self._err(f"warning: cloud heater {trouble} ({msg}); will keep polling the cloud")
+            self._last_db_error = msg
 
     @staticmethod
     def _close(conn: psycopg.Connection | None) -> None:
@@ -255,8 +252,5 @@ class HeaterPoller:
             return True
         except Exception as e:
             self._db_broken = True
-            msg = f"{type(e).__name__}: {e}"
-            if msg != self._last_db_error:
-                self._err(f"warning: cloud heater can't write to the database ({msg}); will keep polling the cloud")
-                self._last_db_error = msg
+            self._warn_db("can't write to the database", e)
             return False

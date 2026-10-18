@@ -40,8 +40,8 @@ losses, ~5–7 %). The cells cooled 0.2–0.4 °C/h at night (time constant ~13 
 
 import datetime
 from collections import deque
-from dataclasses import dataclass, field
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 
 from sigen import registers
 
@@ -206,6 +206,11 @@ class Event:
 def _hours(a: datetime.datetime, b: datetime.datetime) -> float:
     """Hours from a to b (negative if b is earlier)."""
     return (b - a).total_seconds() / 3600
+
+
+def _minutes(a: datetime.datetime, b: datetime.datetime) -> float:
+    """Minutes from a to b (negative if b is earlier)."""
+    return (b - a).total_seconds() / 60
 
 
 def runs(
@@ -393,7 +398,7 @@ def detect_warming(
             ((t0, t1),) = kept
             text = (
                 f"{column} rose {rises[0]:.1f} °C ({temps[t0]:.1f} → {temps[t1]:.1f}) in "
-                f"{(w.times[t1] - w.times[t0]).total_seconds() / 60:.0f} min with no sun and the inverter idle, "
+                f"{_minutes(w.times[t0], w.times[t1]):.0f} min with no sun and the inverter idle, "
                 f"{note}"
             )
             events.append(Event("warming", w.times[t0], w.times[t1], text, details))
@@ -454,7 +459,7 @@ def detect_unexplained_power(
                 w.times[i],
                 w.times[j],
                 f"the inverter's DC side drew {mean * 1000:.0f} W (standby {standby_kw * 1000:.0f} W) for "
-                f"{(w.times[j] - w.times[i]).total_seconds() / 60:.1f} min, from {source}: "
+                f"{_minutes(w.times[i], w.times[j]):.1f} min, from {source}: "
                 f"{kwh * 1000:.0f} Wh",
                 {"mean_kw": mean, "peak_kw": max(used), "excess_kwh": kwh},
             )
@@ -568,7 +573,7 @@ def detect_cold_charging(
                 w.times[i],
                 w.times[j],
                 f"the battery charged at up to {max(charging):.2f} kW with the coolest cluster at "
-                f"{min(temps[i:j + 1]):.1f} °C for {(w.times[j] - w.times[i]).total_seconds() / 60:.0f} min",
+                f"{min(temps[i:j + 1]):.1f} °C for {_minutes(w.times[i], w.times[j]):.0f} min",
                 {"max_kw": max(charging), "coolest_c": min(temps[i : j + 1])},
             )
         )
@@ -626,7 +631,7 @@ def detect_below_reserve(
                 w.times[i],
                 w.times[j],
                 f"SOC {socs[j]:.1f} % is below the {reserves[j]:g} % backup reserve for "
-                f"{(w.times[j] - w.times[i]).total_seconds() / 60:.0f} min: {why}",
+                f"{_minutes(w.times[i], w.times[j]):.0f} min: {why}",
                 {"soc_pct": socs[j], "reserve_pct": reserves[j], "off_grid": float(off)},
             )
         )
@@ -721,9 +726,9 @@ def detect_fault(w: Window) -> list[Event]:
                 "fault",
                 w.times[i],
                 w.times[j],
-                f"The SigenStor reports a fault, for {_hours(w.times[i], w.times[j]) * 60:.0f} min so "
+                f"The SigenStor reports a fault, for {_minutes(w.times[i], w.times[j]):.0f} min so"
                 f"far. Alarms: {why}",
-                {"minutes": _hours(w.times[i], w.times[j]) * 60},
+                {"minutes": _minutes(w.times[i], w.times[j])},
             )
         )
     return events

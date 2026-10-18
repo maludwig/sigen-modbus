@@ -350,7 +350,7 @@ def load_config(path: Path | None) -> Config:
         slot, name = item["slot"], item["name"]
         if isinstance(slot, bool) or not isinstance(slot, int) or slot not in SMART_LOAD_SLOTS:
             raise ConfigError(f"{where}: slot must be a whole number from 1 to 24, got {slot!r}")
-        if not isinstance(name, str) or not name.strip():
+        if not _is_text(name):
             raise ConfigError(f"{where}: name must be a non-empty string")
         if slot in names:
             raise ConfigError(f"{where}: slot {slot} is named twice")
@@ -387,7 +387,7 @@ def _cloud(path: Path, spec: Any) -> "Cloud":
             f'"base_url", "app_base_url", "station_id", "batteries", "obfuscation_key", "client_basic"'
         )
     token_file = spec["token_file"]
-    if not isinstance(token_file, str) or not token_file.strip():
+    if not _is_text(token_file):
         raise ConfigError(f"{path}: cloud.token_file must be a non-empty string")
     base_url = spec.get("base_url", DEFAULT_CLOUD_BASE_URL)
     if not isinstance(base_url, str) or not re.match(r"^https?://", base_url):
@@ -398,14 +398,14 @@ def _cloud(path: Path, spec: Any) -> "Cloud":
             f'{path}: cloud.app_base_url must be a URL like "{DEFAULT_CLOUD_APP_URL}", got {app_base_url!r}'
         )
     station = spec.get("station_id")
-    if station is not None and (not isinstance(station, str) or not station.strip()):
+    if station is not None and not _is_text(station):
         raise ConfigError(f"{path}: cloud.station_id must be a non-empty string")
     batteries = spec.get("batteries", [])
-    if not isinstance(batteries, list) or any(not isinstance(b, str) or not b.strip() for b in batteries):
+    if not isinstance(batteries, list) or not all(_is_text(b) for b in batteries):
         raise ConfigError(f"{path}: cloud.batteries must be a list of pack SN strings")
     for name in ("obfuscation_key", "client_basic"):
         value = spec.get(name)
-        if value is not None and (not isinstance(value, str) or not value.strip()):
+        if value is not None and not _is_text(value):
             raise ConfigError(f"{path}: cloud.{name} must be a non-empty string")
     return Cloud(
         token_file=Path(path).resolve().parent / token_file.strip(),
@@ -441,7 +441,7 @@ def _command_settings(path: Path, command: str, spec: Any) -> dict[str, Any]:
             if isinstance(value, bool) or not isinstance(value, int) or not kind[1] <= value <= kind[2]:
                 raise ConfigError(f"{path}: {where} must be a whole number from {kind[1]} to {kind[2]}, got {value!r}")
             out[name] = value
-        elif not isinstance(value, str) or not value.strip():
+        elif not _is_text(value):
             raise ConfigError(f"{path}: {where} must be a non-empty string, got {value!r}")
         else:
             out[name] = Path(path).resolve().parent / value.strip() if kind[0] == "dir" else value.strip()
@@ -453,7 +453,7 @@ def _cube_dir(path: Path, spec: Any) -> Path:
     if not isinstance(spec, dict) or set(spec) - {"cube_dir"}:
         raise ConfigError(f'{path}: "satellite" must be {{"cube_dir": "captures/satellite/cubes"}}')
     cube_dir = spec.get("cube_dir", str(DEFAULT_CUBE_DIR))
-    if not isinstance(cube_dir, str) or not cube_dir.strip():
+    if not _is_text(cube_dir):
         raise ConfigError(f'{path}: satellite.cube_dir must be a directory, e.g. "captures/satellite/cubes"')
     return Path(path).resolve().parent / cube_dir.strip()
 
@@ -473,6 +473,11 @@ def _alerts(path: Path, spec: Any) -> Alerts:
     if not isinstance(server, str) or not NTFY_SERVER.fullmatch(server):
         raise ConfigError(f'{path}: alerts.ntfy_server must be a server URL like "https://ntfy.sh", got {server!r}')
     return Alerts(ntfy_topic=topic, ntfy_server=server.rstrip("/"))
+
+
+def _is_text(value: Any) -> bool:
+    """A string with something in it besides whitespace (each caller words its own error)."""
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _number(path: Path, where: str, value: Any, low: float, high: float) -> float:

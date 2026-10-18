@@ -195,10 +195,10 @@ class Register:
 
     # --- decoding ---
     def decode(self, words: list[int]) -> tuple[float | None, str | None]:
-        """Words -> (engineering value, label). Value is None for the "not set" sentinel.
-        A string register's value is its text."""
+        """Words -> (engineering value, label) for a number register. Value is None for the "not set" sentinel.
+        ValueError for a string register: decode_text() reads those."""
         if self.type == "string":
-            return decode_string(words), None
+            raise ValueError(f"{self.name} is text: use decode_text()")
         n = decode_int(words, self.type)
         if NOT_SET.get(self.type) == n:
             return None, "Not set (no limit)"
@@ -210,14 +210,21 @@ class Register:
         label = self.labels.get(n, "Unknown") if self.labels is not None else None
         return value, label
 
+    def decode_text(self, words: list[int]) -> str:
+        """A string register's words -> its text (model, serial, firmware).
+        ValueError for a number register: decode() reads those."""
+        if self.type != "string":
+            raise ValueError(f"{self.name} is a number ({self.type}): use decode()")
+        return decode_string(words)
+
     def describe(self, words: list[int]) -> str:
         """Words -> display text: "12.5 kW", "Running (1)", or a string's text.
 
         Used in control-command messages.
         """
-        value, label = self.decode(words)
         if self.type == "string":
-            return value
+            return self.decode_text(words)
+        value, label = self.decode(words)
         if label is not None:
             raw = decode_int(words, self.type)
             return f"{label} ({raw})" if value is not None else label

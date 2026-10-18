@@ -985,7 +985,7 @@
     // "Today" before sunrise, a chart with spec.night shows a night sky instead (the readings still come in behind
     // it); the first check after sunrise draws the chart.
     const night = () => spec.night && env.sunrise != null && Date.now() / 1000 < env.sunrise;
-    const hhmm = (seconds) => { const d = new Date(seconds * 1000); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+    const hhmm = (seconds) => hm(new Date(seconds * 1000));
     /**
      * The night sky in the chart's place, at its size (made again only when
      * that changed); the chart, if any, hidden behind it.

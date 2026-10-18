@@ -22,14 +22,16 @@ moment. Needs numpy, h5py and pvlib.
 import datetime
 import io
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from collections.abc import Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import h5py
 import numpy as np
+import pandas as pd
+import pvlib
 
 from sigen.goes import DEFAULT_SATELLITE, FixedGrid, cube_path
 
@@ -70,6 +72,12 @@ def toward_sun(lat: float, lon: float, azimuth_deg: float, distance_km: float) -
     d_lat = distance_km * np.cos(np.radians(azimuth_deg)) / 111.2
     d_lon = distance_km * np.sin(np.radians(azimuth_deg)) / (111.2 * np.cos(np.radians(lat)))
     return lat + d_lat, lon + d_lon
+
+
+def _shade_point(lat: float, lon: float, azimuth: float, elevation: float, h_km: float) -> tuple[float, float]:
+    """Where to look for the cloud that shades (lat, lon) at height `h_km`: under the line to the sun (its
+    azimuth and elevation, degrees), h / tan(elevation) km away."""
+    return toward_sun(lat, lon, azimuth, h_km / np.tan(np.radians(elevation)))
 
 
 def _mean(values: np.ndarray) -> float:
@@ -129,8 +137,6 @@ def shade_day(
     heights: Sequence[float] = HEIGHTS_KM,
 ) -> ShadeSeries:
     """The series for one local day's cubes (empty if there are none)."""
-    import pandas as pd
-    import pvlib
 
     def open_cube(short: str) -> Cube | None:
         path = cube_path(cube_dir, satellite, f"{short}{sector}", day)
@@ -164,7 +170,7 @@ def shade_day(
             tag = f"{h:g}km"
             if h > 0 and elevation <= 1:
                 continue
-            at_lat, at_lon = (lat, lon) if h == 0 else toward_sun(lat, lon, azimuth, h / np.tan(np.radians(elevation)))
+            at_lat, at_lon = (lat, lon) if h == 0 else _shade_point(lat, lon, azimuth, elevation, h)
             if i_acm is not None and (pixel := acm.grid.pixel(at_lat, at_lon, h * 1000)) is not None:
                 row[f"prob_{tag}"] = _mean(acm.block("Cloud_Probabilities", i_acm, *pixel))
                 levels = acm.block("ACM", i_acm, *pixel)
@@ -174,7 +180,7 @@ def shade_day(
         if i_acha is not None and elevation > 1:
             h, found = FIRST_GUESS_KM, math.nan
             for _ in range(6):
-                at_lat, at_lon = toward_sun(lat, lon, azimuth, h / np.tan(np.radians(elevation)))
+                at_lat, at_lon = _shade_point(lat, lon, azimuth, elevation, h)
                 pixel = acha.grid.pixel(at_lat, at_lon, h * 1000)
                 found = _median(acha.block("HT", i_acha, *pixel)) / 1000 if pixel is not None else math.nan
                 if math.isnan(found):
@@ -184,7 +190,7 @@ def shade_day(
                 if settled:
                     break
             if not math.isnan(found):  # place the final point at the settled height
-                at_lat, at_lon = toward_sun(lat, lon, azimuth, h / np.tan(np.radians(elevation)))
+                at_lat, at_lon = _shade_point(lat, lon, azimuth, elevation, h)
             row["top_km"] = found
             if i_cod is not None:
                 sample_cod(row, i_cod, at_lat, at_lon, h * 1000, "top", mu0)

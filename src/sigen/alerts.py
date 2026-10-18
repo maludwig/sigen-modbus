@@ -29,10 +29,11 @@ import queue
 import sys
 import threading
 from collections import deque
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import psycopg
+from psycopg import sql
 
 from sigen import battery_watch as bw
 from sigen import db, glitches, ntfy, weather
@@ -80,11 +81,6 @@ REACHABLE = Notice("In contact with the SigenStor again", "default", ("white_che
 def stamp(t: datetime.datetime, tz: datetime.tzinfo) -> str:
     """ISO 8601 in local time, to the second, with the offset: 2026-10-12T19:49:30-06:00."""
     return t.astimezone(tz).isoformat(timespec="seconds")
-
-
-def now_utc() -> datetime.datetime:
-    """The current time, timezone-aware in UTC. Unused in this module."""
-    return datetime.datetime.now(datetime.UTC)
 
 
 class Buffer:
@@ -284,8 +280,6 @@ class Watcher:
         """Fill the buffer with the unflagged polls of the last `span` before
         `now` (plant joined to inverter) and the 15-minute air temperatures
         from an hour before that. `units` must name a "plant" unit."""
-        from psycopg import sql
-
         plant = next((u for u, d in units.items() if d == "plant"), None)
         if plant is None:
             raise ValueError(f"no plant unit among {sorted(units)}")

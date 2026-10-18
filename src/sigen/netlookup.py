@@ -25,8 +25,8 @@ import struct
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from sigen.errors import PlatformNotSupported
 
@@ -75,10 +75,14 @@ def neighbours(
     return table
 
 
+def _has_flag(state: str, flags: Iterable[str]) -> bool:
+    """True if any of the "/"-joined flags in a neighbour state (from neighbours()) is one of `flags`."""
+    return any(s in flags for s in state.split("/"))
+
+
 def _confirmed(state: str) -> bool:
-    """True if any of the "/"-joined flags in a neighbour state (from
-    neighbours()) means the MAC is trusted: REACHABLE, PERMANENT or NOARP."""
-    return any(s in CONFIRMED for s in state.split("/"))
+    """True if the neighbour state says the MAC is trusted: REACHABLE, PERMANENT or NOARP."""
+    return _has_flag(state, CONFIRMED)
 
 
 def _poke(ips: Iterable[str]) -> None:
@@ -111,9 +115,9 @@ def _linux_mac_for_ip(
         state, mac = neigh().get(ip, ("absent", None))
         if mac and _confirmed(state):
             return mac
-        if any(s in PENDING for s in state.split("/")):
+        if _has_flag(state, PENDING):
             resolving = True
-        elif "FAILED" in state and resolving:  # a FAILED left over from before the poke doesn't count
+        elif _has_flag(state, {"FAILED"}) and resolving:  # a FAILED left over from before the poke doesn't count
             return None
         if monotonic() >= deadline:
             return None
@@ -141,7 +145,7 @@ def _linux_find(
             if found == mac and _confirmed(state):
                 return ip
         waiting = PENDING | {"STALE"}  # still being resolved or re-checked
-        unsettled = [ip for ip in ips if any(s in waiting for s in table.get(ip, ("absent",))[0].split("/"))]
+        unsettled = [ip for ip in ips if _has_flag(table.get(ip, ("absent",))[0], waiting)]
         if not unsettled or monotonic() >= deadline:
             return None
         sleep(0.1)

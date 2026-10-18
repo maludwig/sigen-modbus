@@ -14,28 +14,25 @@ GeoMet data is under Environment and Climate Change Canada's Data Server End-use
 """
 
 import datetime
-import http.client
 import json
 import re
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
-from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import psycopg
 
-from sigen import __version__
+from sigen import db
 from sigen.config import Site
+from sigen.errors import DatabaseError
+from sigen.fetch import Response, http_get  # re-exported: weather.Response / weather.http_get (tests patch it)
+from sigen.weather_rows import RadarRow, WeatherRow  # re-exported: weather.WeatherRow / weather.RadarRow
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 GEOMET_URL = "https://geo.weather.gc.ca/geomet"
-TIMEOUT = 30  # seconds per HTTP request
-USER_AGENT = f"sigen-modbus/{__version__}"
 
 # Column name (= Open-Meteo variable) -> unit, in Open-Meteo's default units. Every one of them
 # is available both hourly and every 15 minutes.
@@ -77,38 +74,7 @@ def now_utc() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
 
 
-# ---------- HTTP ----------
-@dataclass(frozen=True)
-class Response:
-    """What http_get got: a status and body, or (status None) why nothing
-    answered."""
-
-    status: int | None  # None: nothing answered (DNS, refused, timeout)
-    text: str  # the body, or what went wrong
-
-    @property
-    def ok(self) -> bool:
-        """Only HTTP 200 counts; any other status is parsed as a failure."""
-        return self.status == 200
-
-    def describe(self) -> str:
-        """For the error column: the whole response text."""
-        return self.text if self.status is None else f"HTTP {self.status}\n{self.text}"
-
-
-def http_get(url: str, params: Mapping[str, object], timeout: float = TIMEOUT) -> Response:
-    """GET url?params (timeout in seconds). Never raises for HTTP or network
-    failures: an error status keeps its body; no answer gives status None."""
-    request = urllib.request.Request(f"{url}?{urllib.parse.urlencode(params)}", headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as r:
-            return Response(r.status, r.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as e:
-        return Response(e.code, e.read().decode("utf-8", errors="replace"))
-    except (OSError, http.client.HTTPException) as e:  # URLError and timeouts are OSErrors
-        return Response(None, f"no response from {url}: {type(e).__name__}: {e}")
-
-
+# ---------- HTTP (sigen.fetch) ----------
 Getter = Callable[[str, dict[str, object]], Response]
 
 
@@ -127,17 +93,7 @@ def save_capture(directory: Path, name: str, when: datetime.datetime, text: str)
     raise FileExistsError(f"{directory / stem}.json and 998 numbered copies already exist")
 
 
-# ---------- Open-Meteo ----------
-@dataclass
-class WeatherRow:
-    """One Open-Meteo fetch at one resolution (an open_meteo_weather row):
-    OPEN_METEO_VARIABLES for the latest finished period, or an error."""
-
-    fetched_at: datetime.datetime
-    resolution_minutes: int
-    valid_at: datetime.datetime | None = None  # end of the period; None when error is set
-    values: dict[str, object] = field(default_factory=dict)
-    error: str | None = None
+# ---------- Open-Meteo (WeatherRow: sigen.weather_rows) ----------
 
 
 def open_meteo_params(site: Site, resolution: int) -> dict[str, object]:
@@ -225,22 +181,7 @@ def _first_line(text: str, limit: int = 200) -> str:
     return first[:limit] + ("…" if len(first) > limit else "")
 
 
-# ---------- radar ----------
-@dataclass
-class RadarRow:
-    """One radar frame at the site (a radar_frames row): rain in mm/h and snow
-    in cm/h, each with GeoMet's class, and whether radar covers the site; or an
-    error (frame_at None when even listing the frames failed)."""
-
-    fetched_at: datetime.datetime
-    frame_at: datetime.datetime | None = None
-    rain_mm_h: float | None = None
-    rain_class: str | None = None
-    snow_cm_h: float | None = None
-    snow_class: str | None = None
-    covered: bool | None = None
-    error: str | None = None
-
+# ---------- radar (RadarRow: sigen.weather_rows) ----------
 
 TIME_DIMENSION = re.compile(r'<Dimension name="time"[^>]*>\s*([^/<\s]+)/([^/<\s]+)/PT(\d+)M\s*</Dimension>')
 
@@ -384,9 +325,6 @@ class Store:
 
     def use(self, what: str, fn: Callable[[psycopg.Connection], T]) -> tuple[bool, T | None]:
         """(True, fn(conn)), or (False, None) if the database is unavailable."""
-        from sigen import db
-        from sigen.errors import DatabaseError
-
         if self._conn is None or self._conn.closed:
             try:
                 self._conn = db.connect(self._url)
@@ -419,8 +357,6 @@ def record_open_meteo(
 ) -> tuple[WeatherRow, bool]:
     """Fetch one resolution; save the whole response under `capture`; store the row.
     Returns (row, whether it was stored)."""
-    from sigen import db
-
     row, response = fetch_open_meteo(site, resolution, get)
     if capture is not None:
         save_capture(capture, f"open-meteo_{resolution}min", row.fetched_at, response.text)
@@ -440,8 +376,6 @@ def record_radar(
     """Without a store: the newest frame. With one: every frame GeoMet has that isn't stored
     yet, stored. Returns (rows, how many good rows were newly stored: None if the database
     was unavailable, 0 without a store)."""
-    from sigen import db
-
     if store is None:
         return fetch_radar(site, latest_only=True, get=get, capture=capture), 0
     ok, stored = store.use(

@@ -97,8 +97,12 @@ def test_inverter_map():
     assert all(r.device == "plant" for r in PLANT_REGISTERS)
     model = BY_NAME["inverter_model_type"]
     assert model.words == 15 and not model.stored
-    assert model.decode(encode_string("SigenStor EC SP US", 15)) == ("SigenStor EC SP US", None)
+    assert model.decode_text(encode_string("SigenStor EC SP US", 15)) == "SigenStor EC SP US"
     assert model.describe(encode_string("SigenStor EC SP US", 15)) == "SigenStor EC SP US"
+    with pytest.raises(ValueError, match="is text"):  # decode is for numbers only
+        model.decode(encode_string("SigenStor EC SP US", 15))
+    with pytest.raises(ValueError, match="is a number"):
+        BY_NAME["plant_ess_soc"].decode_text([999])
     assert (BY_NAME["inverter_pv4_voltage"].address, BY_NAME["inverter_pv4_current"].address) == (31033, 31034)
 
 

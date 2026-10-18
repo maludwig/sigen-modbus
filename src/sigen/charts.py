@@ -22,10 +22,14 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+import pandas as pd
 import psycopg
+from psycopg import sql
 
+from sigen import pvmodel
 from sigen.config import Array, Site
 from sigen.db import SATELLITE_SHADE_VALUES, has_glitch_column, values_table, wide_layout
+from sigen.goes_shade import SCAN, ShadeSeries
 from sigen.registers import BY_NAME
 
 PLANT, INVERTER = 247, 1
@@ -70,6 +74,30 @@ def _good(conn: psycopg.Connection, alias: str = "readings") -> str:
     return f" AND {alias}.glitch IS NULL" if has_glitch_column(conn) else ""
 
 
+def _plant_readings(
+    conn: psycopg.Connection,
+    start: datetime.datetime | None,
+    end: datetime.datetime | None,
+    *,
+    newest_first: bool = False,
+    limit: int | None = None,
+) -> list[tuple[int, datetime.datetime]]:
+    """(id, started_at) of the successful, unglitched plant readings in [start, end), by time (never by id: a
+    backfilled reading has the newest id but an old time); newest first and at most `limit` if asked."""
+    where, params = _between(start, end)
+    sql = (
+        f"SELECT id, started_at FROM readings WHERE error IS NULL AND unit_id = %s{where}{_good(conn)} "
+        f"ORDER BY started_at{' DESC' if newest_first else ''}{f' LIMIT {int(limit)}' if limit else ''}"
+    )
+    return conn.execute(sql, [PLANT, *params]).fetchall()
+
+
+def _bars(names: dict[int, str], by_slot: dict[int, float]) -> dict[str, float]:
+    """Bar label -> value for each slot that's named or above 0, in slot order, labelled as the bar charts are:
+    the slot's name, or "slot N"."""
+    return {names.get(s, f"slot {s}"): v for s, v in sorted(by_slot.items()) if s in names or v > 0}
+
+
 def reading_values(
     conn: psycopg.Connection,
     unit: int,
@@ -89,8 +117,6 @@ def reading_values(
     regs = [BY_NAME[n] for n in names]
     gains = {r.name: float(r.gain) for r in regs}
     if wide_layout(conn):
-        from psycopg import sql
-
         where, params = _between(start, end, "t.started_at")
         if ids is not None:
             where, params = where + " AND t.reading_id = ANY(%s)", [*params, list(ids)]
@@ -155,7 +181,7 @@ class StringData:
         )
 
 
-def _hours_per_row(frame: "pandas.DataFrame") -> float:
+def _hours_per_row(frame: pd.DataFrame) -> float:
     """The spacing of a regular time index, in hours (to turn a sum of kW rows into kWh)."""
     return (frame.index[1] - frame.index[0]).total_seconds() / 3600
 
@@ -184,14 +210,11 @@ LIVE_VOLTS = 10.0
 
 def clear_sky_strings(
     conn: psycopg.Connection, site: Site, array: Array, start: datetime.datetime, end: datetime.datetime
-) -> "pandas.DataFrame":
+) -> pd.DataFrame:
     """Each string's clear-sky power (kW; a pandas DataFrame, columns = PV input numbers) from `start` to `end`, every
     minute (every 5 minutes for windows over 3 days), with the air temperature and wind from Open-Meteo's
     15-minute rows where the database has them (the model's 12 °C / 2 m/s elsewhere). Needs pvlib. The times are UTC,
     whatever zones `start` and `end` are in (pandas won't make a range between two zones)."""
-    import pandas as pd
-    from sigen import pvmodel
-
     start, end = start.astimezone(datetime.UTC), end.astimezone(datetime.UTC)
     step = "1min" if end - start <= datetime.timedelta(days=3) else "5min"
     times = pd.date_range(pd.Timestamp(start).ceil(step), end, freq=step, inclusive="left")
@@ -238,12 +261,7 @@ def picked_readings(
     """The earliest successful plant reading (by time) of each clock-aligned 15-minute window, in time order:
     [(id, started_at)]. Picked and ordered by started_at, not id -- a backfilled reading has the newest id but an
     old time."""
-    where, params = _between(start, end)
-    readings = conn.execute(
-        f"SELECT id, started_at FROM readings WHERE error IS NULL AND unit_id = %s{where}"
-        f"{_good(conn)} ORDER BY started_at",
-        [PLANT, *params],
-    ).fetchall()
+    readings = _plant_readings(conn, start, end)
     first_in_window = {}
     for reading_id, started_at in readings:
         w = window_of(started_at)
@@ -298,12 +316,7 @@ def smart_load_energy(
     """The counters at every successful plant reading in the window (for the dashboard's energy chart), or at every
     k-th one when there are more than `max_points` (always keeping the last). None if fewer than `fewest` readings
     (a page topping up its chart wants even one)."""
-    where, params = _between(start, end)
-    readings = conn.execute(
-        f"SELECT id, started_at FROM readings WHERE error IS NULL AND unit_id = %s{where}"
-        f"{_good(conn)} ORDER BY started_at",
-        [PLANT, *params],
-    ).fetchall()
+    readings = _plant_readings(conn, start, end)
     step = -(-len(readings) // max_points) or 1
     picked = readings[::step]
     if readings and picked[-1] != readings[-1]:
@@ -365,27 +378,16 @@ def energy_by_load(
     end: datetime.datetime | None = None,
 ) -> LoadEnergy | None:
     """Latest minus earliest counter over the window's plant readings. None if fewer than two readings."""
-    where, params = _between(start, end)
-    ends = (
-        f"SELECT id, started_at FROM readings WHERE error IS NULL AND unit_id = %s{where}{_good(conn)} "
-        "ORDER BY started_at"
-    )
-    first = conn.execute(ends + " LIMIT 1", [PLANT, *params]).fetchone()  # earliest and latest by time,
-    last = conn.execute(
-        ends + " DESC LIMIT 1", [PLANT, *params]
-    ).fetchone()  # not min / max id (a backfill breaks that)
-    if first is None or first[0] == last[0]:
+    earliest = _plant_readings(conn, start, end, limit=1)  # by time, not min / max id (a backfill breaks that)
+    latest = _plant_readings(conn, start, end, newest_first=True, limit=1)
+    if not earliest or earliest[0][0] == latest[0][0]:
         return None
-    (first_id, first_t), (last_id, last_t) = first, last
+    (first_id, first_t), (last_id, last_t) = earliest[0], latest[0]
     values = reading_values(conn, PLANT, [*COUNTERS, HOUSE, CHECK], ids=[first_id, last_id])
     start_kwh, end_kwh = values[first_id][1], values[last_id][1]
     delta = {name: round(end_kwh[name] - start_kwh[name], 2) for name in end_kwh}
     house, check = delta.pop(HOUSE), delta.pop(CHECK)
-    bars = {}
-    for name in sorted(delta, key=_slot):
-        slot = _slot(name)
-        if slot in names or delta[name] > 0:
-            bars[names.get(slot, f"slot {slot}")] = delta[name]
+    bars = _bars(names, {_slot(name): kwh for name, kwh in delta.items()})
     bars["Other"] = round(house - sum(delta.values()), 2)
     return LoadEnergy((first_id, first_t), (last_id, last_t), house, check, bars)
 
@@ -441,22 +443,14 @@ def latest_load_power(
     """The newest successful plant reading in the window: each smart load's power (named, or drawing any then; labelled
     as energy_by_load's bars) and Other = total load power − all 24 slots. None if there's no reading. Reads that one
     reading only, so it's cheap to ask for every few seconds."""
-    where, params = _between(start, end)
-    row = conn.execute(
-        f"SELECT id FROM readings WHERE error IS NULL AND unit_id = %s{where}{_good(conn)} "
-        "ORDER BY started_at DESC LIMIT 1",
-        [PLANT, *params],
-    ).fetchone()
-    if row is None:
+    newest = _plant_readings(conn, start, end, newest_first=True, limit=1)
+    if not newest:
         return None
-    t, values = reading_values(conn, PLANT, [*POWERS, TOTAL_POWER], ids=[row[0]]).get(row[0], (None, {}))
+    reading_id = newest[0][0]
+    t, values = reading_values(conn, PLANT, [*POWERS, TOTAL_POWER], ids=[reading_id]).get(reading_id, (None, {}))
     if TOTAL_POWER not in values:
         return None
-    bars = {}
-    for name in POWERS:  # slot order
-        slot, kw = _slot(name), values.get(name, 0.0)
-        if slot in names or kw > 0:
-            bars[names.get(slot, f"slot {slot}")] = kw
+    bars = _bars(names, {_slot(name): values.get(name, 0.0) for name in POWERS})
     bars["Other"] = values[TOTAL_POWER] - sum(values.get(name, 0.0) for name in POWERS)
     return LoadPower(t, values[TOTAL_POWER], bars)
 
@@ -753,11 +747,8 @@ def day_energy(conn: psycopg.Connection, start: datetime.datetime, end: datetime
     plant = list(reading_values(conn, PLANT, [*LIFETIME_COUNTERS.values(), *FLOW_POWERS], start, end).values())
     if not plant:
         return None
-    following = conn.execute(
-        "SELECT id FROM readings WHERE unit_id = %s AND error IS NULL AND started_at >= %s"
-        f"{_good(conn)} ORDER BY started_at LIMIT 1",
-        (PLANT, end),
-    ).fetchone()
+    after = _plant_readings(conn, end, None, limit=1)  # the first reading at or after the next midnight
+    following = after[0] if after else None
     closing = (
         next(iter(reading_values(conn, PLANT, list(LIFETIME_COUNTERS.values()), ids=[following[0]]).values()))
         if following
@@ -982,12 +973,10 @@ def precipitation_strip(p: Precipitation) -> tuple[Strip, str]:
 
 def satellite_shade_series(
     conn: psycopg.Connection, start: datetime.datetime | None = None, end: datetime.datetime | None = None
-) -> "goes_shade.ShadeSeries":
+) -> ShadeSeries:
     """The stored GOES shade (satellite_shade) for the window as a goes_shade.ShadeSeries, for satellite_strips: good
     scans in time order, NULL columns as NaN (what ShadeSeries uses for "nothing to measure"). sun_azimuth isn't
     stored (the strips don't use it), so it comes back NaN."""
-    from sigen.goes_shade import ShadeSeries
-
     where, params = _between(start, end, "scan_at")
     rows = conn.execute(
         f"SELECT scan_at, sun_elevation_deg, {', '.join(SATELLITE_SHADE_VALUES)} "
@@ -1016,12 +1005,10 @@ SATELLITE_LOW_SUN = 10  # degrees: below this the sun-through-cloud estimate is 
 LOW_SUN_COLOUR = "#cfe2f3"
 
 
-def satellite_strips(s: "goes_shade.ShadeSeries") -> tuple[list[Strip], str]:
+def satellite_strips(s: ShadeSeries) -> tuple[list[Strip], str]:
     """One strip per SATELLITE_STRIPS from a goes_shade.ShadeSeries: a bar per scan, white = clear, black = no sun
     (grey in between), pale blue = sun too low for the estimate, none (hatched) = no scan or no value. With the note
     saying how to read them."""
-    from sigen.goes_shade import SCAN
-
     low = [e < SATELLITE_LOW_SUN for e in s.sun_elevation]
     strips = []
     for column, label, masked, clear in SATELLITE_STRIPS:
@@ -1060,7 +1047,7 @@ def _ratio_colour(ratio: float) -> str:
 
 def measured_strip(
     measured: StringData,
-    clear_sky: "pandas.DataFrame",
+    clear_sky: pd.DataFrame,
     block: datetime.timedelta = STRIP_BLOCK,
     low_sun_kw: float = STRIP_LOW_SUN_KW,
 ) -> tuple[Strip, str]:
@@ -1070,8 +1057,6 @@ def measured_strip(
     where there's no reading or no model. Measured is the strings' V × I (string_readings) summed over the array; the
     model is clear_sky_strings (kW per string). Both are on this server's UTC clock, so the blocks are clock-aligned.
     Whole-array, so it's robust to the provisional string-to-face assignment. Needs pandas."""
-    import pandas as pd
-
     rule = pd.Timedelta(block)
     model = clear_sky.sum(axis=1).resample(rule).mean()  # whole-array clear-sky kW per block
     if measured.times:

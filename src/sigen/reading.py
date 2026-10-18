@@ -4,17 +4,13 @@ import datetime
 from typing import Any
 
 from sigen.config import SMART_LOAD_SLOTS, Config
+from sigen.data_io import unit_sections
 from sigen.registers import ALL_ONES_16, BY_ADDRESS, BY_NAME, flag_names
 
 TABLE_KEYS = {"input": "input_registers", "holding": "holding_registers"}
-ALARM_GROUPS = {
-    "plant_merged_alarm_1": "PCS",
-    "plant_merged_alarm_2": "PCS",
-    "plant_merged_alarm_3": "ESS",
-    "plant_merged_alarm_4": "Gateway",
-    "plant_merged_alarm_5": "DC charger",
-    "plant_merged_alarm_6": "Plant",
-}
+ALARM_GROUP_NAMES = ("PCS", "PCS", "ESS", "Gateway", "DC charger", "Plant")  # the protocol's alarm registers 1-6
+ALARM_GROUPS = {f"plant_merged_alarm_{n}": group for n, group in enumerate(ALARM_GROUP_NAMES, 1)}
+INVERTER_ALARMS = {f"inverter_alarm_{n}": group for n, group in enumerate(ALARM_GROUP_NAMES[:5], 1)}  # no "Plant"
 
 
 def readings_from_document(doc: dict) -> dict[str, dict]:
@@ -39,7 +35,7 @@ def readings_from_document(doc: dict) -> dict[str, dict]:
                 entry["unit"] = reg.unit if reg and reg.unit else spec.get("unit")
             raw = spec.get("raw")
             if reg and raw is not None and len(raw) == reg.words:
-                entry["value"], label = reg.decode(raw)
+                entry["value"], label = (reg.decode_text(raw), None) if reg.type == "string" else reg.decode(raw)
                 if label is not None:
                     entry["label"] = label
             else:
@@ -56,7 +52,7 @@ def readings_from_document(doc: dict) -> dict[str, dict]:
 
 def other_unit_readings(doc: dict) -> dict[int, dict[str, dict]]:
     """A saved dump's other units (inverters) -> {unit ID: readings}."""
-    return {int(s["unit_id"]): readings_from_document(s) for s in doc.get("other_units", [])}
+    return {int(s["unit_id"]): readings_from_document(s) for s in unit_sections(doc)[1:]}
 
 
 def format_table(readings: dict[str, dict], config: Config = Config(), title: str = "") -> str:
@@ -131,15 +127,7 @@ def derive(readings: dict[str, dict], now: datetime.datetime | None = None) -> d
     if None not in (soc, cap):
         # Cruder than battery_available_kwh: assumes the pack holds exactly its nameplate size.
         out["battery_soc_x_nominal_kwh"] = round(soc / 100 * cap, 2)
-    alarms, unavailable = [], []
-    for name, group in ALARM_GROUPS.items():
-        n = value(readings, name)
-        if n is None:
-            continue
-        if n == ALL_ONES_16:
-            unavailable.append(name)
-        else:
-            alarms += [f"{group}: {meaning}" for meaning in flag_names(int(n), BY_NAME[name].flags)]
+    alarms, unavailable = active_alarms(readings, ALARM_GROUPS)
     if any(name in readings and "value" in readings[name] for name in ALARM_GROUPS):
         out["active_alarms"] = alarms
         if unavailable:
@@ -169,9 +157,24 @@ def format_smart_loads(readings: dict[str, dict], config: Config) -> list[str]:
     return ["  Smart loads:"] + rows if rows else []
 
 
-INVERTER_ALARMS = {
-    f"inverter_alarm_{n}": group for n, group in zip(range(1, 6), ("PCS", "PCS", "ESS", "Gateway", "DC charger"))
-}
+def active_alarms(readings: dict[str, dict], groups: dict[str, str]) -> tuple[list[str], list[str]]:
+    """The alarm bits set in `groups`' registers ({register: group}) as "group: meaning", and the registers that
+    read all ones ("not available"). Registers not read are left out of both."""
+    alarms, unavailable = [], []
+    for name, group in groups.items():
+        n = value(readings, name)
+        if n is None:
+            continue
+        if n == ALL_ONES_16:
+            unavailable.append(name)
+        else:
+            alarms += [f"{group}: {meaning}" for meaning in flag_names(int(n), BY_NAME[name].flags)]
+    return alarms, unavailable
+
+
+def _not_readable(readings: dict[str, dict]) -> int:
+    """How many registers came back with an error."""
+    return sum(1 for r in readings.values() if "error" in r)
 
 
 def format_inverter(unit: int, readings: dict[str, dict]) -> list[str]:
@@ -213,17 +216,11 @@ def format_inverter(unit: int, readings: dict[str, dict]) -> list[str]:
             f"{num('inverter_ess_max_cluster_temperature', '.1f')} °C, "
             f"average {num('inverter_ess_average_cell_voltage', '.3f')} V"
         )
-    alarms, readable = [], False
-    for name, group in INVERTER_ALARMS.items():
-        n = v(name)
-        if n is not None and n != ALL_ONES_16:
-            readable = True
-            alarms += [f"{group}: {meaning}" for meaning in flag_names(int(n), BY_NAME[name].flags)]
-    if readable:
+    alarms, unavailable = active_alarms(readings, INVERTER_ALARMS)
+    if any(v(name) is not None for name in INVERTER_ALARMS if name not in unavailable):
         lines.append(f"    Alarms:          {'; '.join(alarms) or 'none'}")
-    failed = [n for n, r in readings.items() if "error" in r]
-    if failed:
-        lines.append(f"    ({len(failed)} register(s) not readable)")
+    if failed := _not_readable(readings):
+        lines.append(f"    ({failed} register(s) not readable)")
     return lines
 
 
@@ -287,9 +284,8 @@ def format_summary(
         f"  Lifetime grid:     {show('plant_accumulated_grid_import_energy', ',.1f', ' kWh')} in / "
         f"{show('plant_accumulated_grid_export_energy', ',.1f', ' kWh')} out",
     ]
-    failed = [n for n, r in readings.items() if "error" in r]
-    if failed:
-        lines += ["", f"  ({len(failed)} register(s) not readable; see --json for details)"]
+    if failed := _not_readable(readings):
+        lines += ["", f"  ({failed} register(s) not readable; see --json for details)"]
     for unit, unit_readings in sorted((inverters or {}).items()):
         lines += [""] + format_inverter(unit, unit_readings)
     return "\n".join(lines)

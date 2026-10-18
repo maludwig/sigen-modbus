@@ -19,20 +19,22 @@ Tables (created by the numbered SQL files in sigen/migrations/):
 
 import datetime
 import hashlib
+import math
 import re
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import resources
-from collections.abc import Callable, Iterable, Iterator, Sequence
 
 import psycopg
+from psycopg import sql
 
 from sigen import __version__
 from sigen.errors import DatabaseError, SchemaNotReady
 from sigen.goes_shade import ShadeSeries
 from sigen.ntfy import Attempt
 from sigen.registers import ALL_REGISTERS, BY_NAME, Register, decode_int
-from sigen.weather import RadarRow, WeatherRow
+from sigen.weather_rows import RadarRow, WeatherRow
 
 STORED_REGISTERS = [r for r in ALL_REGISTERS if r.stored]  # what register_meta describes
 BY_ADDRESS = {r.address: r for r in STORED_REGISTERS}
@@ -114,6 +116,19 @@ def errors_as(what: str) -> Iterator[None]:
         yield
     except psycopg.Error as e:
         raise DatabaseError(f"{what}: {_message(e)}", transient=isinstance(e, psycopg.OperationalError))
+
+
+@contextmanager
+def read_only(url: str) -> Iterator[psycopg.Connection]:
+    """A connection whose session can only read (what the dashboard serves from), closed afterwards. DatabaseError
+    (transient) if it can't connect."""
+    conn = connect(url)
+    try:
+        with errors_as("starting a read-only session"):
+            conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+        yield conn
+    finally:
+        conn.close()
 
 
 # ---------- values ----------
@@ -323,8 +338,6 @@ def _columns(conn: psycopg.Connection) -> dict[str, dict[str, str]]:
 def _plan(conn: psycopg.Connection) -> MetaPlan:
     """plan_meta_sync against the database's register_meta, checking for stored
     values in the long table before 0004 and the wide tables after."""
-    from psycopg import sql
-
     meta = {
         a: (n, t, g, u, d)
         for a, n, t, g, u, d in conn.execute("SELECT address, name, type, gain, unit, device FROM register_meta")
@@ -439,16 +452,10 @@ def status(conn: psycopg.Connection, migrations: Sequence[Migration] | None = No
                 d: conn.execute(f"SELECT count(*) FROM {values_table(d)}").fetchone()[0] for d in DEVICES
             }
         else:
-            # An exact count(*) on a large table takes a while, so past a million rows use the
-            # planner's estimate (which is 0 until the table has been analyzed, hence not always).
             estimate = conn.execute(
                 "SELECT greatest(reltuples, 0)::bigint FROM pg_class WHERE oid = 'register_values'::regclass"
             ).fetchone()[0]
-            if estimate < 1_000_000:
-                out["register_values"] = conn.execute("SELECT count(*) FROM register_values").fetchone()[0]
-                out["register_values_exact"] = True
-            else:
-                out["register_values"], out["register_values_exact"] = estimate, False
+            out["register_values"], out["register_values_exact"] = _row_count(conn, "register_values", estimate)
         out["last_reading"] = conn.execute(
             "SELECT id, started_at, ended_at, error FROM readings ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
@@ -516,6 +523,17 @@ class TableSize:
         return self.total_bytes * self.rows_last_day / self.rows if self.rows else 0.0
 
 
+LARGE_TABLE_ROWS = 1_000_000  # past this, a table's row count is the planner's estimate
+
+
+def _row_count(conn: psycopg.Connection, table: str, estimate: int) -> tuple[int, bool]:
+    """(rows, exact?): count(*) on a large table takes seconds, so past LARGE_TABLE_ROWS the planner's `estimate`
+    (pg_class.reltuples, 0 until the table is analyzed: hence an exact count below the threshold)."""
+    if estimate >= LARGE_TABLE_ROWS:
+        return estimate, False
+    return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0], True
+
+
 def table_sizes(conn: psycopg.Connection) -> list[TableSize]:
     """Every table in the current schema, biggest first."""
     tables = conn.execute(
@@ -527,13 +545,8 @@ def table_sizes(conn: psycopg.Connection) -> list[TableSize]:
     out = []
     for name, total, estimate in tables:
         column = ROW_TIMES.get(name)
-        if column is None:  # past a million rows the estimate, as above (count(*) takes seconds)
-            if estimate >= 1_000_000:
-                out.append(TableSize(name, total, estimate, False, None, None))
-            else:
-                out.append(
-                    TableSize(name, total, conn.execute(f"SELECT count(*) FROM {name}").fetchone()[0], True, None, None)
-                )
+        if column is None:
+            out.append(TableSize(name, total, *_row_count(conn, name, estimate), None, None))
             continue
         rows, last_day = conn.execute(
             f"SELECT count(*), count(*) FILTER (WHERE {column} > now() - interval '24 hours') FROM {name}"
@@ -607,8 +620,6 @@ def insert_reading(
     wide table (raw_plant_register_values or raw_inverter_register_values), one column per register. `glitch`
     (readings.glitch, since 0007) is left out of the INSERT when None, so a database before 0007 still takes readings.
     """
-    from psycopg import sql
-
     columns = []
     if values:
         regs = [BY_ADDRESS.get(address) for address, _ in values]
@@ -648,9 +659,7 @@ COLUMN_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def insert_open_meteo(conn: psycopg.Connection, row: WeatherRow) -> int:
-    """One sigen.weather.WeatherRow -> its open_meteo_weather id."""
-    from psycopg import sql
-
+    """One WeatherRow (sigen.weather_rows) -> its open_meteo_weather id."""
     columns = ["fetched_at", "resolution_minutes", "valid_at", *row.values, "error"]
     bad = [c for c in columns if not COLUMN_NAME.match(c)]
     if bad:
@@ -725,7 +734,7 @@ def last_alerts_sent(conn: psycopg.Connection) -> dict[str | None, datetime.date
 
 
 def insert_radar_rows(conn: psycopg.Connection, rows: Iterable[RadarRow]) -> int:
-    """sigen.weather.RadarRow objects, in one transaction. A frame that already has a good row
+    """RadarRow objects (sigen.weather_rows), in one transaction. A frame that already has a good row
     is skipped; error rows are always kept. Returns how many good rows were added."""
     added = 0
     with errors_as("storing radar frames failed"):
@@ -772,8 +781,6 @@ def insert_satellite_shade(
 ) -> int:
     """Store a sigen.goes_shade.ShadeSeries, one row per scan (NaN -> NULL), one good row per scan (ON CONFLICT).
     With `error` set, store a single failed-run row (scan_at NULL) instead. Returns how many good rows were added."""
-    import math
-
     columns = ["fetched_at", "scan_at", "sun_elevation_deg", *SATELLITE_SHADE_VALUES, "error"]
     query = (
         f"INSERT INTO satellite_shade ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))}) "

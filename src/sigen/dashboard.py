@@ -32,9 +32,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
-from collections.abc import Callable, Mapping
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -45,6 +45,7 @@ from sigen import charts, db, sync
 from sigen import daily as daily_mod  # aliased: the `daily()` route below would shadow the module name
 from sigen.config import Config, Site
 from sigen.errors import DatabaseError
+from sigen.goes import sun_rise_set
 
 REFRESH_SECONDS = 300  # the daily page reloads this often while its day is today
 MAX_HOURS = 24 * 31
@@ -97,6 +98,11 @@ def iso_utc(t: datetime.datetime) -> str:
     return t.astimezone(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _json(body: Any, status: int = 200) -> Response:
+    """`body` as a JSON response that's never cached (the numbers change with every poll; errors too)."""
+    return Response(json.dumps(body), status=status, mimetype="application/json", headers={"Cache-Control": "no-store"})
+
+
 def strips_json(strips: list[charts.Strip]) -> list[dict]:
     """charts.Strip objects as static/strips.js takes them (the page turns the ISO starts into seconds)."""
     return [
@@ -114,8 +120,6 @@ def model_end(end: datetime.datetime, site: Site, after: datetime.timedelta | No
     """Where the clear-sky model can stop: `end`, or if the sun had set by then (on `end`'s local day, or before
     sunrise, the day before), `after` (MODEL_AFTER_SUNSET) past that sunset: after that it's 0 till morning. `end`
     where the sun doesn't set or rise."""
-    from sigen.goes import sun_rise_set
-
     after = MODEL_AFTER_SUNSET if after is None else after
     day = end.astimezone(ZoneInfo(site.timezone)).date()
     today = sun_rise_set(day, site.latitude, site.longitude)
@@ -256,17 +260,11 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
         except BadWindow as e:
             start, live, description, error = None, False, "", f"Bad day: {e}"
         if error is None:
-            conn = None
             try:
-                conn = db.connect(url)
-                with db.errors_as("reading the day's energy"):
-                    conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+                with db.read_only(url) as conn, db.errors_as("reading the day's energy"):
                     energy = charts.day_energy(conn, start, end)
             except DatabaseError as e:
                 error = f"database: {e}"
-            finally:
-                if conn is not None:
-                    conn.close()
             if energy is not None:
                 sankey = charts.sankey(energy)
         return render_template(
@@ -294,19 +292,13 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
         """Every finished day in daily_energy added up: one Sankey of where all the energy has gone (static/my_sankey.js)."""
         energy = sankey = error = pv = None
         strips, notes = [], []
-        conn = None
         try:
-            conn = db.connect(url)
-            with db.errors_as("reading the all-time energy"):
-                conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+            with db.read_only(url) as conn, db.errors_as("reading the all-time energy"):
                 energy = daily_mod.all_time_energy(conn)
                 pv = charts.pv_history(conn, tz)
                 strips, notes = charts.all_time_strips(conn, tz)
         except DatabaseError as e:
             error = f"database: {e}"
-        finally:
-            if conn is not None:
-                conn.close()
         if energy is not None:
             sankey = charts.sankey(energy)
         return render_template(
@@ -360,24 +352,17 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
         what: str,
         read: Callable[[psycopg.Connection, datetime.datetime, datetime.datetime, datetime.datetime | None], dict],
         default: Mapping[str, str],
-    ) -> Response | tuple[dict[str, str], int]:
+    ) -> Response:
         """`read(conn, start, end, since)` → the JSON body, in a read-only session; errors as JSON too."""
         try:
             start, end, since = data_window(default)
         except BadWindow as e:
-            return {"error": f"bad window: {e}"}, 400
-        conn = None
+            return _json({"error": f"bad window: {e}"}, 400)
         try:
-            conn = db.connect(url)
-            with db.errors_as(what):
-                conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
-                body = read(conn, start, end, since)
+            with db.read_only(url) as conn, db.errors_as(what):
+                return _json(read(conn, start, end, since))
         except DatabaseError as e:
-            return {"error": f"database: {e}"}, 503
-        finally:
-            if conn is not None:
-                conn.close()
-        return Response(json.dumps(body), mimetype="application/json", headers={"Cache-Control": "no-store"})
+            return _json({"error": f"database: {e}"}, 503)
 
     def after(times: list[datetime.datetime], since: datetime.datetime | None) -> list[int]:
         """The indexes of the readings to send: all, or with ?since= only those strictly after it (none twice)."""
@@ -586,8 +571,6 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
         daily_query = {"day": f"{start.date()}"} if start is not None and not span and not live else {}
         sunrise = None  # "today" before sunrise: the string charts show the night
         if live and not query and config.site is not None:
-            from sigen.goes import sun_rise_set
-
             day = datetime.datetime.now(tz).date() + datetime.timedelta(days=sunrise_in_days)
             times = sun_rise_set(day, config.site.latitude, config.site.longitude)
             sunrise = times[0].timestamp() if times else None
@@ -626,7 +609,7 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
         )
 
     @app.get("/data/<name>.json")
-    def chart_data(name: str) -> Response | tuple[dict[str, str], int]:
+    def chart_data(name: str) -> Response:
         """A chart's numbers (DATA), for today by default."""
         if name not in DATA:
             abort(404)
@@ -636,22 +619,11 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
     def sync_json(build: Callable[[psycopg.Connection], dict]) -> Response:
         """Run `build(conn)` in a read-only session and return its result as JSON; a database problem is a 503 with
         the reason, which `sigen sync` surfaces."""
-        conn = None
         try:
-            conn = db.connect(url)
-            conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
-            body = build(conn)
+            with db.read_only(url) as conn:
+                return _json(build(conn))
         except Exception as e:  # noqa: BLE001 -- report anything as JSON, never a 500 page
-            return Response(
-                json.dumps({"error": str(e)}),
-                status=503,
-                mimetype="application/json",
-                headers={"Cache-Control": "no-store"},
-            )
-        finally:
-            if conn is not None:
-                conn.close()
-        return Response(json.dumps(body), mimetype="application/json", headers={"Cache-Control": "no-store"})
+            return _json({"error": str(e)}, 503)
 
     @app.get("/sync/schema")
     def sync_schema() -> Response:
@@ -685,22 +657,12 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
         the newest reading's start (UTC ISO; null before the first)}, or 503
         {"status": "error", "db": "offline" (can't connect) or "error" (it
         answered, but the query failed), "last_poll": null, "error": why}."""
-        conn = None
         try:
-            conn = db.connect(url)
-            with db.errors_as("reading the last poll"):
-                conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+            with db.read_only(url) as conn, db.errors_as("reading the last poll"):
                 (last,) = conn.execute("SELECT max(started_at) FROM readings").fetchone()  # readings_started_at
         except DatabaseError as e:
             state = "offline" if e.transient else "error"
-            body, code = {"status": "error", "db": state, "last_poll": None, "error": str(e)}, 503
-        else:
-            body, code = {"status": "ok", "db": "online", "last_poll": None if last is None else iso_utc(last)}, 200
-        finally:
-            if conn is not None:
-                conn.close()
-        return Response(
-            json.dumps(body), status=code, mimetype="application/json", headers={"Cache-Control": "no-store"}
-        )
+            return _json({"status": "error", "db": state, "last_poll": None, "error": str(e)}, 503)
+        return _json({"status": "ok", "db": "online", "last_poll": None if last is None else iso_utc(last)})
 
     return app
