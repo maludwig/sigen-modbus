@@ -382,6 +382,25 @@ re-run and over overlapping windows. **Both databases must be on the same migrat
 (`sigen db migrate` on each), or `sync` refuses. When it imports `readings`, it recomputes the
 affected days' totals in `daily_energy` automatically (`daily_energy` itself is never copied).
 
+### The config file
+
+```
+sigen config show                                    # the whole file, secrets masked; then OK or the problem
+sigen config get poll.interval                       # one value (or a section: sigen config get poll)
+sigen config set poll.interval 15                    # change one value
+sigen config set site.timezone America/Edmonton      # a value that isn't JSON is a string: no quotes needed
+sigen config set alerts.ntfy_topic --stdin           # a secret, read from standard input
+sigen config unset poll.radar                        # remove a value or a whole section
+```
+For changing the config without hand-editing JSON (no stray or missing commas), and over ssh without showing its
+secrets. Keys are dotted paths (`devices.inverter.ip`, `smart_loads.0.name`); values are JSON (`15`, `true`,
+`'{"ip": "192.168.1.100"}'`), and `--string` keeps one a string. Every change is checked with the same rules
+sigen loads the file by, and refused (exit 2) before anything is written; then the file is replaced atomically,
+after a copy of the old one to `config.json.bak`, keeping its owner and mode (so 640 root:sigen stays that way on a
+server). `--dry-run` checks and shows a change without writing it (exit 8). Database passwords, the ntfy topic and
+the cloud's keys are masked in everything printed (`get --reveal` shows one). Which file: as for every command (see
+[Config file](#config-file)), or `--config FILE`.
+
 ### Network
 
 ```
@@ -411,7 +430,7 @@ it with `--ip 127.0.0.1 --port 10502`. See [docs/DEVELOPMENT.md](docs/DEVELOPMEN
 | 5 | **verify failed**: the read-back doesn't match, or the state is unknown after a dropped write |
 | 6 | refused by the allowlist |
 | 7 | precondition failed: `--expect-current`, undo after an outside change, the database isn't migrated, or `sigen satellite` is already running |
-| 8 | dry run: a change is needed but `--apply` wasn't given |
+| 8 | dry run: a change is needed but `--apply` wasn't given (or `sigen config set/unset --dry-run`) |
 | 9 | not found: no SigenStor found, nothing to undo, or a missing file |
 | 10 | database unreachable, or it rejected a query |
 
@@ -424,6 +443,9 @@ Commands find their config by themselves, in this order:
 1. `--config FILE`, if given (`--no-config` instead: use none);
 2. the file named by the `SIGEN_CONFIG` environment variable;
 3. the nearest `config.json` in the current directory or above it.
+
+To read or change it without hand-editing the JSON, use `sigen config` (see
+[The config file](#the-config-file)): every change is checked before it's written, and secrets are masked.
 
 Every section is optional; a command that needs one says so. Start from `config.example.json`:
 
