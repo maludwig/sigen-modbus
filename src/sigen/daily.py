@@ -1,11 +1,15 @@
-"""The daily_energy table (migration 0006): each finished local day's energy, stored once, so a month's or a year's is a
-single SUM. The numbers are the dashboard's daily page's (sigen.charts.day_energy): the totals and every flow, before
-the page leaves the small ones out of its drawing.
+"""The daily_energy table (migration 0006): each finished local day's energy,
+stored once, so a month's or a year's is a single SUM. The numbers are the
+dashboard's daily page's (sigen.charts.day_energy): the totals and every
+flow, before the page leaves the small ones out of its drawing.
 
-A day is finished once a plant reading after its local midnight is stored: its totals run to the first reading after
-it (the lifetime counters' increase, by this server's clock: sigen.charts.day_energy). update() stores the finished days not stored yet, or recomputes a range of them; `sigen db daily` runs it,
-and so does `sigen poll` every CHECK_EVERY seconds (a background job), which stores each day soon after it ends and
-catches up on any that ended while it wasn't running. Recomputing a day replaces its row.
+A day is finished once a plant reading after its local midnight is stored:
+its totals run to the first reading after it (the lifetime counters'
+increase, by this server's clock: sigen.charts.day_energy). update() stores
+the finished days not stored yet, or recomputes a range of them; `sigen db
+daily` runs it, and so does `sigen poll` every CHECK_EVERY seconds (a
+background job), which stores each day soon after it ends and catches up on
+any that ended while it wasn't running. Recomputing a day replaces its row.
 """
 
 import datetime

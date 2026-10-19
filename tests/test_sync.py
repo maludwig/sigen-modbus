@@ -292,6 +292,9 @@ def test_sync_recomputes_daily_after_readings(db_url, tmp_path, monkeypatch):
         end_at="2026-10-17T17:00:00Z",
         only_sync=["readings"],
         dry_run=False,
+        fill_gaps=False,
+        since="7d",
+        min_gap=None,
     )
 
     monkeypatch.setattr(cli.sync, "sync_kind", lambda c, url, kind, s, e, d, out: (2, 0))  # readings imported

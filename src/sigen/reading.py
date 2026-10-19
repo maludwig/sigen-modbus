@@ -233,9 +233,10 @@ def format_summary(
     config: Config = Config(),
     inverters: dict[int, dict[str, dict]] | None = None,
 ) -> str:
-    """The plant summary read, capture and read-json print: modes, alarms, battery, power flows, smart loads and lifetime
-    grid totals, then a section per inverter (unit ID -> readings). Anything unread shows "(not readable)", never a
-    0 that looks like a reading."""
+    """The plant summary read, capture and read-json print: modes, alarms,
+    battery, power flows, smart loads and lifetime grid totals, then a section
+    per inverter (unit ID -> readings). Anything unread shows "(not readable)",
+    never a 0 that looks like a reading."""
     d = derive(readings, now)
     v = lambda n: value(readings, n)
     label = lambda n: readings.get(n, {}).get("label", "(not readable)")

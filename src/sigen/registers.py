@@ -9,10 +9,10 @@ TypQxQ/Sigenergy-Local-Modbus Home Assistant integration. Unit 247 is the plant
 (whole system).
 """
 
+import functools
 import re
 import struct
 from dataclasses import dataclass
-from typing import Any
 
 PLANT_UNIT_ID = 247
 
@@ -293,14 +293,9 @@ class Register:
             raise ValueError(f"{self.name}: {value} is above the maximum {self.max}")
 
 
-def R(*args: Any, **kwargs: Any) -> Register:
-    """Shorthand for a plant (unit 247) Register in the table below."""
-    return Register(*args, **kwargs)
-
-
 PLANT_REGISTERS: list[Register] = [
     # --- live status (input registers, read-only) ---
-    R(
+    Register(
         "plant_system_time",
         "input",
         30000,
@@ -308,10 +303,10 @@ PLANT_REGISTERS: list[Register] = [
         unit="s",
         description="Device clock. Note: stores LOCAL wall-clock time, not UTC.",
     ),
-    R("plant_system_timezone", "input", 30002, "s16", unit="min"),
-    R("plant_ems_work_mode", "input", 30003, "u16", labels=EMS_MODES),
-    R("plant_grid_sensor_status", "input", 30004, "u16", labels={0: "Not connected", 1: "Connected"}),
-    R(
+    Register("plant_system_timezone", "input", 30002, "s16", unit="min"),
+    Register("plant_ems_work_mode", "input", 30003, "u16", labels=EMS_MODES),
+    Register("plant_grid_sensor_status", "input", 30004, "u16", labels={0: "Not connected", 1: "Connected"}),
+    Register(
         "plant_grid_sensor_active_power",
         "input",
         30005,
@@ -320,9 +315,9 @@ PLANT_REGISTERS: list[Register] = [
         "kW",
         description=">0 importing from grid, <0 exporting",
     ),
-    R("plant_grid_sensor_reactive_power", "input", 30007, "s32", 1000, "kvar"),
-    R("plant_on_off_grid_status", "input", 30009, "u16", labels=GRID_STATUS),
-    R(
+    Register("plant_grid_sensor_reactive_power", "input", 30007, "s32", 1000, "kvar"),
+    Register("plant_on_off_grid_status", "input", 30009, "u16", labels=GRID_STATUS),
+    Register(
         "plant_max_active_power",
         "input",
         30010,
@@ -331,7 +326,7 @@ PLANT_REGISTERS: list[Register] = [
         "kW",
         description="Base value for active power adjustments",
     ),
-    R(
+    Register(
         "plant_max_apparent_power",
         "input",
         30012,
@@ -341,7 +336,7 @@ PLANT_REGISTERS: list[Register] = [
         description="Base value for reactive power adjustments. The protocol says kVar, but it reads 11.5, "
         "equal to 30010, while the real reactive limit (30043) reads 6.84 kvar: it's kVA",
     ),
-    R(
+    Register(
         "plant_ess_soc",
         "input",
         30014,
@@ -351,13 +346,13 @@ PLANT_REGISTERS: list[Register] = [
         description="Equals 30066 / (30064 + 30066), i.e. available / live total capacity. "
         "Any reserve the BMS keeps lies outside this 0-100 % scale and isn't visible",
     ),
-    R("plant_phase_a_active_power", "input", 30015, "s32", 1000, "kW"),
-    R("plant_phase_b_active_power", "input", 30017, "s32", 1000, "kW"),
-    R("plant_phase_c_active_power", "input", 30019, "s32", 1000, "kW"),
-    R("plant_phase_a_reactive_power", "input", 30021, "s32", 1000, "kvar"),
-    R("plant_phase_b_reactive_power", "input", 30023, "s32", 1000, "kvar"),
-    R("plant_phase_c_reactive_power", "input", 30025, "s32", 1000, "kvar"),
-    R(
+    Register("plant_phase_a_active_power", "input", 30015, "s32", 1000, "kW"),
+    Register("plant_phase_b_active_power", "input", 30017, "s32", 1000, "kW"),
+    Register("plant_phase_c_active_power", "input", 30019, "s32", 1000, "kW"),
+    Register("plant_phase_a_reactive_power", "input", 30021, "s32", 1000, "kvar"),
+    Register("plant_phase_b_reactive_power", "input", 30023, "s32", 1000, "kvar"),
+    Register("plant_phase_c_reactive_power", "input", 30025, "s32", 1000, "kvar"),
+    Register(
         "plant_merged_alarm_1",
         "input",
         30027,
@@ -365,7 +360,7 @@ PLANT_REGISTERS: list[Register] = [
         flags=PCS_ALARMS_1,
         description="PCS alarms 1 (protocol Appendix 2), merged across inverters",
     ),
-    R(
+    Register(
         "plant_merged_alarm_2",
         "input",
         30028,
@@ -373,7 +368,7 @@ PLANT_REGISTERS: list[Register] = [
         flags=PCS_ALARMS_2,
         description="PCS alarms 2 (protocol Appendix 3), merged across inverters",
     ),
-    R(
+    Register(
         "plant_merged_alarm_3",
         "input",
         30029,
@@ -381,7 +376,7 @@ PLANT_REGISTERS: list[Register] = [
         flags=ESS_ALARMS,
         description="ESS alarms (protocol Appendix 4), merged across inverters",
     ),
-    R(
+    Register(
         "plant_merged_alarm_4",
         "input",
         30030,
@@ -389,11 +384,11 @@ PLANT_REGISTERS: list[Register] = [
         flags=GATEWAY_ALARMS,
         description="Gateway alarms (protocol Appendix 5), merged across inverters",
     ),
-    R("plant_active_power", "input", 30031, "s32", 1000, "kW"),
-    R("plant_reactive_power", "input", 30033, "s32", 1000, "kvar"),
-    R("plant_photovoltaic_power", "input", 30035, "s32", 1000, "kW"),
-    R("plant_ess_power", "input", 30037, "s32", 1000, "kW", description=">0 charging, <0 discharging"),
-    R(
+    Register("plant_active_power", "input", 30031, "s32", 1000, "kW"),
+    Register("plant_reactive_power", "input", 30033, "s32", 1000, "kvar"),
+    Register("plant_photovoltaic_power", "input", 30035, "s32", 1000, "kW"),
+    Register("plant_ess_power", "input", 30037, "s32", 1000, "kW", description=">0 charging, <0 discharging"),
+    Register(
         "plant_available_max_active_power",
         "input",
         30039,
@@ -402,7 +397,7 @@ PLANT_REGISTERS: list[Register] = [
         "kW",
         description="Can feed to the AC side; running inverters only",
     ),
-    R(
+    Register(
         "plant_available_min_active_power",
         "input",
         30041,
@@ -411,12 +406,12 @@ PLANT_REGISTERS: list[Register] = [
         "kW",
         description="Can absorb from the AC side; running inverters only",
     ),
-    R("plant_available_max_reactive_power", "input", 30043, "u32", 1000, "kvar"),
-    R("plant_available_min_reactive_power", "input", 30045, "u32", 1000, "kvar"),
-    R("plant_ess_available_max_charging_power", "input", 30047, "u32", 1000, "kW"),
-    R("plant_ess_available_max_discharging_power", "input", 30049, "u32", 1000, "kW"),
-    R("plant_running_state", "input", 30051, "u16", labels=RUNNING_STATES),
-    R(
+    Register("plant_available_max_reactive_power", "input", 30043, "u32", 1000, "kvar"),
+    Register("plant_available_min_reactive_power", "input", 30045, "u32", 1000, "kvar"),
+    Register("plant_ess_available_max_charging_power", "input", 30047, "u32", 1000, "kW"),
+    Register("plant_ess_available_max_discharging_power", "input", 30049, "u32", 1000, "kW"),
+    Register("plant_running_state", "input", 30051, "u16", labels=RUNNING_STATES),
+    Register(
         "plant_grid_sensor_phase_a_active_power",
         "input",
         30052,
@@ -425,7 +420,7 @@ PLANT_REGISTERS: list[Register] = [
         "kW",
         description=">0 importing from grid, <0 exporting",
     ),
-    R(
+    Register(
         "plant_grid_sensor_phase_b_active_power",
         "input",
         30054,
@@ -434,7 +429,7 @@ PLANT_REGISTERS: list[Register] = [
         "kW",
         description=">0 importing from grid, <0 exporting",
     ),
-    R(
+    Register(
         "plant_grid_sensor_phase_c_active_power",
         "input",
         30056,
@@ -443,10 +438,10 @@ PLANT_REGISTERS: list[Register] = [
         "kW",
         description=">0 importing from grid, <0 exporting",
     ),
-    R("plant_grid_sensor_phase_a_reactive_power", "input", 30058, "s32", 1000, "kvar"),
-    R("plant_grid_sensor_phase_b_reactive_power", "input", 30060, "s32", 1000, "kvar"),
-    R("plant_grid_sensor_phase_c_reactive_power", "input", 30062, "s32", 1000, "kvar"),
-    R(
+    Register("plant_grid_sensor_phase_a_reactive_power", "input", 30058, "s32", 1000, "kvar"),
+    Register("plant_grid_sensor_phase_b_reactive_power", "input", 30060, "s32", 1000, "kvar"),
+    Register("plant_grid_sensor_phase_c_reactive_power", "input", 30062, "s32", 1000, "kvar"),
+    Register(
         "plant_ess_available_max_charging_capacity",
         "input",
         30064,
@@ -456,7 +451,7 @@ PLANT_REGISTERS: list[Register] = [
         description="Room left to fill. 30064 + 30066 is the BMS's live estimate of total capacity "
         "(15.9-16.2 kWh on this 15.06 kWh nominal pack; dips a little when the cells are cool)",
     ),
-    R(
+    Register(
         "plant_ess_available_max_discharging_capacity",
         "input",
         30066,
@@ -465,9 +460,9 @@ PLANT_REGISTERS: list[Register] = [
         "kWh",
         description="Energy the battery can still deliver. 30066 / (30064 + 30066) = SOC (30014)",
     ),
-    R("plant_ess_rated_charging_power", "input", 30068, "u32", 1000, "kW"),
-    R("plant_ess_rated_discharging_power", "input", 30070, "u32", 1000, "kW"),
-    R(
+    Register("plant_ess_rated_charging_power", "input", 30068, "u32", 1000, "kW"),
+    Register("plant_ess_rated_discharging_power", "input", 30070, "u32", 1000, "kW"),
+    Register(
         "plant_merged_alarm_5",
         "input",
         30072,
@@ -475,7 +470,7 @@ PLANT_REGISTERS: list[Register] = [
         flags=DC_CHARGER_ALARMS,
         description="DC charger alarms (protocol Appendix 11), merged across inverters",
     ),
-    R(
+    Register(
         "plant_ess_rated_energy_capacity",
         "input",
         30083,
@@ -485,31 +480,31 @@ PLANT_REGISTERS: list[Register] = [
         description="Nominal (nameplate) pack size, e.g. BAT 10.0 + BAT 6.0 = 15.06 kWh; ~14.60 usable per "
         "datasheet. Fixed; for the live estimate use 30064 + 30066",
     ),
-    R("plant_ess_charge_cut_off_soc", "input", 30085, "u16", 10, "%"),
-    R("plant_ess_discharge_cut_off_soc", "input", 30086, "u16", 10, "%"),
-    R("plant_ess_soh", "input", 30087, "u16", 10, "%"),
-    R("plant_accumulated_pv_energy", "input", 30088, "u64", 100, "kWh"),
-    R("plant_daily_consumed_energy", "input", 30092, "u32", 100, "kWh"),
-    R("plant_accumulated_load_consumption", "input", 30094, "u64", 100, "kWh"),
+    Register("plant_ess_charge_cut_off_soc", "input", 30085, "u16", 10, "%"),
+    Register("plant_ess_discharge_cut_off_soc", "input", 30086, "u16", 10, "%"),
+    Register("plant_ess_soh", "input", 30087, "u16", 10, "%"),
+    Register("plant_accumulated_pv_energy", "input", 30088, "u64", 100, "kWh"),
+    Register("plant_daily_consumed_energy", "input", 30092, "u32", 100, "kWh"),
+    Register("plant_accumulated_load_consumption", "input", 30094, "u64", 100, "kWh"),
     # Smart loads 1-24 (protocol v2.7): read-only. Which slot is which LoadHub circuit
     # (or Shelly device) is not documented; map them by switching known appliances.
     *[
-        R(f"plant_smart_load_{n}_total_consumption", "input", 30098 + 2 * (n - 1), "u32", 100, "kWh")
+        Register(f"plant_smart_load_{n}_total_consumption", "input", 30098 + 2 * (n - 1), "u32", 100, "kWh")
         for n in range(1, 25)
     ],
-    *[R(f"plant_smart_load_{n}_power", "input", 30146 + 2 * (n - 1), "s32", 1000, "kW") for n in range(1, 25)],
-    R("plant_third_party_inverter_power", "input", 30194, "s32", 1000, "kW"),
-    R("plant_accumulated_third_party_inverter_energy", "input", 30196, "u64", 100, "kWh"),
-    R("plant_accumulated_battery_charge_energy", "input", 30200, "u64", 100, "kWh"),
-    R("plant_accumulated_battery_discharge_energy", "input", 30204, "u64", 100, "kWh"),
-    R("plant_accumulated_evdc_charge_energy", "input", 30208, "u64", 100, "kWh"),
-    R("plant_accumulated_evdc_discharge_energy", "input", 30212, "u64", 100, "kWh"),
-    R("plant_accumulated_grid_import_energy", "input", 30216, "u64", 100, "kWh"),
-    R("plant_accumulated_grid_export_energy", "input", 30220, "u64", 100, "kWh"),
-    R("plant_accumulated_generator_energy", "input", 30224, "u64", 100, "kWh"),
+    *[Register(f"plant_smart_load_{n}_power", "input", 30146 + 2 * (n - 1), "s32", 1000, "kW") for n in range(1, 25)],
+    Register("plant_third_party_inverter_power", "input", 30194, "s32", 1000, "kW"),
+    Register("plant_accumulated_third_party_inverter_energy", "input", 30196, "u64", 100, "kWh"),
+    Register("plant_accumulated_battery_charge_energy", "input", 30200, "u64", 100, "kWh"),
+    Register("plant_accumulated_battery_discharge_energy", "input", 30204, "u64", 100, "kWh"),
+    Register("plant_accumulated_evdc_charge_energy", "input", 30208, "u64", 100, "kWh"),
+    Register("plant_accumulated_evdc_discharge_energy", "input", 30212, "u64", 100, "kWh"),
+    Register("plant_accumulated_grid_import_energy", "input", 30216, "u64", 100, "kWh"),
+    Register("plant_accumulated_grid_export_energy", "input", 30220, "u64", 100, "kWh"),
+    Register("plant_accumulated_generator_energy", "input", 30224, "u64", 100, "kWh"),
     # The "new statistics interface" (30228-30268): counters reset to 0 when a firmware
     # update added them, so they don't include history from before that.
-    R(
+    Register(
         "plant_si_common_load_consumption",
         "input",
         30228,
@@ -518,8 +513,8 @@ PLANT_REGISTERS: list[Register] = [
         "kWh",
         description="Excludes EV AC and DC charging",
     ),
-    R("plant_si_evac_charge_energy", "input", 30232, "u64", 100, "kWh"),
-    R(
+    Register("plant_si_evac_charge_energy", "input", 30232, "u64", 100, "kWh"),
+    Register(
         "plant_si_pv_energy",
         "input",
         30236,
@@ -528,21 +523,21 @@ PLANT_REGISTERS: list[Register] = [
         "kWh",
         description="Own PV only, excluding third-party inverters",
     ),
-    R("plant_si_third_party_inverter_energy", "input", 30240, "u64", 100, "kWh"),
-    R("plant_si_battery_charge_energy", "input", 30244, "u64", 100, "kWh"),
-    R("plant_si_battery_discharge_energy", "input", 30248, "u64", 100, "kWh"),
-    R("plant_si_evdc_charge_energy", "input", 30252, "u64", 100, "kWh"),
-    R("plant_si_evdc_discharge_energy", "input", 30256, "u64", 100, "kWh"),
-    R("plant_si_grid_import_energy", "input", 30260, "u64", 100, "kWh"),
-    R("plant_si_grid_export_energy", "input", 30264, "u64", 100, "kWh"),
-    R("plant_si_generator_energy", "input", 30268, "u64", 100, "kWh"),
-    R("plant_pv_total_daily_generation", "input", 30272, "u32", 100, "kWh"),
-    R("plant_pv_total_previous_day_generation", "input", 30274, "u32", 100, "kWh"),
-    R("plant_grid_code_rated_frequency", "input", 30276, "u16", 100, "Hz"),
-    R("plant_grid_code_rated_voltage", "input", 30277, "u32", 100, "V"),
+    Register("plant_si_third_party_inverter_energy", "input", 30240, "u64", 100, "kWh"),
+    Register("plant_si_battery_charge_energy", "input", 30244, "u64", 100, "kWh"),
+    Register("plant_si_battery_discharge_energy", "input", 30248, "u64", 100, "kWh"),
+    Register("plant_si_evdc_charge_energy", "input", 30252, "u64", 100, "kWh"),
+    Register("plant_si_evdc_discharge_energy", "input", 30256, "u64", 100, "kWh"),
+    Register("plant_si_grid_import_energy", "input", 30260, "u64", 100, "kWh"),
+    Register("plant_si_grid_export_energy", "input", 30264, "u64", 100, "kWh"),
+    Register("plant_si_generator_energy", "input", 30268, "u64", 100, "kWh"),
+    Register("plant_pv_total_daily_generation", "input", 30272, "u32", 100, "kWh"),
+    Register("plant_pv_total_previous_day_generation", "input", 30274, "u32", 100, "kWh"),
+    Register("plant_grid_code_rated_frequency", "input", 30276, "u16", 100, "Hz"),
+    Register("plant_grid_code_rated_voltage", "input", 30277, "u32", 100, "V"),
     # 30279 (current control command value, Japan) and 30281 (merged alarm 7) are in V2.8+
     # but this inverter rejects them when read alone (inside a block they read 0xFFFF).
-    R(
+    Register(
         "plant_merged_alarm_6",
         "input",
         30280,
@@ -550,12 +545,12 @@ PLANT_REGISTERS: list[Register] = [
         flags=PLANT_ALARMS_1,
         description="Plant alarms 1 (protocol Appendix 12)",
     ),
-    R("plant_general_load_power", "input", 30282, "s32", 1000, "kW"),
-    R("plant_total_load_power", "input", 30284, "s32", 1000, "kW"),
-    R("plant_ess_average_cell_temperature", "input", 30286, "s16", 10, "°C"),
+    Register("plant_general_load_power", "input", 30282, "s32", 1000, "kW"),
+    Register("plant_total_load_power", "input", 30284, "s32", 1000, "kW"),
+    Register("plant_ess_average_cell_temperature", "input", 30286, "s16", 10, "°C"),
     # --- settings (holding registers) ---
-    R("plant_remote_ems_enable", "holding", 40029, "u16", labels=ENABLED),
-    R(
+    Register("plant_remote_ems_enable", "holding", 40029, "u16", labels=ENABLED),
+    Register(
         "plant_remote_ems_control_mode",
         "holding",
         40031,
@@ -567,15 +562,15 @@ PLANT_REGISTERS: list[Register] = [
         description="What the plant does under Remote EMS. Only 0 and 2 are allowed for now; "
         "forced charge/discharge modes (3-6) come later.",
     ),
-    R("plant_ess_max_charging_limit", "holding", 40032, "u32", 1000, "kW"),
-    R("plant_ess_max_discharging_limit", "holding", 40034, "u32", 1000, "kW"),
-    R("plant_pv_max_power_limit", "holding", 40036, "u32", 1000, "kW"),
+    Register("plant_ess_max_charging_limit", "holding", 40032, "u32", 1000, "kW"),
+    Register("plant_ess_max_discharging_limit", "holding", 40034, "u32", 1000, "kW"),
+    Register("plant_pv_max_power_limit", "holding", 40036, "u32", 1000, "kW"),
     # Grid export/import limits are part of the utility interconnection setup: read-only here.
-    R("plant_grid_point_maximum_export_limitation", "holding", 40038, "u32", 1000, "kW"),
-    R("plant_grid_maximum_import_limitation", "holding", 40040, "u32", 1000, "kW"),
-    R("plant_pcs_maximum_export_limitation", "holding", 40042, "u32", 1000, "kW"),
-    R("plant_pcs_maximum_import_limitation", "holding", 40044, "u32", 1000, "kW"),
-    R(
+    Register("plant_grid_point_maximum_export_limitation", "holding", 40038, "u32", 1000, "kW"),
+    Register("plant_grid_maximum_import_limitation", "holding", 40040, "u32", 1000, "kW"),
+    Register("plant_pcs_maximum_export_limitation", "holding", 40042, "u32", 1000, "kW"),
+    Register("plant_pcs_maximum_import_limitation", "holding", 40044, "u32", 1000, "kW"),
+    Register(
         "plant_backup_soc",
         "holding",
         40046,
@@ -588,16 +583,13 @@ PLANT_REGISTERS: list[Register] = [
         cli_option="--backup-soc",
         description="Battery reserve kept for outages",
     ),
-    R("plant_charge_cut_off_soc", "holding", 40047, "u16", 10, "%"),
-    R("plant_discharge_cut_off_soc", "holding", 40048, "u16", 10, "%"),
+    Register("plant_charge_cut_off_soc", "holding", 40047, "u16", 10, "%"),
+    Register("plant_discharge_cut_off_soc", "holding", 40048, "u16", 10, "%"),
 ]
 
 OUTPUT_TYPES = {0: "L/N", 1: "L1/L2/L3", 2: "L1/L2/L3/N", 3: "L1/L2/N"}
 
-
-def I(*args: Any, **kwargs: Any) -> Register:
-    """Shorthand for an inverter Register (on the inverter's own unit ID)."""
-    return Register(*args, device="inverter", **kwargs)
+InverterRegister = functools.partial(Register, device="inverter")
 
 
 def _pv_strings(n: int) -> list[Register]:
@@ -606,8 +598,8 @@ def _pv_strings(n: int) -> list[Register]:
         reg
         for i in range(1, n + 1)
         for reg in (
-            I(f"inverter_pv{i}_voltage", "input", 31025 + 2 * i, "s16", 10, "V"),
-            I(f"inverter_pv{i}_current", "input", 31026 + 2 * i, "s16", 100, "A"),
+            InverterRegister(f"inverter_pv{i}_voltage", "input", 31025 + 2 * i, "s16", 10, "V"),
+            InverterRegister(f"inverter_pv{i}_current", "input", 31026 + 2 * i, "s16", 100, "A"),
         )
     ]
 
@@ -622,28 +614,28 @@ def _pv_strings(n: int) -> list[Register]:
 #    invalid for output type L1/L2/N (split phase);
 #  - 30613-30619 power-adjustment feedback: all-ones until remote setpoints are in use.
 INVERTER_REGISTERS: list[Register] = [
-    I("inverter_model_type", "input", 30500, "string", count=15),
-    I("inverter_serial_number", "input", 30515, "string", count=10),
-    I("inverter_firmware_version", "input", 30525, "string", count=15),
-    I("inverter_rated_active_power", "input", 30540, "u32", 1000, "kW"),
-    I("inverter_max_apparent_power", "input", 30542, "u32", 1000, "kVA"),
-    I("inverter_max_active_power", "input", 30544, "u32", 1000, "kW"),
-    I("inverter_max_absorption_power", "input", 30546, "u32", 1000, "kW"),
-    I("inverter_rated_battery_capacity", "input", 30548, "u32", 100, "kWh"),
-    I("inverter_ess_rated_charge_power", "input", 30550, "u32", 1000, "kW"),
-    I("inverter_ess_rated_discharge_power", "input", 30552, "u32", 1000, "kW"),
-    I("inverter_ess_daily_charge_energy", "input", 30566, "u32", 100, "kWh"),
-    I("inverter_ess_accumulated_charge_energy", "input", 30568, "u64", 100, "kWh"),
-    I("inverter_ess_daily_discharge_energy", "input", 30572, "u32", 100, "kWh"),
-    I("inverter_ess_accumulated_discharge_energy", "input", 30574, "u64", 100, "kWh"),
-    I("inverter_running_state", "input", 30578, "u16", labels=RUNNING_STATES),
-    I("inverter_max_active_power_adjustment", "input", 30579, "s32", 1000, "kW"),
-    I("inverter_min_active_power_adjustment", "input", 30581, "s32", 1000, "kW"),
-    I("inverter_max_reactive_power_fed", "input", 30583, "u32", 1000, "kvar"),
-    I("inverter_max_reactive_power_absorbed", "input", 30585, "u32", 1000, "kvar"),
-    I("inverter_active_power", "input", 30587, "s32", 1000, "kW"),
-    I("inverter_reactive_power", "input", 30589, "s32", 1000, "kvar"),
-    I(
+    InverterRegister("inverter_model_type", "input", 30500, "string", count=15),
+    InverterRegister("inverter_serial_number", "input", 30515, "string", count=10),
+    InverterRegister("inverter_firmware_version", "input", 30525, "string", count=15),
+    InverterRegister("inverter_rated_active_power", "input", 30540, "u32", 1000, "kW"),
+    InverterRegister("inverter_max_apparent_power", "input", 30542, "u32", 1000, "kVA"),
+    InverterRegister("inverter_max_active_power", "input", 30544, "u32", 1000, "kW"),
+    InverterRegister("inverter_max_absorption_power", "input", 30546, "u32", 1000, "kW"),
+    InverterRegister("inverter_rated_battery_capacity", "input", 30548, "u32", 100, "kWh"),
+    InverterRegister("inverter_ess_rated_charge_power", "input", 30550, "u32", 1000, "kW"),
+    InverterRegister("inverter_ess_rated_discharge_power", "input", 30552, "u32", 1000, "kW"),
+    InverterRegister("inverter_ess_daily_charge_energy", "input", 30566, "u32", 100, "kWh"),
+    InverterRegister("inverter_ess_accumulated_charge_energy", "input", 30568, "u64", 100, "kWh"),
+    InverterRegister("inverter_ess_daily_discharge_energy", "input", 30572, "u32", 100, "kWh"),
+    InverterRegister("inverter_ess_accumulated_discharge_energy", "input", 30574, "u64", 100, "kWh"),
+    InverterRegister("inverter_running_state", "input", 30578, "u16", labels=RUNNING_STATES),
+    InverterRegister("inverter_max_active_power_adjustment", "input", 30579, "s32", 1000, "kW"),
+    InverterRegister("inverter_min_active_power_adjustment", "input", 30581, "s32", 1000, "kW"),
+    InverterRegister("inverter_max_reactive_power_fed", "input", 30583, "u32", 1000, "kvar"),
+    InverterRegister("inverter_max_reactive_power_absorbed", "input", 30585, "u32", 1000, "kvar"),
+    InverterRegister("inverter_active_power", "input", 30587, "s32", 1000, "kW"),
+    InverterRegister("inverter_reactive_power", "input", 30589, "s32", 1000, "kvar"),
+    InverterRegister(
         "inverter_ess_max_charge_power",
         "input",
         30591,
@@ -652,7 +644,7 @@ INVERTER_REGISTERS: list[Register] = [
         "kW",
         description="What the battery would accept right now",
     ),
-    I(
+    InverterRegister(
         "inverter_ess_max_discharge_power",
         "input",
         30593,
@@ -661,18 +653,28 @@ INVERTER_REGISTERS: list[Register] = [
         "kW",
         description="What the battery modules could deliver right now (above the 11.5 kW AC limit)",
     ),
-    I("inverter_ess_available_charge_energy", "input", 30595, "u32", 100, "kWh"),
-    I("inverter_ess_available_discharge_energy", "input", 30597, "u32", 100, "kWh"),
-    I("inverter_ess_power", "input", 30599, "s32", 1000, "kW", description=">0 charging, <0 discharging"),
-    I("inverter_ess_soc", "input", 30601, "u16", 10, "%"),
-    I("inverter_ess_soh", "input", 30602, "u16", 10, "%"),
-    I("inverter_ess_average_cell_temperature", "input", 30603, "s16", 10, "°C"),
-    I("inverter_ess_average_cell_voltage", "input", 30604, "u16", 1000, "V"),
-    I("inverter_alarm_1", "input", 30605, "u16", flags=PCS_ALARMS_1, description="PCS alarms 1 (Appendix 2)"),
-    I("inverter_alarm_2", "input", 30606, "u16", flags=PCS_ALARMS_2, description="PCS alarms 2 (Appendix 3)"),
-    I("inverter_alarm_3", "input", 30607, "u16", flags=ESS_ALARMS, description="ESS alarms (Appendix 4)"),
-    I("inverter_alarm_4", "input", 30608, "u16", flags=GATEWAY_ALARMS, description="Gateway alarms (Appendix 5)"),
-    I(
+    InverterRegister("inverter_ess_available_charge_energy", "input", 30595, "u32", 100, "kWh"),
+    InverterRegister("inverter_ess_available_discharge_energy", "input", 30597, "u32", 100, "kWh"),
+    InverterRegister(
+        "inverter_ess_power", "input", 30599, "s32", 1000, "kW", description=">0 charging, <0 discharging"
+    ),
+    InverterRegister("inverter_ess_soc", "input", 30601, "u16", 10, "%"),
+    InverterRegister("inverter_ess_soh", "input", 30602, "u16", 10, "%"),
+    InverterRegister("inverter_ess_average_cell_temperature", "input", 30603, "s16", 10, "°C"),
+    InverterRegister("inverter_ess_average_cell_voltage", "input", 30604, "u16", 1000, "V"),
+    InverterRegister(
+        "inverter_alarm_1", "input", 30605, "u16", flags=PCS_ALARMS_1, description="PCS alarms 1 (Appendix 2)"
+    ),
+    InverterRegister(
+        "inverter_alarm_2", "input", 30606, "u16", flags=PCS_ALARMS_2, description="PCS alarms 2 (Appendix 3)"
+    ),
+    InverterRegister(
+        "inverter_alarm_3", "input", 30607, "u16", flags=ESS_ALARMS, description="ESS alarms (Appendix 4)"
+    ),
+    InverterRegister(
+        "inverter_alarm_4", "input", 30608, "u16", flags=GATEWAY_ALARMS, description="Gateway alarms (Appendix 5)"
+    ),
+    InverterRegister(
         "inverter_alarm_5",
         "input",
         30609,
@@ -680,26 +682,30 @@ INVERTER_REGISTERS: list[Register] = [
         flags=DC_CHARGER_ALARMS,
         description="DC charger alarms (Appendix 11)",
     ),
-    I("inverter_ess_max_cluster_temperature", "input", 30620, "s16", 10, "°C"),
-    I("inverter_ess_min_cluster_temperature", "input", 30621, "s16", 10, "°C"),
-    I("inverter_rated_grid_voltage", "input", 31000, "u16", 10, "V"),
-    I("inverter_rated_grid_frequency", "input", 31001, "u16", 100, "Hz"),
-    I("inverter_grid_frequency", "input", 31002, "u16", 100, "Hz"),
-    I("inverter_pcs_internal_temperature", "input", 31003, "s16", 10, "°C"),
-    I("inverter_output_type", "input", 31004, "u16", labels=OUTPUT_TYPES),
-    I("inverter_ab_line_voltage", "input", 31005, "u32", 100, "V", description="Leg to leg (240 V nominal)"),
-    I("inverter_phase_a_voltage", "input", 31011, "u32", 100, "V"),
-    I("inverter_phase_b_voltage", "input", 31013, "u32", 100, "V"),
-    I("inverter_phase_a_current", "input", 31017, "s32", 100, "A"),
-    I("inverter_phase_b_current", "input", 31019, "s32", 100, "A"),
-    I("inverter_power_factor", "input", 31023, "s16", 1000),
-    I("inverter_pack_count", "input", 31024, "u16", description="Battery packs (e.g. BAT 10.0 + BAT 6.0 = 2)"),
-    I("inverter_pv_string_count", "input", 31025, "u16"),
-    I("inverter_mppt_count", "input", 31026, "u16"),
+    InverterRegister("inverter_ess_max_cluster_temperature", "input", 30620, "s16", 10, "°C"),
+    InverterRegister("inverter_ess_min_cluster_temperature", "input", 30621, "s16", 10, "°C"),
+    InverterRegister("inverter_rated_grid_voltage", "input", 31000, "u16", 10, "V"),
+    InverterRegister("inverter_rated_grid_frequency", "input", 31001, "u16", 100, "Hz"),
+    InverterRegister("inverter_grid_frequency", "input", 31002, "u16", 100, "Hz"),
+    InverterRegister("inverter_pcs_internal_temperature", "input", 31003, "s16", 10, "°C"),
+    InverterRegister("inverter_output_type", "input", 31004, "u16", labels=OUTPUT_TYPES),
+    InverterRegister(
+        "inverter_ab_line_voltage", "input", 31005, "u32", 100, "V", description="Leg to leg (240 V nominal)"
+    ),
+    InverterRegister("inverter_phase_a_voltage", "input", 31011, "u32", 100, "V"),
+    InverterRegister("inverter_phase_b_voltage", "input", 31013, "u32", 100, "V"),
+    InverterRegister("inverter_phase_a_current", "input", 31017, "s32", 100, "A"),
+    InverterRegister("inverter_phase_b_current", "input", 31019, "s32", 100, "A"),
+    InverterRegister("inverter_power_factor", "input", 31023, "s16", 1000),
+    InverterRegister(
+        "inverter_pack_count", "input", 31024, "u16", description="Battery packs (e.g. BAT 10.0 + BAT 6.0 = 2)"
+    ),
+    InverterRegister("inverter_pv_string_count", "input", 31025, "u16"),
+    InverterRegister("inverter_mppt_count", "input", 31026, "u16"),
     *_pv_strings(4),
-    I("inverter_pv_power", "input", 31035, "s32", 1000, "kW"),
-    I("inverter_insulation_resistance", "input", 31037, "u16", 1000, "MΩ"),
-    I(
+    InverterRegister("inverter_pv_power", "input", 31035, "s32", 1000, "kW"),
+    InverterRegister("inverter_insulation_resistance", "input", 31037, "u16", 1000, "MΩ"),
+    InverterRegister(
         "inverter_startup_time",
         "input",
         31038,
@@ -707,9 +713,9 @@ INVERTER_REGISTERS: list[Register] = [
         unit="s",
         description="Last start, as local wall-clock time stored like an epoch (same as 30000)",
     ),
-    I("inverter_shutdown_time", "input", 31040, "u32", unit="s"),
-    I("inverter_pv_daily_generation", "input", 31509, "u32", 100, "kWh"),
-    I("inverter_pv_total_generation", "input", 31511, "u32", 100, "kWh"),
+    InverterRegister("inverter_shutdown_time", "input", 31040, "u32", unit="s"),
+    InverterRegister("inverter_pv_daily_generation", "input", 31509, "u32", 100, "kWh"),
+    InverterRegister("inverter_pv_total_generation", "input", 31511, "u32", 100, "kWh"),
 ]
 
 REGISTERS_BY_DEVICE: dict[str, list[Register]] = {"plant": PLANT_REGISTERS, "inverter": INVERTER_REGISTERS}

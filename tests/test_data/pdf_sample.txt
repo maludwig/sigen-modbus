@@ -1,0 +1,12 @@
+| No | Name                          | Add.  | QT | Per | Data | Gain | Unit | Hyb      | PV       | Comment       |
+|----|-------------------------------|-------|----|-----|------|------|------|----------|----------|---------------|
+|    |                               |       | Υ  | m.  | Туре |      |      | rid      | inv.     |               |
+|    |                               |       |    |     |      |      |      | Inv,     |          |               |
+| 1  | System time                   | 30000 | 2  | RO  | U32  | 1    | S    | 1        | 1        | Epoch seconds |
+| 5  | [Grid sensor]<br>Active power | 30005 | 2  | RO  | \$32 | 1000 | kW   | V        | <b>V</b> | >0 buy        |
+
+Page 15
+
+| 7  | On/Off<br>Grid<br>status      | 30009 | 1 | RO      | U16 | N/A  | N/A  | √ |   | 0:<br>on<br>grid |
+|----|-------------------------------|-------|---|---------|-----|------|------|---|---|------------------|
+| 14 | Plant<br>phase<br>A<br>reactive<br>power | 30021 |   | 2<br>RO | S32 | 1000 | kVar | √ | √ |   |

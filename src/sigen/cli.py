@@ -50,6 +50,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import psycopg
+
 from sigen import (
     __version__,
     alerts,
@@ -57,6 +59,7 @@ from sigen import (
     daily,
     dashboard,
     db,
+    gaps,
     goes,
     goes_shade,
     heater,
@@ -151,6 +154,20 @@ def _journal_option(p: argparse.ArgumentParser) -> None:
         type=Path,
         default=DEFAULT_JOURNAL,
         help=f"write log, one JSON object per line (default: {DEFAULT_JOURNAL})",
+    )
+
+
+def _gap_arguments(p: argparse.ArgumentParser) -> None:
+    """Add --since and --min-gap (db gaps, sync --fill-gaps) to `p`."""
+    p.add_argument(
+        "--since", default="7d", metavar="DURATION", help="look back this far, e.g. 12h or 30d (default: 7d)"
+    )
+    p.add_argument(
+        "--min-gap",
+        nargs="+",
+        action="extend",
+        metavar="TABLE:DURATION",
+        help="a table's min gap instead of 3 x its interval, e.g. readings:30s battery_heater:2h",
     )
 
 
@@ -591,6 +608,99 @@ def format_query_table(columns: list[str], rows: list[tuple], max_width: int = 0
 def _site_tz(config: Config) -> datetime.tzinfo:
     """The config's site timezone, else this computer's."""
     return ZoneInfo(config.site.timezone) if config.site else datetime.datetime.now().astimezone().tzinfo
+
+
+def _poll_interval(config: Config) -> float:
+    """The seconds between this machine's polls: the config's poll.interval, else poll's default."""
+    default = next(d for name, _, d in POLL_SETTINGS if name == "interval")
+    return float(config.commands.get("poll", {}).get("interval", default))
+
+
+def _gap_options(args: argparse.Namespace) -> tuple[datetime.timedelta, dict[str, datetime.timedelta]]:
+    """--since and --min-gap, read. ValueError (with the reason) for a bad one."""
+    return gaps.parse_duration(args.since), gaps.parse_min_gaps(args.min_gap or [])
+
+
+def cmd_db_gaps(args: argparse.Namespace) -> int:
+    """`sigen db gaps`: each table's stretches without good rows over the last --since, each over its min gap
+    (default 3 x its interval), with the failed attempts inside them; --json for a list. Read-only."""
+    config = _config(args)
+    url = config.require_database_url()
+    try:
+        since, min_gaps = _gap_options(args)
+    except ValueError as e:
+        err(f"error: {e}")
+        return ExitCode.USAGE
+    tz = _site_tz(config)
+    end = datetime.datetime.now(datetime.UTC)
+    start = end - since
+    tables = args.table or None
+    with db.read_only(url) as conn:
+        found = gaps.find_gaps(conn, config, start, end, _poll_interval(config), tables, min_gaps)
+        days = gaps.missing_days(conn, start, end, tz) if tables is None or "daily_energy" in tables else None
+    if args.json:
+        print(json.dumps(_gaps_json(found, days, start, end), indent=1))
+        return ExitCode.OK
+
+    def local(t: datetime.datetime) -> str:
+        """A time as the listing shows it, in the site's zone: '10-18 20:01:45'."""
+        return f"{t.astimezone(tz):%m-%d %H:%M:%S}"
+
+    print(f"Gaps from {start.astimezone(tz):%Y-%m-%d %H:%M} to {end.astimezone(tz):%Y-%m-%d %H:%M} ({tz}):")
+    for sg in found:
+        s = sg.series
+        head = f"{s.name}: every {gaps.span_text(s.interval)}, gaps over {gaps.span_text(sg.min_gap)}"
+        head += ", daylight only" if s.daylight_only else ""
+        head += " (fetched on demand: a gap can just mean no dashboard page was open)" if s.on_demand else ""
+        if not sg.gaps:
+            print(f"{head}: {'none' if sg.rows else 'no rows in the window'}")
+            continue
+        print(f"{head}:")
+        for g in sg.gaps:
+            to = f"{local(g.end)} (now)" if g.open_ended else local(g.end)
+            why = f"{g.failed} failed: {g.error}" if g.failed else "no attempts stored"
+            print(f"  {local(g.start)} -> {to}  {gaps.span_text(g.length):>7}  {why}")
+    if days is not None:
+        missing = ", ".join(f"{a:%m-%d}" if a == b else f"{a:%m-%d} to {b:%m-%d}" for a, b in days)
+        print(f"daily_energy: a row per finished local day; missing: {missing or 'none'}")
+    return ExitCode.OK
+
+
+def _gaps_json(
+    found: list[gaps.SeriesGaps],
+    days: list[tuple[datetime.date, datetime.date]] | None,
+    start: datetime.datetime,
+    end: datetime.datetime,
+) -> dict:
+    """`db gaps --json`: the window, each series with its gaps (UTC ISO times), and daily_energy's missing days."""
+    return {
+        "start": sync.iso(start),
+        "end": sync.iso(end),
+        "series": [
+            {
+                "table": sg.series.table,
+                "series": sg.series.name,
+                "interval_s": sg.series.interval.total_seconds(),
+                "min_gap_s": sg.min_gap.total_seconds(),
+                "daylight_only": sg.series.daylight_only,
+                "on_demand": sg.series.on_demand,
+                "rows": sg.rows,
+                "gaps": [
+                    {
+                        "start": sync.iso(g.start),
+                        "end": sync.iso(g.end),
+                        "seconds": g.length.total_seconds(),
+                        "open_ended": g.open_ended,
+                        "failed": g.failed,
+                        "error": g.error,
+                    }
+                    for g in sg.gaps
+                ],
+            }
+            for sg in found
+        ],
+        "daily_energy_missing": None if days is None else [[a.isoformat(), b.isoformat()] for a, b in days],
+    }
 
 
 def cmd_db_daily(args: argparse.Namespace) -> int:
@@ -1292,38 +1402,93 @@ def cmd_cloud_query(args: argparse.Namespace) -> int:
     return ExitCode.OK
 
 
+def _gap_windows(
+    conn: psycopg.Connection,
+    config: Config,
+    kinds: list[str],
+    since: datetime.timedelta,
+    min_gaps: dict[str, datetime.timedelta],
+    tz: datetime.tzinfo,
+) -> list[tuple[str, datetime.datetime, datetime.datetime, str]]:
+    """(sync kind, start, end, label) for each gap over the last `since` in the tables `kinds` sync (see
+    gaps.find_gaps), overlapping gaps of one kind merged (the heater's packs share a table)."""
+    table_kinds = {t: k for k, tables in sync.STANDALONE_KINDS.items() for t in tables}
+    table_kinds["readings"] = sync.READINGS_KIND
+    tables = [t for t, k in table_kinds.items() if k in kinds]
+    end = datetime.datetime.now(datetime.UTC)
+    found = gaps.find_gaps(conn, config, end - since, end, _poll_interval(config), tables, min_gaps)
+    spans: dict[str, list[list]] = {}
+    for sg in found:
+        for g in sg.gaps:
+            spans.setdefault(sg.series.table, []).append([g.start, g.end])
+    windows = []
+    for table, found_spans in spans.items():
+        merged: list[list] = []
+        for start, stop in sorted(found_spans):
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], stop)
+            else:
+                merged.append([start, stop])
+        for start, stop in merged:
+            label = (
+                f"{table}: {start.astimezone(tz):%m-%d %H:%M:%S} -> {stop.astimezone(tz):%m-%d %H:%M:%S}"
+                f" ({gaps.span_text(stop - start)})"
+            )
+            windows.append((table_kinds[table], start, stop, label))
+    return windows
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
-    """`sigen sync`: copy the rows in [--start-at, --end-at) that are
-    missing here from the peer dashboard at --url, then recompute the
-    window's daily totals if readings came in."""
+    """`sigen sync`: copy the rows in [--start-at, --end-at) that are missing here from the peer dashboard at
+    --url, or with --fill-gaps the rows in each of this database's gaps (`db gaps`) over the last --since; then
+    recompute the affected days' totals if readings came in."""
     config = _config(args)
     local_url = config.require_database_url()
-    start, end = sync.parse_iso(args.start_at), sync.parse_iso(args.end_at)
-    if end <= start:
-        err("--end-at must be after --start-at")
-        return ExitCode.USAGE
     kinds = sync.resolve_kinds(args.only_sync)
+    tz = _site_tz(config)
+    if args.fill_gaps:
+        if args.start_at or args.end_at:
+            err("error: --fill-gaps finds its own windows (over --since): leave out --start-at and --end-at")
+            return ExitCode.USAGE
+        try:
+            since, min_gaps = _gap_options(args)
+        except ValueError as e:
+            err(f"error: {e}")
+            return ExitCode.USAGE
+    else:
+        if not (args.start_at and args.end_at):
+            err("error: give --start-at and --end-at, or --fill-gaps")
+            return ExitCode.USAGE
+        start, end = sync.parse_iso(args.start_at), sync.parse_iso(args.end_at)
+        if end <= start:
+            err("--end-at must be after --start-at")
+            return ExitCode.USAGE
+    dry = " -- dry run" if args.dry_run else ""
     conn = db.connect(local_url)
     try:
         sync.check_schema(conn, args.url)
-        print(
-            f"Syncing {', '.join(kinds)} from {args.url} for [{sync.iso(start)}, {sync.iso(end)})"
-            + (" -- dry run" if args.dry_run else "")
-        )
-        imported = present = readings_imported = 0
-        for kind in kinds:
-            got, skip = sync.sync_kind(conn, args.url, kind, start, end, args.dry_run, out=print)
+        if args.fill_gaps:
+            windows = _gap_windows(conn, config, kinds, since, min_gaps, tz)
+            print(f"Filling {len(windows)} gap(s) from the last {args.since} from {args.url}{dry}")
+        else:
+            windows = [(kind, start, end, None) for kind in kinds]
+            print(f"Syncing {', '.join(kinds)} from {args.url} for [{sync.iso(start)}, {sync.iso(end)}){dry}")
+        imported = present = 0
+        readings_windows = []  # where readings came in: those days' totals are stale
+        for kind, w_start, w_end, label in windows:
+            if label:
+                print(label)
+            got, skip = sync.sync_kind(conn, args.url, kind, w_start, w_end, args.dry_run, out=print)
             imported, present = imported + got, present + skip
-            if kind == sync.READINGS_KIND:
-                readings_imported = got
-        if readings_imported and not args.dry_run:  # fresh readings -> the affected days' totals are stale
-            tz = _site_tz(config)
+            if kind == sync.READINGS_KIND and got:
+                readings_windows.append((w_start, w_end))
+        if readings_windows and not args.dry_run:
             print("Recomputing daily totals for the imported days...")
             daily.update(
                 conn,
                 tz,
-                start.astimezone(tz).date(),
-                end.astimezone(tz).date(),
+                min(s for s, _ in readings_windows).astimezone(tz).date(),
+                max(e for _, e in readings_windows).astimezone(tz).date(),
                 site=config.site,
                 array=config.array,
                 log=print,
@@ -1501,6 +1666,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _config_option(ds, "database.url")
     ds.set_defaults(func=cmd_db_status)
+    dg = dsub.add_parser(
+        "gaps",
+        formatter_class=fmt,
+        epilog=EXIT_CODE_HELP,
+        help="list each table's gaps: stretches without good rows (read-only)",
+        description="Read-only. For each table's time series (the plant's readings, each battery pack's heater "
+        "checks, Open-Meteo at each resolution, radar, the satellite), the stretches over the last --since with no "
+        "good row for longer than its min gap: by default 3 x the interval its rows normally come at (readings: "
+        "poll.interval), so a gap is at least three missed in a row. Each shows the failed attempts stored inside "
+        "it, with their commonest error. The satellite counts daylight only, and is fetched only while a dashboard "
+        "page is open. daily_energy lists its missing days. `sigen sync --fill-gaps` fills them from a peer.",
+    )
+    _gap_arguments(dg)
+    dg.add_argument(
+        "--table",
+        nargs="+",
+        action="extend",
+        choices=gaps.TABLES,
+        metavar="TABLE",
+        help=f"only these tables (default: all): {', '.join(gaps.TABLES)}",
+    )
+    dg.add_argument("--json", action="store_true", help="print the gaps as JSON (times in UTC)")
+    _config_option(dg, "database.url, poll.interval, cloud.batteries and site (the zone times are shown in)")
+    dg.set_defaults(func=cmd_db_gaps)
     dd = dsub.add_parser(
         "daily",
         formatter_class=fmt,
@@ -1684,18 +1873,24 @@ def build_parser() -> argparse.ArgumentParser:
         "endpoints) and insert the ones missing locally -- for filling gaps left by an "
         "outage. Only good rows, never duplicates (safe to re-run), and identity ids are "
         "reassigned locally. Both databases must be on the same migrations, or it "
-        "refuses. Window is [start, end), UTC.",
+        "refuses. Window is [start, end), UTC. Or --fill-gaps: a window per gap that `sigen db gaps` "
+        "finds here over the last --since (a gap that stays empty was the device's, not this machine's).",
     )
     sy.add_argument(
         "--url", required=True, metavar="URL", help="the peer's dashboard base URL, e.g. http://othermachine:8050"
     )
     sy.add_argument(
         "--start-at",
-        required=True,
         metavar="ISO",
-        help="window start, UTC ISO 8601, inclusive (e.g. 2026-10-17T16:02:15Z)",
+        help="window start, UTC ISO 8601, inclusive (e.g. 2026-10-17T16:02:15Z); not with --fill-gaps",
     )
-    sy.add_argument("--end-at", required=True, metavar="ISO", help="window end, UTC ISO 8601, exclusive")
+    sy.add_argument("--end-at", metavar="ISO", help="window end, UTC ISO 8601, exclusive; not with --fill-gaps")
+    sy.add_argument(
+        "--fill-gaps",
+        action="store_true",
+        help="sync each of this database's gaps over --since instead of one window (see `sigen db gaps`)",
+    )
+    _gap_arguments(sy)
     sy.add_argument(
         "--only-sync",
         nargs="+",

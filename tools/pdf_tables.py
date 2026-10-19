@@ -29,6 +29,7 @@ CAPTION = re.compile(r"^(Table (\d+(?:-\d+)+)|Appendix (\d+)) ([A-Z].*)$")
 
 
 def cell(text: str | None) -> str:
+    """A table cell's text on one line, whitespace collapsed ('' for an empty cell)."""
     return " ".join((text or "").split())
 
 
@@ -51,6 +52,7 @@ def strip_hidden_number(raw: str) -> tuple:
 
 
 def slug(text: str) -> str:
+    """A title as part of a file name: 'Running State (1)' -> 'running_state_1'."""
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
@@ -62,6 +64,7 @@ class Logical:
 
 
 def is_header(cells: list[str]) -> bool:
+    """Whether a row starts a table: a register table's "No" column, or an appendix's Bit / Value pair."""
     cells = [cell(c) for c in cells]
     first = cells[0].replace(" ", "").lower() if cells else ""
     return first.startswith("no") or (len(cells) == 2 and cells[1] in ("Bit", "Value"))
@@ -93,6 +96,8 @@ def read_document(pdf) -> tuple:
 
 
 def register_rows(table: Logical):
+    """(column names, rows, problems) for a register table: hidden row numbers stripped, rows split across
+    pages merged, each row fixed and checked, and its source page(s) added."""
     width = len(table.header)
     names = column_names([table.header], width)
     name_col = names.index("name") if "name" in names else None
@@ -138,6 +143,8 @@ def register_rows(table: Logical):
 
 
 def appendix_rows(table: Logical):
+    """(column names, rows, problems) for an appendix table: value + description per row, "Not defined" rows
+    skipped and wrapped descriptions joined. Never any problems."""
     rows = []
     for page, raw in table.rows:
         cells = [cell(c) for c in raw]
@@ -151,6 +158,8 @@ def appendix_rows(table: Logical):
 
 
 def main(argv=None) -> int:
+    """The command line: write a CSV per captioned register table (chapter 5) and appendix, problems to stderr.
+    Exit 1 if there were any."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--pdf", type=Path, required=True, help="protocol PDF")
     p.add_argument("--out-dir", type=Path, required=True, help="directory for the CSV files")

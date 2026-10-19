@@ -299,8 +299,10 @@ def test_during_a_fault_only_the_fault_alerts():
 
 
 def test_powering_up_is_hidden_too():
-    """As on 2026-10-13: Shutdown with every temperature 0.0 °C, then Standby with real temperatures but the deliverable
-    energy still 0, then Running. The 0.0 °C sent a "cold" alert; nothing should until a minute into Running."""
+    """As on 2026-10-13: Shutdown with every temperature 0.0 °C, then Standby
+    with real temperatures but the deliverable energy still 0, then Running.
+    The 0.0 °C sent a "cold" alert; nothing should until a minute into
+    Running."""
     state = lambda k: 3 if k < 2 else 0 if k < 24 else 1  # noqa: E731
     temps = lambda k: 0.0 if k < 3 else 5.8  # noqa: E731
     w = window(

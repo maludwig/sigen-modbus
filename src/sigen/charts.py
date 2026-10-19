@@ -551,8 +551,10 @@ def precipitation_kinds(
     rows = [
         (t.astimezone(datetime.UTC), code, temp, rh)
         for t, code, temp, rh in conn.execute(
-            "SELECT DISTINCT ON (valid_at) valid_at, weather_code, temperature_2m, relative_humidity_2m "
-            "FROM open_meteo_weather WHERE resolution_minutes = 15 AND error IS NULL AND valid_at >= %s AND valid_at <= %s "
+            "SELECT DISTINCT ON (valid_at) valid_at, weather_code, "
+            "temperature_2m, relative_humidity_2m FROM open_meteo_weather "
+            "WHERE resolution_minutes = 15 AND error IS NULL "
+            "AND valid_at >= %s AND valid_at <= %s "
             "ORDER BY valid_at, fetched_at DESC",
             (start - OM_GAP_MARGIN, end + OM_GAP_MARGIN + WINDOW),
         )

@@ -1,41 +1,60 @@
-"""Watching the battery in the cold: is it heating itself, is it getting too cold, is the grid down?
+"""Watching the battery in the cold: is it heating itself, is it getting too
+cold, is the grid down?
 
-Pure functions, no database: each detector takes a Window (readings over a stretch of time, with columns named like
-the scaled views' `plant_register_values` / `inverter_register_values`, values after the gain) and returns Events.
-`sigen.alerts` builds the Windows from the database and sends the notifications.
+Pure functions, no database: each detector takes a Window (readings over a
+stretch of time, with columns named like the scaled views'
+`plant_register_values` / `inverter_register_values`, values after the gain)
+and returns Events. `sigen.alerts` builds the Windows from the database and
+sends the notifications.
 
-Background: a battery in an unheated space (a garage, say) sits between the indoor and outdoor temperatures, and the
-inverter stacked on it only warms it under load. What damages LiFePO4 is charging near or below freezing; discharging
-in the cold is safe. Whether a SigenStor battery heats itself is undocumented (its datasheet doesn't say, and older
-firmware rejects the protocol's preheating registers), and a heater could show up in many shapes, so there's one
-detector per signature:
+Background: a battery in an unheated space (a garage, say) sits between the
+indoor and outdoor temperatures, and the inverter stacked on it only warms it
+under load. What damages LiFePO4 is charging near or below freezing;
+discharging in the cold is safe. Whether a SigenStor battery heats itself is
+undocumented (its datasheet doesn't say, and older firmware rejects the
+protocol's preheating registers), and a heater could show up in many shapes,
+so there's one detector per signature:
 
-- plateau: the cells held steady for hours while the outside air says they should keep cooling (a thermostat);
-- warming / sawtooth: the cells warm up with no sun and the inverter idle (a heater switching on and off);
-- unexplained power: the inverter's DC side uses more than its standby (a heater fed from the grid or from the
-  battery: the battery stack's only power connection is the inverter's DC bus);
-- idle drain: the battery's deliverable energy falls while it reads idle (a heater behind the BMS's meter);
+- plateau: the cells held steady for hours while the outside air says they
+  should keep cooling (a thermostat);
+- warming / sawtooth: the cells warm up with no sun and the inverter idle (a
+  heater switching on and off);
+- unexplained power: the inverter's DC side uses more than its standby (a
+  heater fed from the grid or from the battery: the battery stack's only
+  power connection is the inverter's DC bus);
+- idle drain: the battery's deliverable energy falls while it reads idle (a
+  heater behind the BMS's meter);
 and, whether or not there's a heater:
-- cold: the coolest cluster is at a threshold, or heading there (time to insulate it);
-- cold charging: the battery charging while the coolest cluster is near freezing (the damage alarm: the BMS should
-  prevent it);
-- charge limited: the BMS lets the battery charge at only a fraction of its rated power (the cold's real cost);
-- below reserve: SOC under the backup reserve, which the grid normally prevents (so: the grid is down, or something
-  drains the battery faster than the grid refills it);
-- alarm: any bit of the plant's six alarm registers, in plain words (PCS, battery, gateway, DC charger, plant);
-  the grid going down is one of them (PCS alarms 1 bit 9, or the plant's on/off-grid status);
-- fault: the plant or the inverter reports the running state Fault (e.g. after the rapid-shutdown button).
+- cold: the coolest cluster is at a threshold, or heading there (time to
+  insulate it);
+- cold charging: the battery charging while the coolest cluster is near
+  freezing (the damage alarm: the BMS should prevent it);
+- charge limited: the BMS lets the battery charge at only a fraction of its
+  rated power (the cold's real cost);
+- below reserve: SOC under the backup reserve, which the grid normally
+  prevents (so: the grid is down, or something drains the battery faster
+  than the grid refills it);
+- alarm: any bit of the plant's six alarm registers, in plain words (PCS,
+  battery, gateway, DC charger, plant); the grid going down is one of them
+  (PCS alarms 1 bit 9, or the plant's on/off-grid status);
+- fault: the plant or the inverter reports the running state Fault (e.g.
+  after the rapid-shutdown button).
 
-Unless the system is Running its battery readings aren't real: in Fault (2026-10-12, the rapid-shutdown button) the
-deliverable energy reads 0 and minutes later the temperatures read exactly 25.0 °C; powering up (2026-10-13) it
-reports Shutdown with every temperature 0.0 °C, then Standby with the deliverable energy still 0, for ~6 minutes. In
-normal operation the state is always Running, nights included (6 days of readings). So detect_all() shows every
-detector except detect_fault only the readings from a minute after the last one that wasn't Running: none at all
-while the system is in Fault, shut down or starting.
+Unless the system is Running its battery readings aren't real: in Fault
+(2026-10-12, the rapid-shutdown button) the deliverable energy reads 0 and
+minutes later the temperatures read exactly 25.0 °C; powering up
+(2026-10-13) it reports Shutdown with every temperature 0.0 °C, then Standby
+with the deliverable energy still 0, for ~6 minutes. In normal operation the
+state is always Running, nights included (6 days of readings). So
+detect_all() shows every detector except detect_fault only the readings from
+a minute after the last one that wasn't Running: none at all while the
+system is in Fault, shut down or starting.
 
-Measured on one system on cold nights: with no sun and the battery idle the inverter draws 26 W from the grid
-(σ 2 W) and the DC balance (PV − battery − AC) is the same 26 W; discharging at 1–3 kW it's 150–220 W (conversion
-losses, ~5–7 %). The cells cooled 0.2–0.4 °C/h at night (time constant ~13 h); temperatures come in 0.1 °C steps.
+Measured on one system on cold nights: with no sun and the battery idle the
+inverter draws 26 W from the grid (σ 2 W) and the DC balance
+(PV − battery − AC) is the same 26 W; discharging at 1–3 kW it's 150–220 W
+(conversion losses, ~5–7 %). The cells cooled 0.2–0.4 °C/h at night (time
+constant ~13 h); temperatures come in 0.1 °C steps.
 """
 
 import datetime
@@ -521,11 +540,8 @@ def detect_cold(
         return []
     now, latest = pts[-1]
     if latest <= threshold:
-        return [
-            Event(
-                "cold", now, now, f"{column} is {latest:.1f} °C (≤ {threshold:g} °C): blanket time", {"value_c": latest}
-            )
-        ]
+        message = f"{column} is {latest:.1f} °C (≤ {threshold:g} °C): blanket time"
+        return [Event("cold", now, now, message, {"value_c": latest})]
     recent = [(t, v) for t, v in pts if now - t <= trend]
     if len(recent) < 2 or now - recent[0][0] < trend / 2:
         return []

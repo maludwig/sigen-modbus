@@ -14,20 +14,8 @@ HEADER = [
 
 # Trimmed from V2.9 lines 340-371: the multi-row header with lookalike letters, "\$32",
 # a quantity pushed into the permission cell, and a separator after a data row.
-SAMPLE = r"""
-| No | Name                          | Add.  | QT | Per | Data | Gain | Unit | Hyb      | PV       | Comment       |
-|----|-------------------------------|-------|----|-----|------|------|------|----------|----------|---------------|
-|    |                               |       | Υ  | m.  | Туре |      |      | rid      | inv.     |               |
-|    |                               |       |    |     |      |      |      | Inv,     |          |               |
-| 1  | System time                   | 30000 | 2  | RO  | U32  | 1    | S    | 1        | 1        | Epoch seconds |
-| 5  | [Grid sensor]<br>Active power | 30005 | 2  | RO  | \$32 | 1000 | kW   | V        | <b>V</b> | >0 buy        |
-
-Page 15
-
-| 7  | On/Off<br>Grid<br>status      | 30009 | 1 | RO      | U16 | N/A  | N/A  | √ |   | 0:<br>on<br>grid |
-|----|-------------------------------|-------|---|---------|-----|------|------|---|---|------------------|
-| 14 | Plant<br>phase<br>A<br>reactive<br>power | 30021 |   | 2<br>RO | S32 | 1000 | kVar | √ | √ |   |
-""".strip().splitlines()
+SAMPLE_FILE = Path(__file__).resolve().parent / "test_data" / "pdf_sample.txt"
+SAMPLE = SAMPLE_FILE.read_text(encoding="utf-8-sig").strip().splitlines()
 
 
 def test_fixes_and_columns():

@@ -256,7 +256,8 @@ def test_precipitation(seeded, conn):
             ],
         )  # snow by its code, however warm
         cur.executemany(
-            "INSERT INTO radar_frames (fetched_at, frame_at, rain_mm_h, snow_cm_h, covered) VALUES (%s, %s, %s, %s, true)",
+            "INSERT INTO radar_frames (fetched_at, frame_at, rain_mm_h, "
+            "snow_cm_h, covered) VALUES (%s, %s, %s, %s, true)",
             [
                 (T0, at(hour=h, minute=m), r, s)
                 for h, m, r, s in (

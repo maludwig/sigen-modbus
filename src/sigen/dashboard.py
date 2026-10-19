@@ -251,7 +251,8 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
 
     @app.get("/daily")
     def daily() -> str:
-        """A day's totals (the device's counters) and a Sankey diagram of where the energy went (static/my_sankey.js)."""
+        """A day's totals (the device's counters) and a Sankey diagram of where
+        the energy went (static/my_sankey.js)."""
         query = {k: v for k, v in request.args.items() if k == "day"}
         energy = sankey = None
         try:
@@ -289,7 +290,8 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
 
     @app.get("/all-time")
     def all_time() -> str:
-        """Every finished day in daily_energy added up: one Sankey of where all the energy has gone (static/my_sankey.js)."""
+        """Every finished day in daily_energy added up: one Sankey of where all
+        the energy has gone (static/my_sankey.js)."""
         energy = sankey = error = pv = None
         strips, notes = [], []
         try:

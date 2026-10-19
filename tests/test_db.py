@@ -244,7 +244,8 @@ def test_0004_moves_every_value(conn):
         zip(
             ["started_at", "plant_ess_soc", "plant_photovoltaic_power"],
             conn.execute(
-                "SELECT started_at, plant_ess_soc, plant_photovoltaic_power FROM raw_plant_register_values WHERE reading_id = %s",
+                "SELECT started_at, plant_ess_soc, plant_photovoltaic_power "
+                "FROM raw_plant_register_values WHERE reading_id = %s",
                 (rid,),
             ).fetchone(),
         )

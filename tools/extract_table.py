@@ -65,6 +65,7 @@ def cells_of(line: str) -> list[str] | None:
 
 
 def clean(text: str) -> str:
+    """A cell's text without markup: '<br>' -> a space, other HTML tags dropped, whitespace collapsed."""
     text = re.sub(r"<br\s*/?>", " ", text)
     text = re.sub(r"</?[a-zA-Z][^>]*>", "", text)
     return " ".join(text.split())
@@ -81,6 +82,8 @@ def column_names(header_rows: list[list[str]], width: int) -> list[str]:
 
 
 def fix_row(row: dict[str, str]) -> None:
+    """Undo the conversion's known slips in place: a quantity pushed into the permission cell, markup, '$32'
+    for 'S32', 'S' for the unit 's', and the tick marks as 'Y'."""
     perm = row.get("permission", "")
     m = re.fullmatch(r"(\d+)\s*(?:<br\s*/?>)?\s*(RO|RW|WO)", perm)
     if not row.get("quantity") and m:
@@ -97,6 +100,8 @@ def fix_row(row: dict[str, str]) -> None:
 
 
 def problems_in(row: dict[str, str], expected_no: int | None) -> list[str]:
+    """What's wrong with a fixed row: a non-numeric address, a quantity that doesn't match the data type,
+    an unknown permission, gain or tick, or a row number other than `expected_no` (None: don't check)."""
     found = []
     if not row.get("address", "").isdigit():
         found.append(f"address {row.get('address')!r} isn't a number")
@@ -203,6 +208,8 @@ def extract(lines: list[str], first_line: int):
 
 
 def main(argv=None) -> int:
+    """The command line: extract one table's lines from the Markdown file to CSV, problems to stderr. Exit 2 on
+    a merge conflict."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--file", type=Path, required=True, help="marker-converted Markdown file")
     p.add_argument("--start-line", type=int, required=True, help="first line to read (1-based)")

@@ -462,8 +462,9 @@ def status(conn: psycopg.Connection, migrations: Sequence[Migration] | None = No
                 "FROM open_meteo_weather"
             ).fetchone()
             out["radar"] = conn.execute(
-                "SELECT count(*) FILTER (WHERE error IS NULL), count(error), max(frame_at) FILTER (WHERE error IS NULL), "
-                "max(fetched_at) FROM radar_frames"
+                "SELECT count(*) FILTER (WHERE error IS NULL), count(error), "
+                "max(frame_at) FILTER (WHERE error IS NULL), max(fetched_at) "
+                "FROM radar_frames"
             ).fetchone()
         if conn.execute("SELECT to_regclass('alert_log')").fetchone()[0] is not None:  # 0005
             out["alerts"] = conn.execute(
