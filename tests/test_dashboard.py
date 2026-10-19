@@ -494,7 +494,11 @@ def test_the_page(hangs_up):
     assert 'href="/daily?day=2026-10-01"' in html
     past = page_env(client, "/?day=2026-10-01")
     assert past["data"]["string_voltage"] == "/data/string_voltage.json?day=2026-10-01"
-    assert set(past["data"]) == set(dashboard.CHARTS) | {"string_power_strips", "sankey"}  # and the strips, Sankey
+    assert set(past["data"]) == set(dashboard.CHARTS) | {
+        "string_power_strips",
+        "battery_temps_strips",
+        "sankey",
+    }  # and the strips, Sankey
     assert past["data"]["sankey"] == "/data/sankey.json?day=2026-10-01" and "/static/my_sankey.js" in html
     assert html.index('id="sankey"') < html.index('id="plot-string_voltage"')  # at the top
     assert "/static/dashboard.css" in html and '<span class="mouse-only">Drag across' in html  # the hint: not on phones
@@ -1069,6 +1073,34 @@ def test_counters_leave_out_a_reading_without_the_house_register(run, config, co
         picked.append((rid, t))
     counters = charts._counters_at(conn, NAMES, picked)  # was a KeyError
     assert counters.ids == [picked[0][0], picked[2][0]] and counters.times == [picked[0][1], picked[2][1]]
+
+
+def test_heater_strips(conn, config):
+    t = datetime.datetime(2026, 10, 1, 9, 0, tzinfo=TZ)
+    m = lambda mins: t + datetime.timedelta(minutes=mins)  # noqa: E731
+    for at, battery, on, error in [
+        (m(-30), 1, False, None),  # before the window: colours its start
+        (m(0), 1, True, None),
+        (m(20), 1, True, None),
+        (m(40), 1, None, "couldn't reach the Sigen cloud"),  # failed: no colour, so hatched
+        (m(10), 2, False, None),
+    ]:
+        db.insert_battery_heater(conn, polled_at=at, battery=battery, heater_on=on, error=error)
+    strips, note = charts.heater_strips(conn, t, m(120), 2, datetime.timedelta(minutes=10))
+    one, two = strips
+    assert (one.label, two.label) == ("Battery 1 heater", "Battery 2 heater")
+    assert one.starts == [m(-30), m(0), m(20), m(40)] and one.colours == ["#1f77b4", "#d62728", "#d62728", None]
+    assert two.colours == ["#1f77b4"] and one.length == datetime.timedelta(minutes=30)  # 2 packs x 10 min x 1.5
+    assert "red = heating" in note and "every 20 min" in note
+    assert [s.label for s in charts.heater_strips(conn, m(600), m(660), 3, datetime.timedelta(minutes=10))[0]] == [
+        "Battery 1 heater",
+        "Battery 2 heater",
+        "Battery 3 heater",
+    ]  # the config's packs get a strip with no checks at all: all hatched
+    r = app_for(config).get("/data/battery_temps_strips.json?day=2026-10-01").get_json()
+    assert [s["label"] for s in r["strips"]] == ["Battery 1 heater", "Battery 2 heater"] and len(r["notes"]) == 1
+    empty = app_for(config).get("/data/battery_temps_strips.json?day=2026-09-01").get_json()
+    assert empty == {"strips": [], "notes": []}  # no cloud section and no checks: no strips
 
 
 def test_all_time_strips(conn):

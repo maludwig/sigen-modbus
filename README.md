@@ -356,6 +356,26 @@ or a heater already on). It's on by default whenever a cloud section is present;
 `poll.cloud: false`) turns it off without removing the config — which also frees the cloud session it
 would otherwise hold (the mySigen account allows only so many at once). Restart `poll` after changing it.
 
+### Finding gaps
+
+```
+sigen db gaps                                        # the last 7 days, every table
+sigen db gaps --since 30d --table readings battery_heater --min-gap readings:45s
+sigen db gaps --json
+```
+Read-only. For each table's time series, the stretches with no good row for longer than its **min
+gap**: by default 3 × the interval its rows normally come at, so a gap is at least three missed in
+a row. The series: the plant's readings (every `poll.interval`), each battery pack's heater checks
+(the packs take turns: 10 min × the number of packs), Open-Meteo at each resolution (15 and 60
+min), radar frames (6 min) and the satellite scans (10 min, daylight only). Each gap shows how many
+attempts failed inside it, with their commonest error, or "no attempts stored" if nothing was
+running. The satellite is fetched only while a dashboard page is open, so its gaps often just mean
+nobody was looking. `daily_energy` lists its missing days instead.
+
+- `--since` (default `7d`) takes `45s`, `30m`, `12h`, `7d`.
+- `--min-gap TABLE:DURATION …` overrides some tables' min gaps; `--table TABLE …` checks only those.
+- Times are in the site's timezone; `--json` gives UTC ISO times.
+
 ### Syncing between machines
 
 If two machines poll the same SigenStor into separate databases (see "Config file"), an outage on
@@ -366,10 +386,14 @@ database is missing.
 ```
 sigen sync --url http://othermachine:8050 \
            --start-at 2026-10-17T16:00:00Z --end-at 2026-10-17T17:30:00Z [--only-sync weather] [--dry-run]
+sigen sync --url http://othermachine:8050 --fill-gaps [--since 30d] [--min-gap readings:45s] [--dry-run]
 ```
 - `--url` is the other machine's **dashboard** base URL; that machine must be running `sigen
   dashboard` (it serves the read-only `/sync/*` endpoints). Nothing on the source is modified.
 - `--start-at` / `--end-at` are UTC ISO 8601; the window is half-open `[start, end)`.
+- `--fill-gaps`, instead of a window: finds this database's gaps over `--since` (as `sigen db
+  gaps`, with the same `--min-gap`) and syncs each one. A gap that stays empty was the device's
+  (the other machine missed it too), not this machine's.
 - `--only-sync` picks what to copy, as one or more kinds (default: all): `weather` (Open-Meteo),
   `radar` (Environment Canada frames), `heater` (the battery-heater log), `satellite` (the per-scan
   cloud shade), and `readings` (the readings and their raw register values, regrouped into fresh

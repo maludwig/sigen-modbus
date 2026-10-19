@@ -935,6 +935,40 @@ def precipitation_strip(p: Precipitation) -> tuple[Strip, str]:
     )
 
 
+HEATER_COLOURS = {True: "#d62728", False: "#1f77b4"}  # the cloud said: heating (red), not heating (blue)
+HEATER_LOOKBACK = datetime.timedelta(hours=1)  # a check this long before the window can still colour its start
+
+
+def heater_strips(
+    conn: psycopg.Connection,
+    start: datetime.datetime,
+    end: datetime.datetime,
+    packs: int,
+    base_interval: datetime.timedelta,
+) -> tuple[list[Strip], str]:
+    """A strip per battery pack (1..`packs`, and any other in the table) from its cloud heater checks
+    (battery_heater): from each check, red while it said the heater was on, blue while off, up to the next check or
+    1.5 x the pack's resting interval (`base_interval` x the number of packs: they take turns); a failed check, or
+    none, leaves it empty (hatched). With the note saying how to read them."""
+    rows = conn.execute(
+        "SELECT battery, polled_at, heater_on FROM battery_heater WHERE polled_at >= %s AND polled_at < %s "
+        "ORDER BY battery, polled_at",
+        (start - HEATER_LOOKBACK, end),
+    ).fetchall()
+    by_pack: dict[int, tuple[list, list]] = {b: ([], []) for b in range(1, packs + 1)}
+    for battery, at, heater_on in rows:
+        starts, colours = by_pack.setdefault(battery, ([], []))
+        starts.append(at)
+        colours.append(None if heater_on is None else HEATER_COLOURS[heater_on])
+    every = base_interval * max(len(by_pack), 1)
+    strips = [Strip(f"Battery {b} heater", s, every * 1.5, c) for b, (s, c) in sorted(by_pack.items())]
+    return strips, (
+        f"Heater: each battery pack's heating status, from the Sigen cloud, checked every "
+        f"{every.total_seconds() / 60:g} min (every minute while it's sunny and cold, or heating): red = heating, "
+        f"blue = not, hatched = no check, or a failed one"
+    )
+
+
 def satellite_shade_series(
     conn: psycopg.Connection, start: datetime.datetime | None = None, end: datetime.datetime | None = None
 ) -> ShadeSeries:

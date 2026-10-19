@@ -84,6 +84,16 @@ test("battery temps: the coolest cluster's note skips gaps (null isn't 0 °C)", 
   assert.equal(L.CHARTS.battery_temps.build({...store, main: {t: every15(2), cols}}).note, "");
 });
 
+test("battery temps: the heater strips go under the plot, their note after the chart's", () => {
+  const heater = {label: "Battery 1 heater", starts: [0, 1200], length: 1800, colours: ["#d62728", "#1f77b4"]};
+  const store = {main: {t: every15(2), cols: {"coolest cluster": [9.5, 9.0]}}, aux: {air: L.emptyTable()}, meta: {},
+                 side: {strips: [heater], notes: ["Heater: red = heating"]}};
+  const b = L.CHARTS.battery_temps.build(store);
+  assert.deepEqual(b.strips, [heater]);
+  assert.equal(b.note, "Coolest cluster: low 9.0 °C, now 9.0 °C. Heater: red = heating.");
+  assert.equal(L.CHARTS.battery_temps.build({...store, side: {strips: [], notes: []}}).strips, undefined);
+});
+
 test("string power: a clear-sky model per string behind it, the strips, and both kWh", () => {
   const t = [0, 3600, 7200];
   const store = {main: {t, cols: {1: [1, 2, 1], 2: [0, 0, 0], 3: [0, 0, 0], 4: [0, 0, 0]}}, meta: {faces: {1: "SE"}},

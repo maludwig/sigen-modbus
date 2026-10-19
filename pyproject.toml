@@ -35,6 +35,7 @@ dev = [
 
     "pandas",
     "eccodes",
+    "anthropic",                 # tools/count_tokens.py: Claude token counts (the docs' size)
 ]
 
 [project.urls]

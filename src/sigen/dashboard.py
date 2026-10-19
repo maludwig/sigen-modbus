@@ -41,7 +41,7 @@ import psycopg
 from flask import Flask, Response, abort, redirect, render_template, request, url_for
 from werkzeug.wrappers import Response as BaseResponse
 
-from sigen import charts, db, sync
+from sigen import charts, db, heater, sync
 from sigen import daily as daily_mod  # aliased: the `daily()` route below would shadow the module name
 from sigen.config import Config, Site
 from sigen.errors import DatabaseError
@@ -509,6 +509,17 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
         air = charts.air_temperatures(conn, start - AIR_MARGIN if since else start, end)
         return {"t": t, "c": c, "air": {"t": [iso_utc(at) for at, _ in air], "c": [round(v, 1) for _, v in air]}}
 
+    def battery_temps_strips_data(
+        conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime, since: datetime.datetime | None
+    ) -> dict:
+        """{"strips", "notes"} as string_power_strips_data's: a strip per battery pack under the battery temperatures,
+        its heater on or off by the cloud's checks (charts.heater_strips), the whole window every time. No strips
+        without a cloud section or any checks."""
+        packs = len(config.cloud.batteries) if config.cloud is not None else 0
+        base = datetime.timedelta(seconds=heater.BASE_INTERVAL)
+        strips, note = charts.heater_strips(conn, start, end, packs, base)
+        return {"strips": strips_json(strips), "notes": [note] if strips else []}
+
     def battery_power_data(
         conn: psycopg.Connection, start: datetime.datetime, end: datetime.datetime, since: datetime.datetime | None
     ) -> dict:
@@ -538,6 +549,7 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
         "load_counters": ("reading the smart-load counters", load_counters_data),
         "load_snapshots": ("reading the smart-load power", load_snapshots_data),
         "battery_temps": ("reading the battery temperatures", battery_temps_data),
+        "battery_temps_strips": ("reading the battery heater strips", battery_temps_strips_data),
         "battery_power": ("reading the battery and PV power", battery_power_data),
     }
 

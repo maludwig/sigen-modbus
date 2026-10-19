@@ -768,12 +768,13 @@
 
     battery_temps: {
       aspect: 4.5 / 11,
+      side: "battery_temps_strips",                       // each pack's heater, on or off, fetched every few minutes
       tables: (d) => ({main: {t: d.t, cols: d.c}, aux: {air: {t: d.air.t, cols: {air: d.air.c}}}}),
       build: (s) => {
         const t = s.main.t, c = s.main.cols, air = s.aux.air, coolest = c["coolest cluster"] || [];
         const known = coolest.filter(Number.isFinite);   // a gap is null, which Math.min would read as 0
         const n = known.length;
-        return {
+        const out = {
           data: [coolest, c["warmest cluster"] || [], c["average cell"] || [],
                  resample(t, air.t, air.cols.air || [], "linear", 6 * 3600),
                  rollingMean(t, c["inverter internal"] || [], MEAN)],
@@ -798,6 +799,11 @@
           note: n ? `Coolest cluster: low ${known.reduce((a, b) => Math.min(a, b)).toFixed(1)} °C, `
                     + `now ${known[n - 1].toFixed(1)} °C.` : "",
         };
+        if (s.side && s.side.strips.length) {             // the heater strips, under the plot
+          out.strips = s.side.strips;
+          out.note += (out.note ? " " : "") + s.side.notes.join(". ") + ".";
+        }
+        return out;
       },
     },
 
