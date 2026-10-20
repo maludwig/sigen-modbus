@@ -457,9 +457,7 @@ def page_env(client, path):
 
 
 def test_dashboard_css_is_served():
-    client = dashboard.create_app(
-        Config(database_url="postgresql://u:x@127.0.0.1:1/x", origin="t"), launcher=None
-    ).test_client()
+    client = dashboard.create_app(Config(database_url="postgresql://u:x@127.0.0.1:1/x", origin="t")).test_client()
     css = client.get("/static/dashboard.css")
     assert css.status_code == 200 and "css" in css.mimetype
     body = css.get_data(as_text=True)
@@ -469,7 +467,7 @@ def test_dashboard_css_is_served():
 
 def test_the_page(hangs_up):
     client = dashboard.create_app(
-        Config(database_url=f"postgresql://u:x@127.0.0.1:{hangs_up}/x", origin="t"), launcher=None
+        Config(database_url=f"postgresql://u:x@127.0.0.1:{hangs_up}/x", origin="t")
     ).test_client()
     html = client.get("/?day=2026-10-01").get_data(as_text=True)  # no database needed: the data comes by fetch
     assert "Thursday 2026-10-01" in html and "http-equiv" not in html  # the page never reloads itself
@@ -519,89 +517,20 @@ def test_the_page(hangs_up):
         assert client.get(gone).status_code == 404, gone
 
 
-class FakeProcess:
-    def __init__(self):
-        self.running = True
-
-    def poll(self):
-        return None if self.running else 0
-
-
-def test_the_page_starts_a_satellite_fetch(seeded, tmp_path):
+def test_the_night_sky(seeded, tmp_path):
     url = json.loads(seeded.read_text(encoding="utf-8"))["database"]["url"]
-    started = []
-
-    def launcher(command, log):
-        started.append((command, log, FakeProcess()))
-        return started[-1][2]
-
     config = Config(
         database_url=url,
         site=Site(51.0443, -114.0631, "America/Edmonton"),
         path=tmp_path / "config.json",
-        satellite_cube_dir=tmp_path / "cubes",
         origin="test",
     )
-    client = dashboard.create_app(config, launcher=launcher).test_client()
-    assert client.get("/?day=2026-10-01").status_code == 200
-    ((command, log, process),) = started
-    assert command[1:4] == ["-m", "sigen", "satellite"]
-    assert command[4:] == [
-        "--start",
-        "2026-10-01 00:00",
-        "--end",
-        "2026-10-02 00:00",
-        "--config",
-        str(tmp_path / "config.json"),
-        "--cube-dir",
-        str(tmp_path / "cubes"),
-        "--record-to-db",
-    ]
-    assert log == tmp_path / "cubes" / dashboard.SATELLITE_LOG
-    client.get("/?day=2026-09-30")
-    assert len(started) == 1  # ours is still running: none started
-    process.running = False
-    client.get("/?day=2026-09-30")
-    assert len(started) == 2 and started[1][0][5] == "2026-09-30 00:00"
-    started[1][2].running = False
-    client.get("/?day=2026-09-30")
-    assert len(started) == 2  # that window had one in the last 10 minutes
-    client.get("/?hours=744")
-    assert len(started) == 2  # longer than MAX_FETCH: never from the page
-    no_site = dashboard.create_app(Config(database_url=url, origin="t"), launcher=launcher).test_client()
-    no_site.get("/?day=2026-09-29")
-    assert len(started) == 2  # no site: nothing to fetch
-
-
-def test_the_night_sky_and_the_strips_satellite_fetches(seeded, tmp_path):
-    url = json.loads(seeded.read_text(encoding="utf-8"))["database"]["url"]
-    started = []
-
-    def launcher(command, log):
-        started.append(FakeProcess())
-        return started[-1]
-
-    config = Config(
-        database_url=url,
-        site=Site(51.0443, -114.0631, "America/Edmonton"),
-        path=tmp_path / "config.json",
-        satellite_cube_dir=tmp_path / "cubes",
-        origin="test",
-    )
-    client = dashboard.create_app(config, launcher=launcher).test_client()
+    client = dashboard.create_app(config).test_client()
     assert page_env(client, "/?day=2026-10-01")["sunrise"] is None  # not "today": no night sky
-    assert len(started) == 1  # opening the page
     rise, _ = goes.sun_rise_set(datetime.datetime.now(TZ).date(), 51.0443, -114.0631)
     assert page_env(client, "/")["sunrise"] == rise.timestamp()  # today's, for the string charts' night sky
     tomorrow, _ = goes.sun_rise_set(datetime.datetime.now(TZ).date() + datetime.timedelta(days=1), 51.0443, -114.0631)
     assert page_env(client, "/night")["sunrise"] == tomorrow.timestamp()  # today before sunrise, whatever the time
-    started[-1].running = False
-    n = len(started)  # (today's page started one too)
-    client.get("/data/string_power_strips.json?day=2026-09-30")
-    assert len(started) == n + 1  # the page's strips, fetched again every few minutes
-    started[-1].running = False
-    client.get("/data/string_power_strips.json?day=2026-09-30")
-    assert len(started) == n + 1  # that window had one in the last 10 minutes
 
 
 def test_the_clear_sky_model_ends_now_or_half_an_hour_after_sunset():
@@ -619,16 +548,9 @@ def test_the_clear_sky_model_ends_now_or_half_an_hour_after_sunset():
     assert dashboard.model_end(datetime.datetime(2026, 6, 21, 23, 0, tzinfo=datetime.UTC), north).hour == 23
 
 
-def test_satellite_command_rounds_the_end_up():
-    config = Config(site=Site(51.0, -114.0, "America/Edmonton"), path=None, origin="t")
-    start, end = NOW - datetime.timedelta(hours=6), NOW + datetime.timedelta(seconds=1)
-    command = dashboard.satellite_command(config, start, end, TZ)
-    assert command[4:8] == ["--start", "2026-10-11 08:30", "--end", "2026-10-11 14:31"]
-
-
 def test_data_when_the_database_is_down(hangs_up):
     client = dashboard.create_app(
-        Config(database_url=f"postgresql://u:s3cret@127.0.0.1:{hangs_up}/x", origin="t"), launcher=None
+        Config(database_url=f"postgresql://u:s3cret@127.0.0.1:{hangs_up}/x", origin="t")
     ).test_client()
     r = client.get("/data/load_energy.json")
     assert r.status_code == 503 and r.get_json()["error"].startswith("database:")  # the page shows it under the chart
@@ -651,7 +573,7 @@ def test_status_before_the_first_poll(run, config):
 
 def test_status_when_the_database_is_down(hangs_up):
     client = dashboard.create_app(
-        Config(database_url=f"postgresql://u:s3cret@127.0.0.1:{hangs_up}/x", origin="t"), launcher=None
+        Config(database_url=f"postgresql://u:s3cret@127.0.0.1:{hangs_up}/x", origin="t")
     ).test_client()
     r = client.get("/status")
     body = r.get_json()
@@ -694,8 +616,8 @@ def test_string_power_with_the_clear_sky_model(seeded, tmp_path, monkeypatch):
     from test_pvmodel import ARRAY, SITE, config_with
 
     url = json.loads(seeded.read_text(encoding="utf-8"))["database"]["url"]
-    c = config_with(tmp_path, site=SITE, array=ARRAY, database={"url": url})  # cubes: none under tmp_path
-    client = dashboard.create_app(c, launcher=None).test_client()
+    c = config_with(tmp_path, site=SITE, array=ARRAY, database={"url": url})
+    client = dashboard.create_app(c).test_client()
     d = client.get("/data/string_power.json?day=2026-10-01").get_json()
     sunset = goes.sun_rise_set(datetime.date(2026, 10, 1), SITE["latitude"], SITE["longitude"])[1]
     stop = sunset + dashboard.MODEL_AFTER_SUNSET  # every minute from midnight to 30 min after sunset

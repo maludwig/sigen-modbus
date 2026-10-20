@@ -20,6 +20,7 @@ neither. We never store the password.
 
 import base64
 import datetime
+import email.utils
 import json
 import os
 import urllib.error
@@ -158,15 +159,17 @@ class CloudClient:
         """The default opener: urllib's urlopen with this client's timeout."""
         return urllib.request.urlopen(request, timeout=self.timeout)
 
-    def _request(self, method: str, url: str, headers: dict, data: bytes | None = None) -> tuple[int, str]:
-        """Send one request; return (HTTP status, body text), HTTP errors
-        included. Raises CloudError only when the cloud can't be reached."""
+    def _request(
+        self, method: str, url: str, headers: dict, data: bytes | None = None
+    ) -> tuple[int, str, float | None]:
+        """Send one request; return (HTTP status, body text, its Retry-After in seconds or None), HTTP errors
+        included. Raises CloudError only when the cloud can't be reached. Never retries: the caller paces itself."""
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with self._opener(req) as r:
-                return r.status, r.read().decode("utf-8", "replace")
+                return r.status, r.read().decode("utf-8", "replace"), None
         except urllib.error.HTTPError as e:
-            return e.code, e.read().decode("utf-8", "replace")
+            return e.code, e.read().decode("utf-8", "replace"), retry_after(e.headers)
         except (urllib.error.URLError, OSError) as e:
             raise CloudError(f"couldn't reach the Sigen cloud at {url}: {getattr(e, 'reason', e)}") from e
 
@@ -212,13 +215,19 @@ class CloudClient:
         """POST the OAuth token endpoint; return the parsed JSON body (any `code`), or raise CloudError on a
         transport/HTTP failure."""
         data = urllib.parse.urlencode(form).encode()
-        status, text = self._request("POST", f"{self.base_url}/{TOKEN_PATH}", self._headers(form=True), data)
+        status, text, wait = self._request("POST", f"{self.base_url}/{TOKEN_PATH}", self._headers(form=True), data)
         try:
             body = json.loads(text)
         except ValueError as e:
-            raise CloudError(f"the token endpoint returned HTTP {status}, not JSON: {text[:200]}") from e
+            raise CloudError(
+                f"the token endpoint returned HTTP {status}, not JSON: {text[:200]}", status=status, retry_after=wait
+            ) from e
         if status >= 400:
-            raise CloudError(f"the token endpoint returned HTTP {status}: {json.dumps(_redact(body))[:300]}")
+            raise CloudError(
+                f"the token endpoint returned HTTP {status}: {json.dumps(_redact(body))[:300]}",
+                status=status,
+                retry_after=wait,
+            )
         return body
 
     # ---------- auth ----------
@@ -311,18 +320,25 @@ class CloudClient:
         url = f"{self.base_url}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        status, text = self._request("GET", url, self._headers(access_token=token))
+        status, text, wait = self._request("GET", url, self._headers(access_token=token))
         if status == 401:
             raise CloudError(
                 "the access token is expired or invalid (HTTP 401): run `sigen cloud refresh` "
-                "(or `sigen cloud login`)."
+                "(or `sigen cloud login`).",
+                status=status,
             )
         try:
             body = json.loads(text)
         except ValueError as e:
-            raise CloudError(f"{path} returned HTTP {status}, not JSON: {text[:200]}") from e
+            raise CloudError(
+                f"{path} returned HTTP {status}, not JSON: {text[:200]}", status=status, retry_after=wait
+            ) from e
         if status >= 400 or body.get("code") not in (0, None):
-            raise CloudError(f"{path}: HTTP {status}, API code {body.get('code')}, {body.get('msg')!r}")
+            raise CloudError(
+                f"{path}: HTTP {status}, API code {body.get('code')}, {body.get('msg')!r}",
+                status=status,
+                retry_after=wait,
+            )
         return body.get("data")
 
     def device_dynamic_info(self, station_id: str, sn_code: str, device_type: int) -> Any:
@@ -340,6 +356,25 @@ class CloudClient:
 
 
 # ---------- helpers ----------
+def retry_after(headers: Any) -> float | None:
+    """The seconds a Retry-After header asks for (a number of seconds, or an HTTP date), or None if there's none or
+    it won't parse."""
+    value = headers.get("Retry-After") if headers is not None else None
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.UTC)
+    return max(0.0, (when - datetime.datetime.now(datetime.UTC)).total_seconds())
+
+
 def _tokens_from(body: dict, device_id: str | None) -> Tokens | None:
     """Build Tokens from a token-endpoint body if it carries an access token, stamping the timing; else None."""
     data = body if body.get("access_token") or body.get("accessToken") else body.get("data")

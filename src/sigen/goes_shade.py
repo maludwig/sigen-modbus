@@ -15,8 +15,9 @@ are reached about a minute in):
 The share of sunlight through a cloud is cloud_transmission(): an Eddington two-stream approximation for a
 non-absorbing cloud at the scan's sun angle, not fitted to any array.
 
-Cubes are read whole into memory and closed at once (Cube), so `sigen satellite` can swap in a new one at any
-moment. Needs numpy, h5py and pvlib.
+The scans come from cubes (shade_day: each read whole into memory and closed at once, Cube, so `sigen satellite
+--cube-dir` can swap in a new one at any moment), or from one scan's boxes fetched into memory (shade_boxes, for
+sigen.satellite: no file at all). Needs numpy, h5py and pvlib.
 """
 
 import datetime
@@ -33,7 +34,7 @@ import numpy as np
 import pandas as pd
 import pvlib
 
-from sigen.goes import DEFAULT_SATELLITE, FixedGrid, cube_path
+from sigen.goes import DEFAULT_SATELLITE, Box, FixedGrid, cube_path
 
 SAMPLE_DELAY = datetime.timedelta(minutes=1)
 SCAN = datetime.timedelta(minutes=10)  # full-disk scans: one every 10 minutes
@@ -111,6 +112,24 @@ class Cube:
         return self._frames[var, i][max(row - half, 0) : row + half + 1, max(col - half, 0) : col + half + 1]
 
 
+class BoxFrames:
+    """One scan's Box (sigen.goes.fetch_box) of one product, read like a one-scan Cube: scan 0 at `t0`."""
+
+    def __init__(self, box: Box, t0: datetime.datetime) -> None:
+        self.box = box
+        self.grid = FixedGrid(box.projection, box.x, box.y)
+        self.times = [t0]
+        self.index = {t0: 0}
+        self._frames: dict[str, np.ndarray] = {}
+
+    def block(self, var: str, i: int, row: int, col: int, half: int = 1) -> np.ndarray:
+        """The scan's (2*half+1)² block of `var` around (row, col), decoded (`i` is always 0: one scan)."""
+        if var not in self._frames:
+            data, attrs, _ = self.box.variables[var]
+            self._frames[var] = decode(data, attrs)
+        return self._frames[var][max(row - half, 0) : row + half + 1, max(col - half, 0) : col + half + 1]
+
+
 @dataclass
 class ShadeSeries:
     """One row per scan, in time order: when it was sampled (UTC), the sun, and the cloud columns (see the module's
@@ -142,7 +161,27 @@ def shade_day(
         path = cube_path(cube_dir, satellite, f"{short}{sector}", day)
         return Cube(path) if path.exists() else None
 
-    acm, cod, acha = open_cube("ACM"), open_cube("COD"), open_cube("ACHA")
+    return _series(open_cube("ACM"), open_cube("COD"), open_cube("ACHA"), lat, lon, heights)
+
+
+def shade_boxes(
+    boxes: Mapping[str, Box], t0: datetime.datetime, lat: float, lon: float, heights: Sequence[float] = HEIGHTS_KM
+) -> ShadeSeries:
+    """The one-row series for the scan that started at `t0`, from its boxes by product ("ACM", "COD", "ACHA"; a
+    product left out is NaN, as a missing cube is)."""
+    acm, cod, acha = (BoxFrames(boxes[s], t0) if s in boxes else None for s in ("ACM", "COD", "ACHA"))
+    return _series(acm, cod, acha, lat, lon, heights)
+
+
+def _series(
+    acm: Cube | BoxFrames | None,
+    cod: Cube | BoxFrames | None,
+    acha: Cube | BoxFrames | None,
+    lat: float,
+    lon: float,
+    heights: Sequence[float],
+) -> ShadeSeries:
+    """The series for every scan any of the three products has (each row from that scan's frames alone)."""
     starts = sorted(set().union(*(set(c.times) for c in (acm, cod, acha) if c is not None)))
     if not starts:
         return ShadeSeries()

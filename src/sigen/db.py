@@ -16,6 +16,7 @@ Tables (created by the numbered SQL files in sigen/migrations/):
     schema_migrations  which migrations have been applied, with checksums
 """
 
+import collections
 import datetime
 import hashlib
 import math
@@ -477,8 +478,8 @@ def status(conn: psycopg.Connection, migrations: Sequence[Migration] | None = No
     return out
 
 
-# Each table's row time: when its rows were written, or the nearest thing it has. A table not
-# listed here has no such column (register_meta).
+# Each table's row time: when its rows were written, or the nearest thing it has. Every table is
+# here or in NO_ROW_TIME (a test checks): a new table needs one or the other.
 ROW_TIMES = {
     "readings": "started_at",
     "raw_plant_register_values": "started_at",
@@ -488,7 +489,10 @@ ROW_TIMES = {
     "alert_log": "alerted_at",
     "schema_migrations": "applied_at",
     "daily_energy": "computed_at",
+    "battery_heater": "polled_at",
+    "satellite_shade": "fetched_at",  # not scan_at: the dashboard fetches past scans on demand
 }
+NO_ROW_TIME = {"register_meta"}
 
 
 @dataclass
@@ -768,9 +772,11 @@ def insert_satellite_shade(
     fetched_at: datetime.datetime,
     series: ShadeSeries | None,
     error: str | None = None,
+    scan_at: datetime.datetime | None = None,
 ) -> int:
     """Store a sigen.goes_shade.ShadeSeries, one row per scan (NaN -> NULL), one good row per scan (ON CONFLICT).
-    With `error` set, store a single failed-run row (scan_at NULL) instead. Returns how many good rows were added."""
+    With `error` set, store a single failed row instead: of the scan at `scan_at` (one that failed on its own), or
+    of the whole run (scan_at None). Returns how many good rows were added."""
     columns = ["fetched_at", "scan_at", "sun_elevation_deg", *SATELLITE_SHADE_VALUES, "error"]
     insert = sql.SQL(
         "INSERT INTO satellite_shade ({}) VALUES ({}) ON CONFLICT (scan_at) WHERE error IS NULL DO NOTHING"
@@ -779,7 +785,7 @@ def insert_satellite_shade(
     with errors_as("storing satellite shade failed"):
         with conn.transaction():
             if error is not None:
-                conn.execute(insert, [fetched_at, None, None, *([None] * len(SATELLITE_SHADE_VALUES)), error])
+                conn.execute(insert, [fetched_at, scan_at, None, *([None] * len(SATELLITE_SHADE_VALUES)), error])
             elif series is not None:
                 for i, scan_at in enumerate(series.times):
                     row = [
@@ -791,6 +797,34 @@ def insert_satellite_shade(
                     ]
                     added += conn.execute(insert, row).rowcount
     return added
+
+
+def stored_satellite_scans(
+    conn: psycopg.Connection, since: datetime.datetime
+) -> tuple[set[datetime.datetime], collections.Counter[datetime.datetime]]:
+    """(scan_at of every good row from `since` on, how many failed rows each scan_at from `since` on has)."""
+    with errors_as("reading the stored satellite scans failed"):
+        rows = conn.execute(
+            "SELECT scan_at, error IS NULL FROM satellite_shade WHERE scan_at >= %s", (since,)
+        ).fetchall()
+    return {t for t, good in rows if good}, collections.Counter(t for t, good in rows if not good)
+
+
+ADVISORY_KEY = "SELECT (%s::bigint << 32) | %s::regclass::oid::bigint"  # (a 32-bit kind, the table's OID): 64 bits
+
+
+def try_lock(conn: psycopg.Connection, kind: int, table: str) -> bool:
+    """Take the session-level advisory lock `kind` on `table` (by its OID, so each schema's table has its own) on
+    this connection, if no other session holds it; whether it did. It's released by unlock(), or when the connection
+    closes (a process that dies lets go of it)."""
+    with errors_as("taking an advisory lock failed"):
+        return bool(conn.execute(f"SELECT pg_try_advisory_lock(({ADVISORY_KEY}))", (kind, table)).fetchone()[0])
+
+
+def unlock(conn: psycopg.Connection, kind: int, table: str) -> None:
+    """Release the advisory lock that try_lock(conn, kind, table) took on this connection."""
+    with errors_as("releasing an advisory lock failed"):
+        conn.execute(f"SELECT pg_advisory_unlock(({ADVISORY_KEY}))", (kind, table))
 
 
 def _nan_to_null(value: float | None) -> float | None:

@@ -205,17 +205,19 @@ database is refused (exit 10). Several statements work, e.g. local times:
 `sigen db query "SET TIME ZONE 'America/Edmonton'; SELECT started_at, plant_ess_soc_pct FROM plant_register_values ORDER BY reading_id DESC LIMIT 5"`.
 
 ```
-sigen poll [--ip …] [--interval 60] [--offset 0] [--count N] [--[no-]weather] [--[no-]radar] [--[no-]alerts] [--[no-]cloud]
+sigen poll [--ip …] [--interval 60] [--offset 0] [--count N] [--[no-]weather] [--[no-]radar] [--[no-]alerts]
+           [--[no-]satellite] [--[no-]cloud]
 ```
-Each of `--interval`, `--offset`, `--weather`, `--radar`, `--alerts` and the capture options can
-also come from the config's `"poll"` section; the command line wins (`--no-alerts` over `"alerts":
+Each of `--interval`, `--offset`, `--weather`, `--radar`, `--alerts`, `--satellite` and the capture
+options can also come from the config's `"poll"` section; the command line wins (`--no-alerts` over `"alerts":
 true`). At start `poll` prints every setting, its value, and where it came from (command line,
 config or default).
 Reads every unit on a schedule (lined up with the clock: `--interval 15` polls at :00, :15, :30,
 :45) and stores each reading. If a second computer polls the same device, give it an `--offset`
 (e.g. `--offset 7`: :07, :22, …), so the two don't read it at the same instant. Runs until Ctrl+C unless
 `--count`. `--weather` and `--radar` also record the weather at your site in the
-background; `--alerts` watches the battery and pushes problems to your phone (see "Alerts").
+background, and `--satellite` NOAA's cloud over it (see `sigen satellite`); `--alerts` watches the
+battery and pushes problems to your phone (see "Alerts").
 It also stores each finished day's energy (see `sigen db daily`). When logging its output to a
 file, set `PYTHONUNBUFFERED=1`.
 
@@ -231,7 +233,7 @@ When something goes wrong, `poll` carries on where it can:
   dashboard, the daily totals and the alerts leave flagged polls out, both devices' readings. A PV
   zero with the strings under 0.5 kW may be real (dusk): it's only flagged when a retry replaces
   it, so the last attempt is always kept;
-- weather, radar and alert problems never stop it;
+- weather, radar, satellite and alert problems never stop it;
 - it **stops** on a Modbus exception (exit 4: most likely a register the device doesn't support)
   or a database that rejects the data (exit 10), since retrying wouldn't help.
 
@@ -251,8 +253,8 @@ now by load; smart-load energy and power; the battery's temperatures; and batter
 with the state of charge and reserve. A menu picks the window: today, the last 10 min to 7 days,
 or any day. A window that reaches now is topped up every 15 s with only the newer readings
 (`/data/<chart>.json?since=…`, which your own code can use too). Times show in your browser's time
-zone. Opening the page also fetches that window's satellite data in the background (`sigen
-satellite`, see below). **Daily totals** (`/daily`) shows a day's totals and every flow;
+zone. The satellite strips show what's in the database: `poll --satellite` keeps the last week
+filled, and `sigen satellite` fills an older day (see below). **Daily totals** (`/daily`) shows a day's totals and every flow;
 **All-time** (`/all-time`) each finished day's solar as a line, with a strip under it per day (solar
 as a share of its clear-sky model, the radar's rain, NOAA's sun through the cloud), and a Sankey of
 every finished day in `daily_energy` added up.
@@ -310,18 +312,22 @@ northern US). Both are free with no key. What each source is, its quirks and its
 [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md).
 
 ```
-sigen satellite [--day 2026-10-10 | --start "2026-10-10 06:00" --end "…"] [--km 200] [--record-to-db]
+sigen satellite [--day 2026-10-10 | --start "2026-10-10 06:00" --end "…"] [--km 200] [--daylight 60 | --all-day]
+sigen satellite --cube-dir [DIR] [--products ACM COD ACHA] [--workers 8] [--record-to-db] …
 ```
-Saves NOAA GOES-West cloud data (cloud mask, optical depth, cloud-top height; every 10 minutes)
-for a box around your site, a day at a time, as HDF5 files for your own analysis (comparing the
-clouds with what your panels made, say). GOES-West covers western North
-America and the Pacific. A day takes about a minute and ~210 MB of downloads; re-running only
-fetches what's new. The files go in the config's `satellite.cube_dir`. Each file is updated by
-writing a copy and swapping it in, so readers never see half of one, and only one run at a time
-works in a folder: a second one exits with 7 while the first is still going. With
-`--record-to-db` it also works out, per scan, how much sun gets through the cloud over the house
-and stores it in `satellite_shade` (the dashboard's satellite strips read it from there, and starts
-`sigen satellite --record-to-db` itself for the window you open).
+Works out, for each NOAA GOES-West scan (every 10 minutes) of a day, how much sun gets through the
+cloud over your house, and stores it in `satellite_shade` (the dashboard's satellite strips read it
+from there). It takes the scan's cloud mask, optical depth and cloud-top height for a box around
+your site, into memory: no files. Only the scans the table is missing are fetched, so re-running a
+day only fetches what's new; each needs all three products, which NOAA publishes 10 to 20 minutes
+after the scan, so a scan that's too new waits for the next run. A whole day is about 75 scans,
+~3 MB each, a couple of seconds apiece. GOES-West covers western North America and the Pacific,
+and NOAA keeps every scan since 2022-05-11. `poll --satellite` does the same every 10 minutes
+for the last 7 days; only one run at a time works on a database, so a second one exits with 7.
+
+With `--cube-dir`, it keeps the boxes instead, as HDF5 files ("cubes", one per product per local
+day: [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md#satellite-cubes)) for your own analysis, in DIR or,
+given no DIR, the config's `satellite.cube_dir`; `--record-to-db` also stores the shade from them.
 
 ### The cloud
 
@@ -351,8 +357,16 @@ every mySigen install, but kept in your config rather than baked into this code.
 **Battery heater logging.** With a `"cloud"` section in the config, `sigen poll` logs each battery
 pack's heating status to the `battery_heater` table from a background thread. A cloud problem never
 stops the Modbus poll; it refreshes the token at launch, and polls every 10 minutes at rest, or
-every minute when the battery might be heating (PV over 0.2 kW and the coolest cluster below 15 °C,
-or a heater already on). It's on by default whenever a cloud section is present; `--no-cloud` (or
+every minute when the battery might be heating (PV over 0.2 kW and the coolest cluster below 15 °C),
+or while a heater is on or was seen on in the last 10 minutes. Each poll asks about one pack (they
+take turns), so each pack is polled at twice that interval. The config's `poll.heater` section can
+change each number: `slow_interval` (600 s), `fast_interval` (60 s), `on_interval` (60 s; 15 s
+catches the heater's short bursts), `fast_pv_kw` (0.2) and `fast_below_c` (15), with the intervals
+at least 5 s and `slow_interval` ≥ `fast_interval` ≥ `on_interval`, e.g. `sigen config set
+poll.heater.on_interval 15`. When a query fails (the cloud unreachable, an error, a refresh that
+didn't work), it backs off: the wait doubles with each failure in a row, is at least what the
+cloud's `Retry-After` asks for, and never more than `slow_interval`; the first success brings the
+normal cadence back. It's on by default whenever a cloud section is present; `--no-cloud` (or
 `poll.cloud: false`) turns it off without removing the config — which also frees the cloud session it
 would otherwise hold (the mySigen account allows only so many at once). Restart `poll` after changing it.
 
@@ -369,8 +383,8 @@ a row. The series: the plant's readings (every `poll.interval`), each battery pa
 (the packs take turns: 10 min × the number of packs), Open-Meteo at each resolution (15 and 60
 min), radar frames (6 min) and the satellite scans (10 min, daylight only). Each gap shows how many
 attempts failed inside it, with their commonest error, or "no attempts stored" if nothing was
-running. The satellite is fetched only while a dashboard page is open, so its gaps often just mean
-nobody was looking. `daily_energy` lists its missing days instead.
+running. The satellite is checked only when this computer's poll stores it (`poll.satellite`).
+`daily_energy` lists its missing days instead.
 
 - `--since` (default `7d`) takes `45s`, `30m`, `12h`, `7d`.
 - `--min-gap TABLE:DURATION …` overrides some tables' min gaps; `--table TABLE …` checks only those.
@@ -453,7 +467,7 @@ it with `--ip 127.0.0.1 --port 10502`. See [docs/DEVELOPMENT.md](docs/DEVELOPMEN
 | 4 | the device returned a Modbus exception (incl. a refused write) |
 | 5 | **verify failed**: the read-back doesn't match, or the state is unknown after a dropped write |
 | 6 | refused by the allowlist |
-| 7 | precondition failed: `--expect-current`, undo after an outside change, the database isn't migrated, or `sigen satellite` is already running |
+| 7 | precondition failed: `--expect-current`, undo after an outside change, the database isn't migrated, or another `sigen satellite` (or `poll --satellite`) is running |
 | 8 | dry run: a change is needed but `--apply` wasn't given (or `sigen config set/unset --dry-run`) |
 | 9 | not found: no SigenStor found, nothing to undo, or a missing file |
 | 10 | database unreachable, or it rejected a query |
@@ -492,7 +506,9 @@ Every section is optional; a command that needs one says so. Start from `config.
             "base_url": "https://api-us.sigencloud.com", "app_base_url": "https://app-us.sigencloud.com",
             "obfuscation_key": "the-apps-static-key", "client_basic": "base64-of-the-apps-oauth-client",
             "station_id": "1234567890123456", "batteries": ["110AXX1234000A", "110AXX1234000B"]},
-  "poll": {"interval": 15, "offset": 0, "weather": true, "radar": true, "alerts": true},
+  "poll": {"interval": 15, "offset": 0, "weather": true, "radar": true, "alerts": true, "satellite": true,
+           "heater": {"slow_interval": 300, "fast_interval": 15, "on_interval": 15,
+                      "fast_pv_kw": 0.2, "fast_below_c": 15}},
   "dashboard": {"host": "0.0.0.0", "port": 8050, "reload": false}
 }
 ```
@@ -510,8 +526,9 @@ Every section is optional; a command that needs one says so. Start from `config.
   coefficient, pvlib mounting type), the ground albedo, each roof face's tilt and azimuth (degrees
   clockwise from true north), and which face each PV input's string is on and how many panels it
   has.
-- `satellite`: where `sigen satellite` keeps its files and the dashboard reads them. A relative
-  `cube_dir` is relative to the config file's folder (the default: `captures/satellite/cubes` there).
+- `satellite`: where `sigen satellite --cube-dir` (given no folder) keeps its cube files; nothing
+  else writes files. A relative `cube_dir` is relative to the config file's folder (the default:
+  `captures/satellite/cubes` there).
 - `cloud`: the mySigen cloud (see "The cloud"). `token_file` is a path (relative to the config
   folder) where the rotating access and refresh tokens are kept — gitignore it; it is not a secret
   in `config.json` itself. `station_id` and the `batteries` list (pack serials in the app's order,
@@ -525,7 +542,9 @@ Every section is optional; a command that needs one says so. Start from `config.
   Simply ask it to find the AES key and the Basic Auth string from the webapp.
 - `poll`, `dashboard`: what `sigen poll` and `sigen dashboard` do on this computer when the command
   line doesn't say, named like their options without the dashes: `poll` takes `interval`,
-  `offset`, `weather`, `radar`, `alerts`, `cloud`, `capture_open_meteo_weather` and `capture_radar`;
+  `offset`, `weather`, `radar`, `alerts`, `satellite`, `cloud`, `capture_open_meteo_weather` and
+  `capture_radar`, plus `heater`, a section of its own with no command-line option (the battery
+  heater job's cadence: see "The cloud");
   `dashboard` takes `host`, `port` and `reload`. An option on the command line wins; a setting in
   neither is the option's default. Handy when two computers poll the same device: each one's
   `offset` and `alerts` live in its own config.
@@ -556,7 +575,8 @@ Tables:
 - `satellite_shade`: one row per NOAA GOES-West scan (every 10 minutes): the sun's elevation
   (`sun_elevation_deg`), the share of sunlight through the cloud where a cloud at the measured top
   or at 0 / 2 / 5 / 10 km would shade the house (`trans_*`, 0 to 1), and the cloud probability
-  there (`prob_*`, 0 to 1). Written by `sigen satellite --record-to-db`.
+  there (`prob_*`, 0 to 1). Written by `sigen poll --satellite` and `sigen satellite`; a failed run
+  is a row with the `error` and `scan_at` NULL, a scan that failed on its own one with its `scan_at`.
 - `battery_heater`: one row per cloud poll of a battery pack's heating status (`sigen poll` with a
   `cloud` section): `polled_at`, `battery` (1 or 2, the pack's place in `cloud.batteries`),
   `heater_on` (NULL on a cloud error), `error`.

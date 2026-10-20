@@ -14,11 +14,11 @@
     sigen cloud query   [CONFIG] [--path PATH | --sn SN [--device-type N]] [--json]
     sigen poll        [--ip IP] [CONFIG] [--interval SECONDS] [--offset SECONDS] [--count N]
                       [--[no-]weather [--capture-open-meteo-weather DIR]] [--[no-]radar [--capture-radar DIR]]
-                      [--[no-]alerts]
+                      [--[no-]alerts] [--[no-]satellite]
     sigen weather     [CONFIG] [--resolution 60 15] [--record-to-db] [--capture DIR]
     sigen radar       [CONFIG] [--record-to-db] [--capture DIR]
-    sigen satellite   [CONFIG] [--day DATE | --start TIME --end TIME] [--products ACM COD ACHA] [--km 200]
-                      [--daylight MINUTES | --all-day] [--workers 8] [--cube-dir DIR]
+    sigen satellite   [CONFIG] [--day DATE | --start TIME --end TIME] [--km 200] [--daylight MINUTES | --all-day]
+                      [--cube-dir DIR [--products ACM COD ACHA] [--workers 8] [--record-to-db]]
     sigen dashboard   [CONFIG] [--host 0.0.0.0] [--port 8050] [--[no-]reload]
     sigen ntfy-test   [CONFIG] [--msg TEXT] [--title TEXT] [--priority LEVEL] [--record-to-db] [--ntfy-server URL]
     sigen mac-lookup  (--ip IP | --mac MAC [--ip-range RANGE])      (Windows and Linux)
@@ -66,6 +66,7 @@ from sigen import (
     netlookup,
     ntfy,
     poll,
+    satellite,
     sync,
     weather,
 )
@@ -74,6 +75,7 @@ from sigen.cloud import CloudClient
 from sigen.config import (
     CONFIG_ENV,
     CONFIG_NAME,
+    HEATER_SETTINGS,
     NTFY_SERVER,
     Cloud,
     Config,
@@ -200,6 +202,7 @@ POLL_SETTINGS = [
     ("radar", "--radar", False),
     ("alerts", "--alerts", False),
     ("cloud", "--cloud", True),
+    ("satellite", "--satellite", False),
     ("capture_open_meteo_weather", "--capture-open-meteo-weather", None),
     ("capture_radar", "--capture-radar", None),
 ]
@@ -651,7 +654,6 @@ def cmd_db_gaps(args: argparse.Namespace) -> int:
         s = sg.series
         head = f"{s.name}: every {gaps.span_text(s.interval)}, gaps over {gaps.span_text(sg.min_gap)}"
         head += ", daylight only" if s.daylight_only else ""
-        head += " (fetched on demand: a gap can just mean no dashboard page was open)" if s.on_demand else ""
         if not sg.gaps:
             print(f"{head}: {'none' if sg.rows else 'no rows in the window'}")
             continue
@@ -683,7 +685,6 @@ def _gaps_json(
                 "interval_s": sg.series.interval.total_seconds(),
                 "min_gap_s": sg.min_gap.total_seconds(),
                 "daylight_only": sg.series.daylight_only,
-                "on_demand": sg.series.on_demand,
                 "rows": sg.rows,
                 "gaps": [
                     {
@@ -844,6 +845,7 @@ def _poll_banner(
             ("radar every 6 min", args.radar),
             ("alerts" + ("" if args.weather else " (no --weather: outside air unknown)"), args.alerts),
             ("the batteries' cloud heater status", cloud_heater),
+            ("NOAA satellite cloud shade every 10 min", args.satellite),
         )
         if on
     ]
@@ -863,7 +865,18 @@ def cmd_poll(args: argparse.Namespace) -> int:
     cloud heater poller, then hand over to sigen.poll.run. USAGE for a bad
     combination or an address that won't resolve."""
     config = _config(args)
-    _print_settings(config, _settings(args, config, "poll", POLL_SETTINGS))
+    shown = _settings(args, config, "poll", POLL_SETTINGS)
+    heater_settings = config.commands.get("poll", {}).get("heater", {})
+    if args.cloud and config.cloud is not None:  # the heater job's cadence, config only (poll.heater)
+        shown += [
+            (
+                f"poll.heater.{name}",
+                f"{heater_settings.get(name, default):g}",
+                "config" if name in heater_settings else "default",
+            )
+            for name, (default, _, _) in HEATER_SETTINGS.items()
+        ]
+    _print_settings(config, shown)
     if problem := _poll_arg_error(args):
         err(f"error: {problem}")
         return ExitCode.USAGE
@@ -881,7 +894,8 @@ def cmd_poll(args: argparse.Namespace) -> int:
         background, store = _background(args, config, url, watcher)
         cloud_heater = None
         if args.cloud and config.cloud is not None:
-            cloud_heater = heater.HeaterPoller.from_config(config.cloud, url, out=print, err=err)
+            cloud_heater = heater.HeaterPoller.from_config(config.cloud, url, heater_settings, out=print, err=err)
+        shade = satellite.Filler(config.require_site(), url, out=print, err=err) if args.satellite else None
         following = mac if rediscover else None
         print(_poll_banner(args, ip, units, url, following, cloud_heater is not None), file=sys.stderr)
         connector_for = lambda address, unit: _connector(args, unit, ip=address)
@@ -897,6 +911,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
             background=background,
             watcher=watcher,
             cloud_heater=cloud_heater,
+            satellite=shade,
         )
     finally:
         for s in (store, alert_store):
@@ -1022,13 +1037,15 @@ def _local_time(text: str, timezone: str, what: str) -> datetime.datetime:
 
 
 def cmd_satellite(args: argparse.Namespace) -> int:
-    """`sigen satellite`: add the GOES scans of a local day (or --start to
-    --end) around the site to the per-day cubes; with --record-to-db, also
-    store each scan's shade over the site, or the run's failure (then
-    CONNECTION)."""
+    """`sigen satellite`: store the shade of every GOES scan of a local day (or --start to --end) that the
+    satellite_shade table is missing, fetched into memory (sigen.satellite; PRECONDITION if another run has the
+    database, CONNECTION if NOAA couldn't be reached). With --cube-dir instead: add the scans to per-day cubes there,
+    and with --record-to-db also store the shade from them."""
     config = _config(args)
     site = config.require_site()
-    cube_dir = args.cube_dir if args.cube_dir is not None else config.cube_dir()
+    if args.cube_dir is None and (args.products is not None or args.workers is not None):
+        err("error: --products and --workers go with --cube-dir (without it, each scan takes all three products)")
+        return ExitCode.USAGE
     try:
         if args.start or args.end:
             if not (args.start and args.end) or args.day:
@@ -1050,8 +1067,63 @@ def cmd_satellite(args: argparse.Namespace) -> int:
         err("error: --end must be after --start")
         return ExitCode.USAGE
     daylight = None if args.all_day else args.daylight
+    if args.cube_dir is None:
+        return _fill_satellite(args, config, start, end, daylight)
+    return _satellite_cubes(args, config, start, end, daylight)
+
+
+def _fill_satellite(
+    args: argparse.Namespace,
+    config: Config,
+    start: datetime.datetime,
+    end: datetime.datetime,
+    daylight: float | None,
+) -> int:
+    """`sigen satellite` without --cube-dir: the scans satellite_shade is missing, into it (sigen.satellite.fill)."""
+    site = config.require_site()
     err(
-        f"GOES-{args.satellite} {', '.join(args.products)} ±{args.km:g} km around {site.latitude}, {site.longitude}, "
+        f"GOES-{args.satellite} shade ±{args.km:g} km around {site.latitude}, {site.longitude}, "
+        f"{start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} {site.timezone}"
+        + ("" if daylight is None else f", within {daylight:g} min of daylight")
+        + ", the scans the database is missing"
+    )
+    conn = db.connect(config.require_database_url())
+    try:
+        db.check_ready(conn)
+        result = satellite.fill(
+            conn,
+            satellite.Listings(args.satellite, args.sector),
+            site,
+            start,
+            end,
+            km=args.km,
+            daylight_minutes=daylight,
+            log=print,
+        )
+    finally:
+        conn.close()
+    line = satellite.summarize(result)
+    if result.locked_out:
+        err(f"error: {line}: another `sigen satellite` or `sigen poll` is filling this database's satellite_shade")
+        return ExitCode.PRECONDITION
+    print(line, file=sys.stderr if result.error or result.failed else sys.stdout)
+    return ExitCode.CONNECTION if result.error else ExitCode.OK
+
+
+def _satellite_cubes(
+    args: argparse.Namespace,
+    config: Config,
+    start: datetime.datetime,
+    end: datetime.datetime,
+    daylight: float | None,
+) -> int:
+    """`sigen satellite --cube-dir DIR`: the scans into per-day cubes there (sigen.goes.build_cubes); with
+    --record-to-db, also each scan's shade from the cubes, or the run's failure (then CONNECTION)."""
+    site = config.require_site()
+    cube_dir = config.cube_dir() if args.cube_dir is True else args.cube_dir  # --cube-dir alone: the config's
+    products = args.products or list(goes.PRODUCTS)
+    err(
+        f"GOES-{args.satellite} {', '.join(products)} ±{args.km:g} km around {site.latitude}, {site.longitude}, "
         f"{start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} {site.timezone}"
         + ("" if daylight is None else f", within {daylight:g} min of daylight")
         + f", into {cube_dir}"
@@ -1070,11 +1142,11 @@ def cmd_satellite(args: argparse.Namespace) -> int:
                 start=start,
                 end=end,
                 cube_dir=cube_dir,
-                products=args.products,
+                products=products,
                 km=args.km,
                 satellite=args.satellite,
                 sector=args.sector,
-                workers=args.workers,
+                workers=args.workers or goes.DEFAULT_WORKERS,
                 daylight_minutes=daylight,
                 log=print,
             )
@@ -1675,8 +1747,9 @@ def build_parser() -> argparse.ArgumentParser:
         "checks, Open-Meteo at each resolution, radar, the satellite), the stretches over the last --since with no "
         "good row for longer than its min gap: by default 3 x the interval its rows normally come at (readings: "
         "poll.interval), so a gap is at least three missed in a row. Each shows the failed attempts stored inside "
-        "it, with their commonest error. The satellite counts daylight only, and is fetched only while a dashboard "
-        "page is open. daily_energy lists its missing days. `sigen sync --fill-gaps` fills them from a peer.",
+        "it, with their commonest error. The satellite counts daylight only, and is checked only with "
+        "poll.satellite on in the config. daily_energy lists its missing days. "
+        "`sigen sync --fill-gaps` fills them from a peer.",
     )
     _gap_arguments(dg)
     dg.add_argument(
@@ -1927,7 +2000,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _config_option(
         pl,
-        "database.url, devices.inverter (ip, mac, units), site for --weather / --radar, and the "
+        "database.url, devices.inverter (ip, mac, units), site for --weather / --radar / --satellite, and the "
         "poll section's settings",
     )
     pl.add_argument(
@@ -1972,6 +2045,14 @@ def build_parser() -> argparse.ArgumentParser:
         "reserve, alarms) over the last 6 hours and push new problems to the config's ntfy topic, "
         "each kind at most once an hour; every alert is logged in alert_log. Use with --weather "
         "for the outside air (default: poll.alerts in the config, else off)",
+    )
+    pl.add_argument(
+        "--satellite",
+        action=on_off,
+        help="also store NOAA GOES-West cloud shade over the config's site (satellite_shade, as `sigen satellite` "
+        "does): each daylight scan once all three of its products are published, every 10 min (at :04:30, "
+        ":14:30, …), catching up on the last 7 days one scan at a time, in a thread of its own (default: "
+        "poll.satellite in the config, else off)",
     )
     pl.add_argument(
         "--cloud",
@@ -2046,20 +2127,20 @@ def build_parser() -> argparse.ArgumentParser:
         "satellite",
         formatter_class=fmt,
         epilog=EXIT_CODE_HELP,
-        help="store NOAA GOES-West cloud data around the site (per-day cubes)",
-        description="Cut a box around the config's site out of every NOAA GOES-West scan (one "
-        "every 10 minutes: clear-sky mask, cloud optical depth, cloud-top height) and "
-        "add it to per-day HDF5 files ('cubes') in --cube-dir. Reads only "
-        "the box from NOAA's public AWS bucket (HTTP Range requests, ~2.5 MB a scan for "
-        "all three products instead of ~33 MB), several scans at once. Scans already in "
-        "a cube are skipped, so re-running only fetches what's new. Each cube is updated "
-        "by appending to a copy and swapping it in, so readers never see half a scan. "
-        "One run at a time per --cube-dir (satellite.pid there): exit 7 if another is "
-        "still running. Exit 3 if NOAA couldn't be reached.",
+        help="store NOAA GOES-West cloud shade over the site (the satellite_shade table)",
+        description="For every NOAA GOES-West scan in the window (one every 10 minutes) that the "
+        "satellite_shade table doesn't have yet, cut a box around the config's site out of its "
+        "three products (clear-sky mask, cloud optical depth, cloud-top height), compute the "
+        "cloud shade over the site and store it. Reads only the boxes from NOAA's public AWS "
+        "bucket (HTTP Range requests, ~3 MB a scan instead of ~33 MB), into memory: no files. A "
+        "scan is fetched only once all three products are published (~10 to 20 minutes after "
+        "it starts), newest first, one at a time. One run at a time per database (sigen poll's "
+        "satellite job too): exit 7 if another has it. Exit 3 if NOAA couldn't be reached. "
+        "With --cube-dir instead: add the boxes to per-day HDF5 files ('cubes') there, several "
+        "scans at once, skipping those already in a cube (one run at a time per --cube-dir: "
+        "satellite.pid there); --record-to-db also stores the shade from them.",
     )
-    _config_option(
-        sa, "site (where the box is centred, and its timezone for the dates; database.url for --record-to-db)"
-    )
+    _config_option(sa, "site (where the box is centred, and its timezone for the dates) and database.url")
     sa.add_argument("--day", metavar="DATE", help="local date, e.g. 2026-10-10 (default: today)")
     sa.add_argument(
         "--start", metavar="TIME", help='local start, e.g. "2026-10-10 06:00" (with --end, instead of --day)'
@@ -2068,9 +2149,8 @@ def build_parser() -> argparse.ArgumentParser:
     sa.add_argument(
         "--products",
         nargs="+",
-        default=["ACM", "COD", "ACHA"],
         choices=["ACM", "COD", "ACHA"],
-        help="clear-sky mask, cloud optical depth, cloud-top height (default: all three)",
+        help="with --cube-dir: clear-sky mask, cloud optical depth, cloud-top height (default: all three)",
     )
     sa.add_argument(
         "--km",
@@ -2087,20 +2167,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="only scans from MINUTES before sunrise to MINUTES after sunset (default: 60)",
     )
     daylight.add_argument("--all-day", action="store_true", help="every scan, night included")
-    sa.add_argument("--workers", type=_positive(int, 1), default=8, help="scans fetched at once (default: 8)")
+    sa.add_argument(
+        "--workers",
+        type=_positive(int, 1),
+        help=f"with --cube-dir: scans fetched at once (default: {goes.DEFAULT_WORKERS})",
+    )
     sa.add_argument(
         "--cube-dir",
         metavar="DIR",
         type=Path,
-        help="where the cubes go (default: the config's satellite.cube_dir, else "
-        "captures/satellite/cubes next to the config file)",
+        nargs="?",
+        const=True,
+        help="keep the boxes in per-day cubes in DIR instead, for looking at the pixels yourself (no DIR: the "
+        "config's satellite.cube_dir, else captures/satellite/cubes next to the config file). NOAA keeps every "
+        "scan since 2022-05-11, so they can always be fetched again",
     )
     sa.add_argument("--satellite", default="18", help="GOES satellite number (default: 18, GOES-West)")
     sa.add_argument(
         "--record-to-db",
         action="store_true",
-        help="also compute and store each scan's cloud shade over the site (the strip values) in the "
-        "satellite_shade table",
+        help="with --cube-dir: also compute and store each scan's cloud shade from the cubes in the satellite_shade "
+        "table (without --cube-dir, that's what it always does)",
     )
     sa.add_argument("--sector", default="F", choices=["F", "C"], help="F = full disk (default), C = CONUS")
     sa.set_defaults(func=cmd_satellite)

@@ -128,7 +128,7 @@ def test_sync_table_skips_rows_already_local(conn, monkeypatch):
 def test_sync_endpoints(conn, db_url):
     _weather(conn, _t(5))
     _weather(conn, _t(9))
-    client = dashboard.create_app(Config(database_url=db_url, origin="t"), launcher=None).test_client()
+    client = dashboard.create_app(Config(database_url=db_url, origin="t")).test_client()
 
     schema = client.get("/sync/schema")
     assert schema.status_code == 200 and schema.get_json()["fully_migrated"] is True
@@ -241,7 +241,7 @@ def live_url(db_url):
 
     from werkzeug.serving import make_server
 
-    app = dashboard.create_app(Config(database_url=db_url, origin="t"), launcher=None)
+    app = dashboard.create_app(Config(database_url=db_url, origin="t"))
     server = make_server("127.0.0.1", 0, app, threaded=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

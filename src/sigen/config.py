@@ -26,13 +26,15 @@ else reads it. site is where the panels are: `sigen weather` and `sigen radar` (
 in local time; the weather tables themselves are in UTC. alerts is where notifications go: an ntfy
 topic (ntfy_server defaults to https://ntfy.sh). On a public server the topic name is the only
 secret, so it lives here rather than in the code, and is masked in what sigen prints. satellite.cube_dir is where
-`sigen satellite` keeps its cubes and the dashboard reads them; a relative directory is relative to the config
-file's own folder (default: captures/satellite/cubes there).
+`sigen satellite --cube-dir` (given no directory) keeps its cubes; a relative directory is relative to the config
+file's own folder (default: captures/satellite/cubes there). Nothing else writes cubes: the shade goes straight to
+the database.
 
 poll and dashboard hold that command's settings, named like its options without the dashes (COMMAND_SETTINGS):
 what this computer's `sigen poll` / `sigen dashboard` does without them on the command line. An option given on the
 command line wins (`--no-weather` over "weather": true); a setting in neither takes the option's built-in default.
-A relative capture directory is relative to the config file's folder.
+A relative capture directory is relative to the config file's folder. poll.heater is a section of its own, config
+only (HEATER_SETTINGS): the cloud heater job's cadence, e.g. {"on_interval": 15}.
 
 Which file: get_config() takes --config if given, else the file named by $SIGEN_CONFIG, else the
 nearest config.json in the current directory or above it (the repo's, from anywhere inside it).
@@ -65,10 +67,21 @@ COMMAND_SETTINGS: dict[str, dict[str, tuple]] = {
         "radar": ("bool",),
         "alerts": ("bool",),
         "cloud": ("bool",),
+        "satellite": ("bool",),
         "capture_open_meteo_weather": ("dir",),
         "capture_radar": ("dir",),
+        "heater": ("heater",),  # a section of its own (HEATER_SETTINGS), config only: no command-line option
     },
     "dashboard": {"host": ("text",), "port": ("integer", 1, 65535), "reload": ("bool",)},
+}
+# poll.heater: the cloud heater job's cadence (sigen.heater), each optional: name -> (default, low, high). The
+# intervals are seconds between ticks, and each tick asks about one pack (they take turns).
+HEATER_SETTINGS: dict[str, tuple[float, float, float]] = {
+    "slow_interval": (600.0, 5, 86400),  # at rest
+    "fast_interval": (60.0, 5, 86400),  # PV over fast_pv_kw with the coolest cluster under fast_below_c
+    "on_interval": (60.0, 5, 86400),  # a heater seen on lately
+    "fast_pv_kw": (0.2, 0, 100),
+    "fast_below_c": (15.0, -40, 80),
 }
 
 
@@ -192,8 +205,8 @@ class Config:
         return f" ({self.origin})" if self.origin else ""
 
     def cube_dir(self) -> Path:
-        """Where the satellite cubes are: satellite.cube_dir (by default captures/satellite/cubes next to the config
-        file), or captures/satellite/cubes in the current directory without a config file."""
+        """Where `sigen satellite --cube-dir` keeps its cubes: satellite.cube_dir (by default captures/satellite/cubes
+        next to the config file), or captures/satellite/cubes in the current directory without a config file."""
         return self.satellite_cube_dir if self.satellite_cube_dir is not None else DEFAULT_CUBE_DIR
 
     def require_database_url(self) -> str:
@@ -457,6 +470,8 @@ def _command_settings(path: Path, command: str, spec: Any) -> dict[str, Any]:
             out[name] = value
         elif kind[0] == "number":
             out[name] = _number(path, where, value, kind[1], kind[2])
+        elif kind[0] == "heater":
+            out[name] = _heater_settings(path, where, value)
         elif kind[0] == "integer":
             if isinstance(value, bool) or not isinstance(value, int) or not kind[1] <= value <= kind[2]:
                 raise ConfigError(f"{path}: {where} must be a whole number from {kind[1]} to {kind[2]}, got {value!r}")
@@ -465,6 +480,27 @@ def _command_settings(path: Path, command: str, spec: Any) -> dict[str, Any]:
             raise ConfigError(f"{path}: {where} must be a non-empty string, got {value!r}")
         else:
             out[name] = path.resolve().parent / value.strip() if kind[0] == "dir" else value.strip()
+    return out
+
+
+def _heater_settings(path: Path, where: str, spec: Any) -> dict[str, float]:
+    """poll.heater: the settings given, each checked against HEATER_SETTINGS (the others stay out: their defaults
+    apply), and the intervals, with the defaults filled in, in order: slow_interval >= fast_interval >= on_interval."""
+    example = '{"slow_interval": 600, "fast_interval": 60, "on_interval": 15}'
+    if not isinstance(spec, dict):
+        raise ConfigError(f"{path}: {where} must be an object of settings, e.g. {example}")
+    unknown = set(spec) - set(HEATER_SETTINGS)
+    if unknown:
+        raise ConfigError(
+            f"{path}: {where}: unknown setting(s) {', '.join(sorted(unknown))}; known: {', '.join(HEATER_SETTINGS)}"
+        )
+    out = {name: _number(path, f"{where}.{name}", value, *HEATER_SETTINGS[name][1:]) for name, value in spec.items()}
+    slow, fast, on = (out.get(n, HEATER_SETTINGS[n][0]) for n in ("slow_interval", "fast_interval", "on_interval"))
+    if not slow >= fast >= on:
+        raise ConfigError(
+            f"{path}: {where}: the intervals must run slow_interval >= fast_interval >= on_interval "
+            f"(with the defaults filled in: {slow:g} >= {fast:g} >= {on:g})"
+        )
     return out
 
 

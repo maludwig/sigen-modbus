@@ -16,24 +16,15 @@ The page keeps each chart's numbers and, for a window that reaches now, asks eve
 readings after its newest. Times go out in UTC; the browser shows them in its own zone. Read-only: each request uses
 its own connection in a read-only session. Failures come back as JSON errors, which the page shows under the chart.
 
-Satellite: with a site and a config file, opening the page starts `sigen satellite` for the window (up to
-MAX_FETCH long) as a separate process and doesn't wait for it, and so does each fetch of the string-power strips
-(every STRIPS_EVERY): its output goes to <cube dir>/satellite.log, and it refuses to run (exit 7) while another run
-for that cube directory is going. At most one start per window every FETCH_EVERY, and none while the last one this
-dashboard started is still running. The strips show whatever cubes exist when they're fetched (sigen satellite swaps
-each one in whole).
+Satellite: the strips show the satellite_shade rows there are; the dashboard never fetches any. `sigen poll
+--satellite` keeps the last week filled, and `sigen satellite --day DATE` fills an older day.
 """
 
 import datetime
 import json
 import math
-import os
-import subprocess
-import sys
-import threading
 import time
 from collections.abc import Callable, Mapping
-from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -73,9 +64,6 @@ QUICK = [("Today", {}), ("Last 10 min", {"minutes": "10"}), ("Last 30 min", {"mi
         ("Last 7 days", "168"),
     )
 ]
-FETCH_EVERY = datetime.timedelta(minutes=10)  # NOAA's scan interval
-MAX_FETCH = datetime.timedelta(days=3)  # longer windows don't start a fetch (a day is ~1 minute, ~210 MB)
-SATELLITE_LOG = "satellite.log"
 UPLOT = "https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot"  # .iife.min.js and .min.css (MIT, ~50 KB)
 LIVE_EVERY = 15  # seconds between the uPlot charts' checks for newer readings (a poll every 15 s)
 AIR_MARGIN = datetime.timedelta(hours=2)  # a top-up's Open-Meteo rows: stored minutes to an hour after their time
@@ -134,50 +122,6 @@ def model_end(end: datetime.datetime, site: Site, after: datetime.timedelta | No
     return min(end, sunset + after)
 
 
-def satellite_command(
-    config: Config, start: datetime.datetime, end: datetime.datetime, tz: datetime.tzinfo
-) -> list[str]:
-    """`sigen satellite` for [start, end) (local times, whole minutes: the end rounded up), with this config."""
-    end = end.astimezone(tz)
-    whole = end.replace(second=0, microsecond=0)
-    end = whole if whole == end else whole + datetime.timedelta(minutes=1)
-    return [
-        sys.executable,
-        "-m",
-        "sigen",
-        "satellite",
-        "--start",
-        f"{start.astimezone(tz):%Y-%m-%d %H:%M}",
-        "--end",
-        f"{end:%Y-%m-%d %H:%M}",
-        "--config",
-        str(config.path),
-        "--cube-dir",
-        str(config.cube_dir()),
-        "--record-to-db",
-    ]
-
-
-def launch_detached(command: list[str], log: Path) -> subprocess.Popen:
-    """Start `command` in its own process (no console window, not in this one's Ctrl+C group), output to `log`;
-    returns the Popen without waiting."""
-    log.parent.mkdir(parents=True, exist_ok=True)
-    flags = (
-        {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
-        if sys.platform == "win32"
-        else {"start_new_session": True}
-    )
-    with open(log, "w", encoding="utf-8") as out:  # the child has its own handle
-        return subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=out,
-            stderr=subprocess.STDOUT,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
-            **flags,
-        )
-
-
 def parse_window(
     args: Mapping[str, str], tz: datetime.tzinfo, now: datetime.datetime | None = None
 ) -> tuple[datetime.datetime, datetime.datetime, bool, str]:
@@ -212,35 +156,12 @@ def parse_window(
     return start, min(end, now) if live else end, live, f"{date:%A %Y-%m-%d}" + (" (so far)" if live else "")
 
 
-def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None = launch_detached) -> Flask:
-    """The dashboard. `launcher(command, log path)` starts the satellite fetch (None: never; tests pass a fake)."""
+def create_app(config: Config) -> Flask:
+    """The dashboard."""
     url = config.require_database_url()
     tz = ZoneInfo(config.site.timezone) if config.site else datetime.datetime.now().astimezone().tzinfo
     names = config.smart_load_names
     app = Flask(__name__)
-    fetch_lock = threading.Lock()
-    fetches: dict[str, object] = {"process": None}  # the last process started
-    last_start: dict[tuple[datetime.date, datetime.date], float] = {}  # window's local days -> time.monotonic()
-
-    def fetch_satellite(start: datetime.datetime, end: datetime.datetime) -> None:
-        """Start `sigen satellite` for the window, unless one of ours is running or this window had one lately."""
-        if launcher is None or config.site is None or config.path is None or end - start > MAX_FETCH:
-            return
-        key = (start.astimezone(tz).date(), end.astimezone(tz).date())
-        with fetch_lock:
-            process = fetches["process"]
-            if process is not None and process.poll() is None:
-                return
-            now = time.monotonic()
-            if key in last_start and now - last_start[key] < FETCH_EVERY.total_seconds():
-                return
-            last_start[key] = now
-            try:
-                fetches["process"] = launcher(
-                    satellite_command(config, start, end, tz), config.cube_dir() / SATELLITE_LOG
-                )
-            except OSError as e:
-                print(f"warning: couldn't start sigen satellite: {e}", file=sys.stderr)
 
     def day_nav(start: datetime.datetime, live: bool) -> list[tuple[str, dict[str, str]]]:
         """The previous / next day links (none after today)."""
@@ -422,10 +343,7 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
         """{"strips": [{"label", "starts": [ISO…], "length" (seconds), "colours": ["#rrggbb", or null: no data,
         hatched]}], "notes": [how to read them]}: the strips under the string-power chart: the radar
         (charts.precipitation_strip) and with a site the satellite (satellite_strips), for the whole window every
-        time. They change every few minutes, so the page fetches them again rather than topping them up. Each fetch
-        also starts `sigen satellite` for the window (fetch_satellite's limits apply), so a page left open (it never
-        reloads) keeps getting new scans."""
-        fetch_satellite(start, end)  # in the background: these are the cubes there are now
+        time. They change every few minutes, so the page fetches them again rather than topping them up."""
         strip, note = charts.precipitation_strip(charts.precipitation(conn, start, end))
         strips, notes = [strip], [note]
         # measured PV vs the clear-sky model, nearest the chart
@@ -576,7 +494,6 @@ def create_app(config: Config, launcher: Callable[[list[str], Path], Any] | None
         try:
             start, end, live, description = parse_window(args, tz)
             error = None
-            fetch_satellite(start, end)  # in the background: the page doesn't wait for it
         except BadWindow as e:
             start, live, description, error = None, False, "", str(e)
         live = live and error is None

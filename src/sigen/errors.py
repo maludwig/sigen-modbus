@@ -125,6 +125,11 @@ class CloudError(SigenError):
 
     exit_code = ExitCode.CONNECTION
 
+    def __init__(self, message: str, status: int | None = None, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.status = status  # the HTTP status, when the cloud answered at all
+        self.retry_after = retry_after  # seconds its Retry-After header asked for, if it sent one
+
 
 class SyncError(SigenError):
     """A problem syncing from a peer database: the peer is unreachable or returned an error, or a

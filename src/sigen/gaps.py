@@ -2,15 +2,15 @@
 --fill-gaps` fills them from a peer).
 
 Each table is one or more SERIES, each with the interval its good rows normally come at: readings (the plant's polls,
-every poll.interval), battery_heater (one per pack: the packs take turns, so heater.BASE_INTERVAL x the number of
+every poll.interval), battery_heater (one per pack: the packs take turns, so poll.heater.slow_interval x the number of
 packs), open_meteo_weather (one per resolution, 15 and 60 min), radar_frames (6 min) and satellite_shade (10 min). A
 gap is a stretch longer than the series' min gap (default MIN_GAP_FACTOR x its interval: that many rows missed in a
 row) between two good rows, or from the last good row to the end of the window (open-ended). Failed attempts stored
 inside it (rows with an error) are counted, with their commonest error, as its likely explanation.
 
-satellite_shade counts daylight only (NOAA's cloud products are daytime) and is fetched on demand (while a dashboard
-page is open), so its gaps usually just mean nobody was looking. daily_energy has a row per finished local day, so
-there each missing day is the gap (missing_days).
+satellite_shade counts daylight only (NOAA's cloud products are daytime), and is checked only where this computer's
+poll stores it (poll.satellite in the config): elsewhere nothing collects it, so it would be one long gap.
+daily_energy has a row per finished local day, so there each missing day is the gap (missing_days).
 """
 
 import collections
@@ -89,7 +89,6 @@ class Series:
     where: str = "TRUE"  # trusted SQL: this series' rows, using %(key)s
     key: object = None
     daylight_only: bool = False
-    on_demand: bool = False
 
     @property
     def name(self) -> str:
@@ -165,7 +164,7 @@ def daylight_between(a: datetime.datetime, b: datetime.datetime, lat: float, lon
 def default_series(conn: psycopg.Connection, config: Config, poll_interval: float) -> list[Series]:
     """The series to check, for the tables this database has: readings at `poll_interval` seconds, a heater series
     per pack (the config's cloud.batteries, else those in the table), Open-Meteo per resolution, radar, and the
-    satellite if the config has a site."""
+    satellite if the config has a site and poll.satellite is on."""
     have = {t for t in TABLES if conn.execute("SELECT to_regclass(%s)", (t,)).fetchone()[0] is not None}
     series = []
     if "readings" in have:
@@ -177,7 +176,8 @@ def default_series(conn: psycopg.Connection, config: Config, poll_interval: floa
     if "battery_heater" in have:
         packs = [i + 1 for i in range(len(config.cloud.batteries))] if config.cloud and config.cloud.batteries else []
         packs = packs or [b for (b,) in conn.execute("SELECT DISTINCT battery FROM battery_heater ORDER BY 1")]
-        every = datetime.timedelta(seconds=heater.BASE_INTERVAL * max(len(packs), 1))  # the packs take turns
+        slow = config.commands.get("poll", {}).get("heater", {}).get("slow_interval", heater.BASE_INTERVAL)
+        every = datetime.timedelta(seconds=slow * max(len(packs), 1))  # the packs take turns
         series += [
             Series("battery_heater", f"battery {b}", every, "polled_at", "polled_at", "battery = %(key)s", b)
             for b in packs
@@ -199,12 +199,8 @@ def default_series(conn: psycopg.Connection, config: Config, poll_interval: floa
         series.append(
             Series("radar_frames", "", datetime.timedelta(seconds=weather.RADAR_INTERVAL), "frame_at", "fetched_at")
         )
-    if "satellite_shade" in have and config.site is not None:
-        series.append(
-            Series(
-                "satellite_shade", "", SATELLITE_INTERVAL, "scan_at", "fetched_at", daylight_only=True, on_demand=True
-            )
-        )
+    if "satellite_shade" in have and config.site is not None and config.commands.get("poll", {}).get("satellite"):
+        series.append(Series("satellite_shade", "", SATELLITE_INTERVAL, "scan_at", "fetched_at", daylight_only=True))
     return series
 
 

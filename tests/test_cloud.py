@@ -1,6 +1,8 @@
 """The config's cloud section, sigen.cloud.CloudClient and `sigen cloud …`, against a local stand-in for the
 Sigen cloud. No network, no real credentials."""
 
+import datetime
+import email.utils
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,10 +37,12 @@ def fake_cloud():
         }
 
     class Handler(BaseHTTPRequestHandler):
-        def _reply(self, obj, status=200):
+        def _reply(self, obj, status=200, headers=()):
             data = json.dumps(obj).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
+            for name, value in headers:
+                self.send_header(name, value)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -62,6 +66,10 @@ def fake_cloud():
             )
             if server.get_status == 401:
                 return self._reply({"code": 10401, "msg": "unauthorized"}, status=401)
+            if server.get_status == 429:
+                return self._reply(
+                    {"code": 429, "msg": "too many requests"}, status=429, headers=[("Retry-After", "120")]
+                )
             if u.path.startswith("/device/gateway/"):
                 return self._reply({"code": 0, "msg": "success", "data": {"deviceModel": "Sigen LoadHub"}})
             sn = parse_qs(u.query).get("snCode", [""])[0]
@@ -278,8 +286,32 @@ def test_get_401(tmp_path, fake_cloud):
     c = client(tmp_path, fake_cloud)
     c.login("me@example.com", "pw")
     fake_cloud.get_status = 401
-    with pytest.raises(CloudError, match="401"):
+    with pytest.raises(CloudError, match="401") as e:
         c.gateway(STATION)
+    assert e.value.status == 401
+
+
+def test_a_rate_limited_answer_carries_its_retry_after(tmp_path, fake_cloud, hangs_up):
+    c = client(tmp_path, fake_cloud)
+    c.login("me@example.com", "pw")
+    fake_cloud.get_status = 429
+    with pytest.raises(CloudError, match="HTTP 429") as e:
+        c.gateway(STATION)
+    assert (e.value.status, e.value.retry_after) == (429, 120.0)
+    unreachable = CloudClient(tmp_path / "token.json", base_url=f"http://127.0.0.1:{hangs_up}", timeout=2)
+    with pytest.raises(CloudError, match="couldn't reach") as e:
+        unreachable.gateway(STATION)
+    assert (e.value.status, e.value.retry_after) == (None, None)
+
+
+def test_retry_after_parsing():
+    assert cloud.retry_after({"Retry-After": "30"}) == 30.0
+    assert cloud.retry_after({"Retry-After": "-5"}) == 0.0
+    assert cloud.retry_after({}) is None and cloud.retry_after(None) is None
+    assert cloud.retry_after({"Retry-After": "soon"}) is None
+    assert cloud.retry_after({"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}) == 0.0  # a date in the past
+    later = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=5)
+    assert 250 < cloud.retry_after({"Retry-After": email.utils.format_datetime(later, usegmt=True)}) <= 300
 
 
 def test_get_does_not_refresh(tmp_path, fake_cloud):

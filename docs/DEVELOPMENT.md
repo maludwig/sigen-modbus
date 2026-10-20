@@ -32,8 +32,9 @@ src/sigen/
   migrations/       numbered SQL migrations
   poll.py           the poll loop
   weather.py        Open-Meteo and radar fetching, parsing, storing; the background scheduler
-  goes.py           NOAA GOES-West satellite cubes
-  goes_shade.py     the cubes → each scan's sun through the cloud over the site (satellite_shade)
+  goes.py           NOAA GOES-West: the bucket listing, cutting a scan's box (in memory), the optional cubes
+  goes_shade.py     a scan's boxes (or the cubes) → its sun through the cloud over the site
+  satellite.py      which scans satellite_shade is missing, fetching them one at a time; poll's satellite job
   daily.py          daily_energy: each finished day's totals, flows and clear-sky energy; the all-time sum
   sync.py           `sigen sync`: copying missing rows from another machine's dashboard
   glitches.py       the rules that flag a poll's readings as not to be trusted (readings.glitch)

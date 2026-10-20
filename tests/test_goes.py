@@ -387,7 +387,8 @@ def test_cli_builds_a_day(run, tmp_path, site_config, monkeypatch):
         1,
         "--products",
         "ACM",
-    )  # no --cube-dir: next to the config
+        "--cube-dir",
+    )  # --cube-dir without a directory: next to the config
     assert (
         code == ExitCode.OK and (tmp_path / "captures" / "satellite" / "cubes" / "goes18_ACMF_2026-10-10.h5").exists()
     )

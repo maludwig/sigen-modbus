@@ -139,13 +139,14 @@ def test_poll_prints_each_setting_and_where_it_came_from(run, tmp_path, config, 
     assert code == ExitCode.OK and "1 stored, 0 failed" in out
     lines = err.splitlines()
     start = lines.index(f"Settings (config: {f}):")
-    assert [line.split() for line in lines[start + 1 : start + 9]] == [
+    assert [line.split() for line in lines[start + 1 : start + 10]] == [
         ["--interval", "1", "config"],
         ["--offset", "0", "default"],
         ["--weather", "off", "config"],
         ["--radar", "off", "default"],
         ["--alerts", "off", "command", "line"],
         ["--cloud", "on", "default"],
+        ["--satellite", "off", "default"],
         ["--capture-open-meteo-weather", "(none)", "default"],
         ["--capture-radar", "(none)", "default"],
     ]

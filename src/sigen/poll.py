@@ -104,6 +104,7 @@ def run(
     background: weather.Background | None = None,
     watcher: "sigen.alerts.Watcher | None" = None,
     cloud_heater: "sigen.heater.HeaterPoller | None" = None,
+    satellite: "sigen.satellite.Filler | None" = None,
     glitch_retries: int = GLITCH_RETRIES,
     glitch_retry_delay: float = GLITCH_RETRY_DELAY,
     out: Callable[[str], None] = print,
@@ -128,7 +129,8 @@ def run(
     after it's stored, and gets a few seconds at the end to send what's queued. cloud_heater (a
     sigen.heater.HeaterPoller, with a "cloud" config section) logs each battery pack's heating
     status from the cloud on its own gated cadence, fed the PV and temperature of each poll
-    through observe(). None of these can stop the polling.
+    through observe(). satellite (a sigen.satellite.Filler, for --satellite) stores NOAA's cloud
+    shade in a thread of its own. None of these can stop the polling.
 
     After a glitched poll (poll_verdict), the next poll is `glitch_retry_delay` seconds later
     rather than on the schedule, up to `glitch_retries` in a row, and only if that's before the
@@ -154,6 +156,8 @@ def run(
             background.start()
         if cloud_heater is not None:
             cloud_heater.start()
+        if satellite is not None:
+            satellite.start()
         deadline = monotonic()  # the next scheduled poll
         retry_at: float | None = None  # a glitch retry, sooner than that
         retries = 0  # glitch retries in a row so far
@@ -238,6 +242,8 @@ def run(
             background.stop()
         if cloud_heater is not None:
             cloud_heater.stop()
+        if satellite is not None:
+            satellite.stop()
         if watcher is not None:
             watcher.stop()
         if polls:

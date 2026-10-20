@@ -426,6 +426,14 @@ def test_table_sizes_count_the_last_day(conn):
     assert db.TableSize("t", 1000, 0, True, "x", 0).bytes_per_day == 0.0
 
 
+def test_every_table_has_a_row_time_or_says_it_has_none(conn):
+    db.migrate(conn)
+    tables = {t.name for t in db.table_sizes(conn)}
+    assert tables == set(db.ROW_TIMES) | db.NO_ROW_TIME and not set(db.ROW_TIMES) & db.NO_ROW_TIME
+    for table, column in db.ROW_TIMES.items():
+        conn.execute(f'SELECT "{column}" FROM "{table}" LIMIT 0')  # the column exists
+
+
 # ---------- query ----------
 def add_reading(conn, error=None):
     return conn.execute(
