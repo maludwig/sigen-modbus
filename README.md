@@ -579,7 +579,8 @@ Tables:
   is a row with the `error` and `scan_at` NULL, a scan that failed on its own one with its `scan_at`.
 - `battery_heater`: one row per cloud poll of a battery pack's heating status (`sigen poll` with a
   `cloud` section): `polled_at`, `battery` (1 or 2, the pack's place in `cloud.batteries`),
-  `heater_on` (NULL on a cloud error), `error`.
+  `heater_on` (NULL on a cloud error), `error`, and the pack's own `soc_pct`, `power_kw` (+ charging)
+  and `voltage_v` from the same answer (NULL before migration 0013 and on a cloud error).
 - `schema_migrations`: which migrations have been applied.
 
 Plant and inverter every 15 seconds take about 10 MB a day (~4 GB a year); `sigen db status`

@@ -12,7 +12,9 @@ Cadence (Mitchell's design; the config's poll.heater can set each number, sigen.
 might run -- PV over `pv_threshold` (fast_pv_kw) and the coolest cluster under `cold_threshold` (fast_below_c); and
 every `on_interval` (1 min unless set) while a pack's heater is on or was seen on in the last ON_HOLD, to catch the
 next of its short bursts. Each tick queries ONE pack (round-robin); if its state changed, the other pack(s) are
-queried at once, to catch the ~10-minute stagger between them. Every poll is stored (no dedup), one row per query.
+queried at once, to catch the ~10-minute stagger between them. Every poll is stored (no dedup), one row per query,
+with the rest of the pack's answer: its own SOC, charge/discharge power and voltage (readings_from), which the Modbus
+registers only give for the whole battery.
 
 Back-off: after a failed query (the cloud unreachable or answering with an error, a token refresh that failed), the
 wait doubles with each failure in a row, is at least what a Retry-After header asked for, and never more than
@@ -52,6 +54,12 @@ SETTING_ARGS = {
 }
 PV_REGISTER = "inverter_pv_power"
 COOLEST_REGISTER = "inverter_ess_min_cluster_temperature"
+# The answer's other rows, stored with each poll: paramKey -> (battery_heater column, {unit: factor to its unit}).
+PACK_READINGS = {
+    "Battery SOC": ("soc_pct", {"%": 1.0}),
+    "Charging & Discharging Power": ("power_kw", {"kW": 1.0, "W": 0.001}),
+    "Battery Pack Voltage": ("voltage_v", {"V": 1.0, "mV": 0.001}),
+}
 
 
 def heating_from(data: Any) -> bool | None:
@@ -63,6 +71,25 @@ def heating_from(data: Any) -> bool | None:
             if value in ("on", "off"):
                 return value == "on"
     return None
+
+
+def readings_from(data: Any) -> dict[str, float]:
+    """The pack's SOC, power and voltage from a dynamic-info response, as {column: value} (PACK_READINGS); a row
+    that's missing, isn't a number or has a unit we don't know is left out (so its column stays NULL)."""
+    rows = data.get("realTimeInfo", []) if isinstance(data, dict) else []
+    out = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("paramKey") not in PACK_READINGS:
+            continue
+        column, units = PACK_READINGS[row["paramKey"]]
+        factor = units.get(str(row.get("paramValueUnit", "")).strip())
+        try:
+            value = float(str(row.get("paramValueText", "")).strip())
+        except ValueError:
+            continue
+        if factor is not None:
+            out[column] = value * factor
+    return out
 
 
 def gate_values(results: dict[int, PollResult], units: dict[int, str]) -> tuple[float | None, float | None]:
@@ -266,15 +293,18 @@ class HeaterPoller:
         heating: bool | None = None
         error: str | None = None
         retry_after: float | None = None
+        readings: dict[str, float] = {}
         try:
             self._client.ensure_fresh()  # refresh only when the token is within an hour of expiry
             data = self._client.device_dynamic_info(self._station, sn, DEVICE_BATTERY)
             heating = heating_from(data)
             if heating is None:
                 error = "no Heating status in the response"
+            else:
+                readings = readings_from(data)
         except CloudError as e:
             error, retry_after = str(e), e.retry_after
-        written = self._write(conn, polled_at, i + 1, heating, error)
+        written = self._write(conn, polled_at, i + 1, heating, error, readings)
         status = "written successfully" if written else "database unwritten"
         if error is None:
             self._failures, self._retry_after = 0, None
@@ -301,13 +331,17 @@ class HeaterPoller:
         battery: int,
         heater_on: bool | None,
         error: str | None,
+        readings: dict[str, float] | None = None,
     ) -> bool:
-        """Store one poll's row; on any database trouble warn once, flag the connection for reopening, and return
-        False so the caller logs it unwritten. A database outage must never stop the heater thread."""
+        """Store one poll's row (with the pack's readings_from values, if any); on any database trouble warn once,
+        flag the connection for reopening, and return False so the caller logs it unwritten. A database outage must
+        never stop the heater thread."""
         if conn is None:
             return False
         try:
-            db.insert_battery_heater(conn, polled_at=polled_at, battery=battery, heater_on=heater_on, error=error)
+            db.insert_battery_heater(
+                conn, polled_at=polled_at, battery=battery, heater_on=heater_on, error=error, **(readings or {})
+            )
             self._last_db_error = None
             return True
         except Exception as e:

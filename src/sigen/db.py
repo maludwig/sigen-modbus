@@ -706,13 +706,18 @@ def insert_battery_heater(
     battery: int,
     heater_on: bool | None,
     error: str | None = None,
+    soc_pct: float | None = None,
+    power_kw: float | None = None,
+    voltage_v: float | None = None,
 ) -> int:
-    """One cloud poll of a battery pack's heating status -> its battery_heater id. Exactly one of heater_on / error
-    is set (the table's CHECK): heater_on on a reading, error on a grumpy poll (then heater_on stays NULL)."""
+    """One cloud poll of a battery pack's heating status (and its SOC, power and voltage, where the answer had them)
+    -> its battery_heater id. Exactly one of heater_on / error is set (the table's CHECK): heater_on on a reading,
+    error on a grumpy poll (then heater_on stays NULL)."""
     with errors_as("storing the battery heater poll failed"):
         return conn.execute(
-            "INSERT INTO battery_heater (polled_at, battery, heater_on, error) VALUES (%s, %s, %s, %s) RETURNING id",
-            (polled_at, battery, heater_on, error),
+            "INSERT INTO battery_heater (polled_at, battery, heater_on, error, soc_pct, power_kw, voltage_v) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (polled_at, battery, heater_on, error, soc_pct, power_kw, voltage_v),
         ).fetchone()[0]
 
 

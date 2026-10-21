@@ -74,7 +74,8 @@ def test_migrate_creates_everything_and_is_idempotent(run, config, conn):
     assert "0004_wide_values" in out and "0005_alert_log" in out and "0006_daily_energy" in out
     assert "0007_glitch" in out and "0008_battery_heater" in out and "0009_timestamp_brin" in out
     assert "0010_satellite_shade" in out and "0011_daily_clear_sky" in out
-    assert "0012_drop_register_values_v1" in out and "Applied 12 migration" in out
+    assert "0012_drop_register_values_v1" in out and "0013_battery_heater_pack_readings" in out
+    assert "Applied 13 migration" in out
     assert conn.execute("SELECT count(*) FROM register_meta").fetchone()[0] == len(db.STORED_REGISTERS)
     assert conn.execute(
         "SELECT name, type, gain, unit, device FROM register_meta WHERE address = 30005"
@@ -130,6 +131,7 @@ def test_0002_upgrades_existing_readings(conn):
         "0010_satellite_shade",
         "0011_daily_clear_sky",
         "0012_drop_register_values_v1",
+        "0013_battery_heater_pack_readings",
     ]
     assert conn.execute("SELECT unit_id, poll_id FROM readings WHERE id = %s", (rid,)).fetchone() == (247, rid)
     assert conn.execute(
@@ -176,8 +178,8 @@ def until_0011(conn):
 
 
 def migrate_0012(conn):
-    """Apply 0012 and check it took the view and register_values_v1 away."""
-    assert db.migrate(conn) == ["0012_drop_register_values_v1"]
+    """Apply 0012 (and the migrations after it) and check it took the view and register_values_v1 away."""
+    assert db.migrate(conn)[0] == "0012_drop_register_values_v1"
     gone = conn.execute("SELECT to_regclass('register_values'), to_regclass('register_values_v1')").fetchone()
     assert gone == (None, None)
 

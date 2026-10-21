@@ -9,7 +9,7 @@ import pytest
 
 from sigen.config import Cloud, parse_config
 from sigen.errors import CloudError, ConfigError, ExitCode
-from sigen.heater import HeaterPoller, gate_values, heating_from
+from sigen.heater import HeaterPoller, gate_values, heating_from, readings_from
 from sigen.registers import ALL_REGISTERS
 
 from test_db import conn, db_url  # noqa: F401  (pytest fixtures)
@@ -49,12 +49,24 @@ class FakeClient:
         v = self.heating[sn]
         if isinstance(v, Exception):
             raise v
-        return {
-            "realTimeInfo": [
-                {"paramKey": "Battery SOC", "paramValue": "52 %"},
-                {"paramKey": "Heating status", "paramValue": v},
-            ]
-        }
+        return answer(v)
+
+
+def row(key, text, unit):
+    return {"paramKey": key, "paramValue": f"{text}{unit}", "paramValueText": text, "paramValueUnit": unit}
+
+
+def answer(heating, soc="52.0", power="-0.355", power_unit="kW", voltage="19.9"):
+    """A dynamic-info answer as the cloud sends it."""
+    return {
+        "realTimeInfo": [
+            row("Battery SOC", soc, "%"),
+            row("Charging & Discharging Power", power, power_unit),
+            row("Battery Pack Voltage", voltage, "V"),
+            row("Heating status", heating, ""),
+        ],
+        "dataCurrTimeStamp": "",
+    }
 
 
 def poller(client, **kw):
@@ -76,6 +88,14 @@ def test_heating_from():
     assert heating_from({"realTimeInfo": [{"paramKey": "Heating status", "paramValue": "Off"}]}) is False
     assert heating_from({"realTimeInfo": [{"paramKey": "Battery SOC", "paramValue": "52 %"}]}) is None
     assert heating_from({}) is None and heating_from(None) is None
+
+
+def test_readings_from():
+    assert readings_from(answer("Off")) == {"soc_pct": 52.0, "power_kw": -0.355, "voltage_v": 19.9}
+    assert readings_from(answer("Off", power="-355", power_unit="W"))["power_kw"] == pytest.approx(-0.355)
+    odd = readings_from(answer("Off", soc="--", power_unit="MW"))  # not a number; a unit we don't know
+    assert odd == {"voltage_v": 19.9}
+    assert readings_from({}) == {} and readings_from(None) == {}
 
 
 def test_gate_values():
@@ -220,8 +240,11 @@ def test_query_stores_and_detects_change(conn):
     client.heating = {BAT1: "Off"}
     hp = poller(client)
     assert hp._query(conn, 0) is False  # first reading: no prior state, no "change"
-    row = conn.execute("SELECT battery, heater_on, error FROM battery_heater ORDER BY id DESC LIMIT 1").fetchone()
-    assert row == (1, False, None) and client.ensure_calls == 1
+    stored = conn.execute(
+        "SELECT battery, heater_on, error, soc_pct, power_kw, voltage_v FROM battery_heater ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert stored[:3] == (1, False, None) and client.ensure_calls == 1
+    assert stored[3:] == pytest.approx((52.0, -0.355, 19.9))  # the pack's own readings, with each poll
     client.heating[BAT1] = "On"
     assert hp._query(conn, 0) is True  # off -> on
 
@@ -232,8 +255,11 @@ def test_query_error_row(conn):
     errs = []
     hp = poller(client, err=errs.append)
     assert hp._query(conn, 0) is False
-    row = conn.execute("SELECT battery, heater_on, error FROM battery_heater ORDER BY id DESC LIMIT 1").fetchone()
-    assert row[0] == 1 and row[1] is None and "unreachable" in row[2]
+    stored = conn.execute(
+        "SELECT battery, heater_on, error, soc_pct, power_kw, voltage_v FROM battery_heater ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert stored[0] == 1 and stored[1] is None and "unreachable" in stored[2]
+    assert stored[3:] == (None, None, None)  # a failed poll has no readings
     assert any("battery 1" in e for e in errs)
 
 
