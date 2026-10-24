@@ -236,13 +236,13 @@ def _settings(
     return shown
 
 
-def _print_settings(config: Config, shown: list[tuple[str, str, str]]) -> None:
-    """One line per setting: the option, its value, and where it came from (to stderr, beside poll's other notes)."""
-    err(f"Settings ({f'config: {config.path}' if config.path else config.origin}):")
+def _print_settings(config: Config, shown: list[tuple[str, str, str]], say: Callable[[str], None] = err) -> None:
+    """One line per setting: the option, its value, and where it came from, through `say` (poll's log)."""
+    say(f"Settings ({f'config: {config.path}' if config.path else config.origin}):")
     width = max(len(option) for option, _, _ in shown)
     vwidth = min(max(len(text) for _, text, _ in shown), 10)  # a long path only pushes its own line's source
     for option, text, source in shown:
-        err(f"  {option:<{width}}  {text:<{vwidth}}  {source}")
+        say(f"  {option:<{width}}  {text:<{vwidth}}  {source}")
 
 
 def _connector(args: argparse.Namespace, unit: int | None = None, ip: str | None = None) -> Callable[[], ModbusClient]:
@@ -779,23 +779,23 @@ def _poll_arg_error(args: argparse.Namespace) -> str | None:
     return None
 
 
-def _poll_ip(args: argparse.Namespace, config: Config) -> str | None:
+def _poll_ip(args: argparse.Namespace, config: Config, warn: Callable[[str], None] = err) -> str | None:
     """The inverter's IP, from --ip or the config, resolved (readings.ip_addr
-    is INET, so store the address itself); None, after saying why, if
-    there's no address or it won't resolve."""
+    is INET, so store the address itself); None, after saying why (through
+    `warn`), if there's no address or it won't resolve."""
     inverter = config.devices.get("inverter")
     target = args.ip or (inverter.ip if inverter else None)
     if not target:
-        err(f"error: give --ip, or set devices.inverter.ip in the config ({config.origin})")
+        warn(f"error: give --ip, or set devices.inverter.ip in the config ({config.origin})")
         return None
     try:
         return socket.gethostbyname(target)
     except OSError as e:
-        err(f"error: can't resolve {target}: {e}")
+        warn(f"error: can't resolve {target}: {e}")
         return None
 
 
-def _mac_follower(mac: str | None) -> Callable[[str], str | None] | None:
+def _mac_follower(mac: str | None, warn: Callable[[str], None] = err) -> Callable[[str], str | None] | None:
     """poll.run's rediscover callback: keep the IP while the inverter's MAC
     still answers there, else sweep the LAN for it. None without a MAC, or
     where netlookup can't work, which it warns about now, not hours later
@@ -805,7 +805,7 @@ def _mac_follower(mac: str | None) -> Callable[[str], str | None] | None:
     try:
         netlookup.require_supported()
     except PlatformNotSupported as e:
-        err(
+        warn(
             f"warning: {e}; polling without following the inverter's MAC (devices.inverter.mac), so if "
             f"its IP changes, polling keeps failing until it's restarted with the new IP"
         )
@@ -820,17 +820,22 @@ def _mac_follower(mac: str | None) -> Callable[[str], str | None] | None:
 
 
 def _alert_watcher(
-    args: argparse.Namespace, config: Config, url: str
+    args: argparse.Namespace,
+    config: Config,
+    url: str,
+    say: Callable[[str], None] = print,
+    warn: Callable[[str], None] = err,
 ) -> tuple[alerts.Watcher | None, weather.Store | None]:
     """With --alerts, the watcher and the sender's own store connection,
-    which the caller closes; else (None, None)."""
+    which the caller closes; else (None, None). They talk through
+    `say` / `warn` (poll's log)."""
     if not args.alerts:
         return None, None
     alert_config = config.require_alerts()
-    store = weather.Store(url, err)
+    store = weather.Store(url, warn)
     tz = ZoneInfo(config.site.timezone) if config.site else None  # else this computer's
-    sender = alerts.Sender(alert_config, store, out=print, err=err)
-    return alerts.Watcher(sender, tz=tz, out=print, err=err), store
+    sender = alerts.Sender(alert_config, store, out=say, err=warn)
+    return alerts.Watcher(sender, tz=tz, out=say, err=warn), store
 
 
 def _poll_banner(
@@ -863,7 +868,10 @@ def cmd_poll(args: argparse.Namespace) -> int:
     """`sigen poll`: settle the settings (command line, config, default),
     check them, set up MAC following, alerts, the background jobs and the
     cloud heater poller, then hand over to sigen.poll.run. USAGE for a bad
-    combination or an address that won't resolve."""
+    combination or an address that won't resolve. Everything it says goes
+    through poll.poll_logger: timestamped, whole lines, from every thread."""
+    log = poll.poll_logger()
+    say, warn = log.info, log.warning
     config = _config(args)
     shown = _settings(args, config, "poll", POLL_SETTINGS)
     heater_settings = config.commands.get("poll", {}).get("heater", {})
@@ -876,30 +884,32 @@ def cmd_poll(args: argparse.Namespace) -> int:
             )
             for name, (default, _, _) in HEATER_SETTINGS.items()
         ]
-    _print_settings(config, shown)
+    _print_settings(config, shown, say)
     if problem := _poll_arg_error(args):
-        err(f"error: {problem}")
+        warn(f"error: {problem}")
         return ExitCode.USAGE
     url = config.require_database_url()
-    ip = _poll_ip(args, config)
+    ip = _poll_ip(args, config, warn)
     if ip is None:
         return ExitCode.USAGE
     inverter = config.devices.get("inverter")
     mac = inverter.mac if inverter else None
-    rediscover = _mac_follower(mac)
+    rediscover = _mac_follower(mac, warn)
     units = {args.unit_id: "plant", **{u: "inverter" for u in _inverter_units(config)}}
-    watcher, alert_store = _alert_watcher(args, config, url)
+    watcher, alert_store = _alert_watcher(args, config, url, say, warn)
     store = None
     try:
-        background, store = _background(args, config, url, watcher)
+        background, store = _background(args, config, url, watcher, say, warn)
         cloud_heater = None
         if args.cloud and config.cloud is not None:
-            cloud_heater = heater.HeaterPoller.from_config(config.cloud, url, heater_settings, out=print, err=err)
-        shade = satellite.Filler(config.require_site(), url, out=print, err=err) if args.satellite else None
+            cloud_heater = heater.HeaterPoller.from_config(config.cloud, url, heater_settings, out=say, err=warn)
+        shade = satellite.Filler(config.require_site(), url, out=say, err=warn) if args.satellite else None
         following = mac if rediscover else None
-        print(_poll_banner(args, ip, units, url, following, cloud_heater is not None), file=sys.stderr)
+        say(_poll_banner(args, ip, units, url, following, cloud_heater is not None))
         connector_for = lambda address, unit: _connector(args, unit, ip=address)
         return poll.run(
+            out=say,
+            err=warn,
             connector_for=connector_for,
             ip=ip,
             units=units,
@@ -920,35 +930,37 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
 
 def _background(
-    args: argparse.Namespace, config: Config, url: str, watcher: alerts.Watcher | None = None
+    args: argparse.Namespace,
+    config: Config,
+    url: str,
+    watcher: alerts.Watcher | None = None,
+    say: Callable[[str], None] = print,
+    warn: Callable[[str], None] = err,
 ) -> tuple[weather.Background, weather.Store | None]:
     """poll's background jobs, one at a time in their own thread: (Background, Store or None).
     Always: storing each finished day in daily_energy (sigen.daily), checked every 10 minutes, with its own
     connection. With --weather / --radar: the fetches, sharing a Store; with a watcher (--alerts), each 15-minute
-    Open-Meteo row's air temperature goes to it too."""
+    Open-Meteo row's air temperature goes to it too. They talk through `say` / `warn` (poll's log)."""
     tz = _site_tz(config)
 
     def daily_energy() -> None:
         conn = db.connect(url)
         try:
-            daily.update(conn, tz, site=config.site, array=config.array, log=print)
+            daily.update(conn, tz, site=config.site, array=config.array, log=say)
         finally:
             conn.close()
 
     jobs = [weather.Job("daily energy", daily.CHECK_EVERY, daily_energy)]
     if not (args.weather or args.radar):
-        return weather.Background(jobs, err), None
+        return weather.Background(jobs, warn), None
     site = config.require_site()
-    store = weather.Store(url, err)
+    store = weather.Store(url, warn)
     if args.weather:
         for resolution in weather.RESOLUTIONS:
 
             def fetch(resolution: int = resolution) -> None:
                 row, stored = weather.record_open_meteo(site, resolution, store, args.capture_open_meteo_weather)
-                print(
-                    weather.summarize_open_meteo(row) + ("" if stored else "  (not stored)"),
-                    file=sys.stderr if row.error else sys.stdout,
-                )
+                (warn if row.error else say)(weather.summarize_open_meteo(row) + ("" if stored else "  (not stored)"))
                 if watcher is not None and resolution == 15 and not row.error:
                     watcher.add_air(row.valid_at, row.values.get("temperature_2m"))
 
@@ -957,10 +969,10 @@ def _background(
 
         def radar() -> None:
             rows, added = weather.record_radar(site, store, args.capture_radar)
-            print(weather.summarize_radar(rows, added), file=sys.stderr if any(r.error for r in rows) else sys.stdout)
+            (warn if any(r.error for r in rows) else say)(weather.summarize_radar(rows, added))
 
         jobs.append(weather.Job("radar", weather.RADAR_INTERVAL, radar))
-    return weather.Background(jobs, err), store
+    return weather.Background(jobs, warn), store
 
 
 def _weather_store(config: Config) -> weather.Store:

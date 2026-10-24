@@ -627,7 +627,7 @@ def test_poll_takes_a_reading_per_unit(run, config, conn, tmp_path, both_server,
     )
     run("db", "migrate", "--config", f)
     code, out, err = run("poll", *net(both_server), "--config", f, "--count", 2, "--interval", 1)
-    assert code == ExitCode.OK and "4 stored, 0 failed" in out and "units 247 (plant), 1 (inverter)" in err
+    assert code == ExitCode.OK and "4 stored, 0 failed" in out and "units 247 (plant), 1 (inverter)" in out
     rows = conn.execute("SELECT id, poll_id, unit_id FROM readings ORDER BY id").fetchall()
     per_device = {d: sum(1 for r in db.STORED_REGISTERS if r.device == d) for d in ("plant", "inverter")}
     assert [(u, len(stored(conn, rid))) for rid, _, u in rows] == [
@@ -748,7 +748,7 @@ def test_poll_with_weather_and_radar(run, site_config, conn, monkeypatch, tmp_pa
     # next whole second, 0-1 s on), so what it stored isn't checked here; `weather` / `radar --record-to-db` are.
     assert time.monotonic() - started < 5  # didn't wait for the hourly fetch to come round again
     assert code == ExitCode.OK and "2 poll(s): 2 stored, 0 failed" in out  # weather isn't a poll
-    assert "also Open-Meteo hourly and every 15 min and radar every 6 min" in err
+    assert "also Open-Meteo hourly and every 15 min and radar every 6 min" in out
 
 
 def test_type_change_without_values_is_just_synced(run, config, conn):

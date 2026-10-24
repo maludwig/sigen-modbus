@@ -282,8 +282,8 @@ def test_poll_takes_the_ip_from_the_config(run, tmp_path, hangs_up):
             "devices": {"inverter": {"ip": "192.168.1.100"}},
         },
     )
-    code, _, err = run("poll", "--config", f, "--count", 1)
-    assert code == ExitCode.DATABASE and "Polling 192.168.1.100:502" in err  # got past the IP; no DB here
+    code, out, _ = run("poll", "--config", f, "--count", 1)
+    assert code == ExitCode.DATABASE and "Polling 192.168.1.100:502" in out  # got past the IP; no DB here
     f = write_config(tmp_path, {"database": {"url": f"postgresql://u:p@127.0.0.1:{hangs_up}/x"}})
     code, _, err = run("poll", "--config", f, "--count", 1)
     assert code == ExitCode.USAGE and "devices.inverter.ip" in err

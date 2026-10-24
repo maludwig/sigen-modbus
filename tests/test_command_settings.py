@@ -3,6 +3,7 @@ line (an option given wins, then the config, then the built-in default), with po
 it came from."""
 
 import json
+import re
 
 import pytest
 
@@ -106,14 +107,19 @@ def test_poll_cloud_defaults_on_and_can_be_disabled(tmp_path):
     assert args.cloud is False  # command line wins over the config
 
 
+def unstamped(text):
+    """poll's log lines without their [2026-10-21T01:18:33.589Z] stamps."""
+    return [re.sub(r"^\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\] ", "", line) for line in text.splitlines()]
+
+
 def test_poll_checks_settings_from_the_config_too(run, tmp_path):
     f = write(
         tmp_path, {"database": {"url": "postgresql://nobody@127.0.0.1:1/none"}, "poll": {"interval": 15, "offset": 15}}
     )
-    code, _, err = run("poll", "--ip", "127.0.0.1", "--config", f, "--count", 1)
+    code, out, err = run("poll", "--ip", "127.0.0.1", "--config", f, "--count", 1)
     assert code == ExitCode.USAGE and "--offset must be at least 0 and less than --interval (15)" in err
-    assert f"Settings (config: {f}):" in err and ["--offset", "15", "config"] in [
-        line.split() for line in err.splitlines()
+    assert f"Settings (config: {f}):" in out and ["--offset", "15", "config"] in [
+        line.split() for line in unstamped(out)
     ]
     code, _, err = run(
         "poll",
@@ -137,7 +143,7 @@ def test_poll_prints_each_setting_and_where_it_came_from(run, tmp_path, config, 
     run("db", "migrate", "--config", f)
     code, out, err = run("poll", *net(full_server), "--config", f, "--count", 1, "--no-alerts")
     assert code == ExitCode.OK and "1 stored, 0 failed" in out
-    lines = err.splitlines()
+    lines = unstamped(out)
     start = lines.index(f"Settings (config: {f}):")
     assert [line.split() for line in lines[start + 1 : start + 10]] == [
         ["--interval", "1", "config"],

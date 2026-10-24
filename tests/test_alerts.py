@@ -250,7 +250,7 @@ def test_poll_with_alerts(run, alert_config, conn, both_server, fake_ntfy, monke
 
     monkeypatch.setattr(bw, "detect_all", cold)
     code, out, err = run("poll", *net(both_server), "--config", alert_config, "--count", 2, "--interval", 1, "--alerts")
-    assert code == ExitCode.OK and "4 stored, 0 failed" in out and "also alerts (no --weather" in err
+    assert code == ExitCode.OK and "4 stored, 0 failed" in out and "also alerts (no --weather" in out
     assert "alerts: 2 poll(s) of history loaded" in out and "alert sent (cold)" in out
     assert len(seen) == 2 and len(seen[-1]) == 4 and seen[-1][bw.COOLEST][-1] is not None  # history + 2 new
     assert len(fake_ntfy.requests) == 1

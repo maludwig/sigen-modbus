@@ -19,9 +19,15 @@ poll comes GLITCH_RETRY_DELAY later instead of on the schedule, up to GLITCH_RET
 row: an ordinary poll in every way (its own poll_id, every unit, counted by --count), then back to
 the schedule. A sure glitch is always flagged; a suspect only when a retry follows, which replaces
 it (the last attempt is kept as the interval's reading).
+
+Output: `sigen poll` sends everything it says, from every thread, through one logger (poll_logger): each line
+`[2026-10-21T01:18:33.589Z] message` (UTC, milliseconds), info to stdout and warnings to stderr, a whole line at a
+time (logging's handlers hold a lock), so the background jobs' lines never run into each other. A reading's own time
+is its started_at in the database.
 """
 
 import datetime
+import logging
 import sys
 import time
 from dataclasses import dataclass, field
@@ -44,6 +50,40 @@ GLITCH_RETRY_DELAY = (
 def now_utc() -> datetime.datetime:
     """The current time, timezone-aware in UTC: the stamp on every reading."""
     return datetime.datetime.now(datetime.UTC)
+
+
+# ---------- the poll's log ----------
+LOGGER = "sigen.poll"
+
+
+class UtcFormatter(logging.Formatter):
+    """`[2026-10-21T01:18:33.589Z] message`: the record's time in UTC, to the millisecond, with a literal Z."""
+
+    def __init__(self) -> None:
+        super().__init__("[%(asctime)s] %(message)s")
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        """The record's creation time as 2026-10-21T01:18:33.589Z."""
+        t = datetime.datetime.fromtimestamp(record.created, datetime.UTC)
+        return f"{t:%Y-%m-%dT%H:%M:%S}.{t.microsecond // 1000:03d}Z"
+
+
+def poll_logger(stdout: object | None = None, stderr: object | None = None) -> logging.Logger:
+    """The `sigen poll` logger, set up afresh: INFO (and below) to `stdout`, WARNING and up to `stderr` (default:
+    the current sys.stdout / sys.stderr), each line UtcFormatter's; it doesn't pass records on to the root logger."""
+    log = logging.getLogger(LOGGER)
+    for handler in list(log.handlers):
+        log.removeHandler(handler)
+    info = logging.StreamHandler(stdout if stdout is not None else sys.stdout)
+    info.addFilter(lambda record: record.levelno < logging.WARNING)
+    warning = logging.StreamHandler(stderr if stderr is not None else sys.stderr)
+    warning.setLevel(logging.WARNING)
+    for handler in (info, warning):
+        handler.setFormatter(UtcFormatter())
+        log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    return log
 
 
 @dataclass
@@ -188,16 +228,15 @@ def run(
             stored += len(reading_ids)
             for unit, result in results.items():
                 seconds = (result.ended_at - result.started_at).total_seconds()
-                stamp = f"{result.started_at:%Y-%m-%d %H:%M:%S.%f}Z"
                 where = f"unit {unit}: " + (f"reading {reading_ids[unit]}" if unit in reading_ids else "not stored")
                 if result.error is None:
                     out(
-                        f"{stamp}  {where}: {len(result.values)} registers in {seconds:.2f}s"
+                        f"{where}: {len(result.values)} registers in {seconds:.2f}s"
                         + (f" (glitch: {glitch})" if glitch else "")
                     )
                 else:
                     failed += 1
-                    err(f"{stamp}  {where}: FAILED after {seconds:.2f}s: {result.error}")
+                    err(f"{where}: FAILED after {seconds:.2f}s: {result.error}")
             if watcher is not None:
                 watcher.observe(results, units, now_utc(), glitch=verdict if glitch else None)
             if cloud_heater is not None:

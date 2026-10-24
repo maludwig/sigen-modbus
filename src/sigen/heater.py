@@ -2,10 +2,10 @@
 Modbus register (the LoadHub has no Modbus), so the cloud is the only window on it.
 
 A daemon thread, like sigen.weather.Background, that never affects the Modbus polling and never stops itself on a
-cloud or database problem: it logs each query (UTC-timestamped "Cloud: ..." lines on its out stream), stores an
-error row for a cloud problem, and keeps polling the cloud right through a database outage (reopening the connection
-when the database returns). The one thing that disables it for the session is being unable to refresh the token at
-launch.
+cloud or database problem: it logs each query ("Cloud: ..." lines on its out stream, which poll's log timestamps),
+stores an error row for a cloud problem, and keeps polling the cloud right through a database outage (reopening the
+connection when the database returns). The one thing that disables it for the session is being unable to refresh the
+token at launch.
 
 Cadence (Mitchell's design; the config's poll.heater can set each number, sigen.config.HEATER_SETTINGS): every
 `base_interval` (slow_interval, 10 min) at rest; every `active_interval` (fast_interval, 1 min) while the heater
@@ -219,8 +219,8 @@ class HeaterPoller:
             self._thread.join(wait)
 
     def _log(self, message: str) -> None:
-        """One UTC-timestamped activity line, e.g. `2026-10-17 15:21:38.225991Z  Cloud: Battery … heater Off, …`."""
-        self._out(f"{self._now().strftime('%Y-%m-%d %H:%M:%S.%f')}Z  Cloud: {message}")
+        """One activity line, e.g. `Cloud: Battery … heater Off, …` (poll's log puts the time in front)."""
+        self._out(f"Cloud: {message}")
 
     def _open(self) -> psycopg.Connection | None:
         """A database connection, or None (warned once) if the database is down -- the cloud is still polled."""

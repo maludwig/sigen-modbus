@@ -280,17 +280,13 @@ def test_poll_round_flip_triggers_other(conn):
 
 # ---------- logging ----------
 def test_logs_each_query_in_the_wanted_format(conn):
-    import re
-
     client = FakeClient()
     client.heating = {BAT1: "On"}
     out = []
     hp = HeaterPoller(client, STATION, [BAT1, BAT2], "x", out=out.append, err=lambda m: None, now=lambda: NOW)
     hp._query(conn, 0)
-    assert any(line.endswith(f"Cloud: Battery {BAT1} querying") for line in out)
-    assert any(f"Cloud: Battery {BAT1} heater On, written successfully" in line for line in out)
-    # "2026-10-17 09:00:00.000000Z  Cloud: ..." -- UTC, microseconds, Z, two spaces, "Cloud:"
-    assert all(re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{6}Z  Cloud: ", line) for line in out)
+    assert out == [f"Cloud: Battery {BAT1} querying", f"Cloud: Battery {BAT1} heater On, written successfully"]
+    # no time of its own: poll's log puts [2026-10-17T09:00:00.000Z] in front
 
 
 # ---------- a database outage must not stop the thread ----------

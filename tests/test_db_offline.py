@@ -7,7 +7,7 @@ import json
 import pytest
 
 from conftest import FULL_DATA
-from sigen import db
+from sigen import db, poll
 from sigen.cli import format_query_table
 from sigen.errors import ExitCode
 from sigen.poll import seconds_to_boundary
@@ -123,6 +123,35 @@ def test_redact(url, expected):
 
 
 # ---------- schedule ----------
+def test_poll_log_lines_are_whole_utc_stamped_and_split_by_level():
+    import io
+    import logging
+    import re
+    import threading
+
+    out, err = io.StringIO(), io.StringIO()
+    log = poll.poll_logger(out, err)
+    log.info("unit 247: reading 1: 199 registers in 0.84s")
+    log.warning("warning: database unavailable")
+    stamp = r"\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\] "
+    assert re.fullmatch(stamp + r"unit 247: reading 1: 199 registers in 0\.84s\n", out.getvalue())
+    assert re.fullmatch(stamp + r"warning: database unavailable\n", err.getvalue())
+    record = logging.LogRecord("x", logging.INFO, "f", 1, "m", None, None)
+    record.created = 1792208313.5891  # 2026-10-17T03:38:33.589 UTC
+    assert poll.UtcFormatter().formatTime(record) == "2026-10-17T03:38:33.589Z"
+    out.truncate(0), out.seek(0)
+    threads = [
+        threading.Thread(target=lambda n=n: [log.info(f"thread {n} line {k}") for k in range(200)]) for n in range(4)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    lines = out.getvalue().splitlines()
+    assert len(lines) == 800 and all(re.fullmatch(stamp + r"thread \d line \d+", line) for line in lines)  # none glued
+    assert poll.poll_logger(out, err) is log and len(log.handlers) == 2  # set up again: no doubled handlers
+
+
 def test_seconds_to_boundary():
     assert 1_000_020 % 60 == 0
     assert seconds_to_boundary(60, 1_000_040.5) == pytest.approx(39.5)  # 20.5 s past the minute
