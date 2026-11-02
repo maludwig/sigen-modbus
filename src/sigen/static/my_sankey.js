@@ -278,6 +278,17 @@
   }
 
   /**
+   * The canvas height draw() will use for a canvas this wide, CSS px, so a page
+   * can reserve it before it has the numbers.
+   * @param {number} width  CSS px
+   * @param {Partial<SankeyOptions>} [opts]  as draw()'s
+   * @returns {number}
+   */
+  function heightFor(width, opts) {
+    return (opts && opts.height) || Math.round(clamp(width * 0.7, 300, 520));
+  }
+
+  /**
    * Paint `data` onto `canvas`: as wide as the canvas is on screen,
    * opts.height tall (default: 70 % of the width, within 300-520 px), sharp
    * on high-density screens. Returns the layout.
@@ -289,7 +300,7 @@
   function draw(canvas, data, opts) {
     const o = Object.assign({}, DEFAULTS, opts || {});
     const width = canvas.clientWidth;
-    const height = o.height || Math.round(clamp(width * 0.7, 300, 520));
+    const height = heightFor(width, o);
     const dpr = root.devicePixelRatio || 1;
     canvas.style.height = `${height}px`;
     canvas.width = Math.round(width * dpr);
@@ -322,7 +333,7 @@
     return l;
   }
 
-  const api = {DEFAULTS, fitScale, layout, valueSize, draw};
+  const api = {DEFAULTS, fitScale, layout, valueSize, heightFor, draw};
   if (typeof module === "object" && module.exports) {
     module.exports = api;
   } else {

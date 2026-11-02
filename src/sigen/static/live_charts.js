@@ -103,6 +103,8 @@
  * @property {function(Store): number} [height]  a fixed height, CSS px
  * @property {boolean} [night]  "today" before sunrise: a night sky
  * @property {string} [side]  the Env.data name of its strips
+ * @property {number} [loadingExtra]  px the strips will add, for the placeholder before the first draw
+ * @property {number} [loadingHeight]  the placeholder's height, CSS px, where `height` needs the data
  * @property {boolean} [whole]  the whole window every time, no ?since=
  * @property {function(Object): Rows} [tables]  a data response's rows
  * @property {Fill} [fill]  for main's labels a top-up leaves out
@@ -246,6 +248,7 @@
   const GOLDENROD = "#daa520";
   const MEAN = 5 * 60;                                    // seconds: the 5-minute means
   const AXIS = 60;                                        // px: the battery charts' axes, so their time axes line up
+  const LEGEND_LINE = 31;                                 // px of one legend line, under a chart
   const BAR_ROW = 34;                                     // px per bar of the energy-by-load chart
   /**
    * px: the widest label in uPlot's axis font. (100 without a document:
@@ -676,6 +679,7 @@
     string_power: {
       aspect: 4.2 / 11,
       night: true,
+      loadingExtra: 323,                                  // measured: the strips' rows
       side: "string_power_strips",                        // the radar and satellite strips, fetched every few minutes
       tables: (d) => ({main: {t: d.t, cols: d.kw}, meta: {faces: d.faces},
                        aux: {sky: {t: d.sky ? d.sky.t : [], cols: d.sky ? d.sky.kw : {}}}}),
@@ -718,6 +722,7 @@
 
     load_energy: {                                        // horizontal bars: room for the loads' names on the left
       whole: true,
+      loadingHeight: 264,                                 // measured: a handful of bars, no legend
       height: ({raw}) => barsHeight(raw.bars),
       build: ({raw}) => {
         const hours = raw.first ? (Date.parse(raw.last) - Date.parse(raw.first)) / 3600e3 : 0;
@@ -730,6 +735,7 @@
 
     load_power_now: {                                     // the same bars, of the newest reading's power
       whole: true,
+      loadingHeight: 264,
       height: ({raw}) => barsHeight(raw.bars),
       build: (s) => {
         const raw = s.raw;
@@ -768,6 +774,7 @@
 
     battery_temps: {
       aspect: 4.5 / 11,
+      loadingExtra: 62,                                   // measured: the heater strip's rows
       side: "battery_temps_strips",                       // each pack's heater, on or off, fetched every few minutes
       tables: (d) => ({main: {t: d.t, cols: d.c}, aux: {air: {t: d.air.t, cols: {air: d.air.c}}}}),
       build: (s) => {
@@ -916,10 +923,30 @@
     let store = fresh(), last = null, plot = null, key = null, data = null, zoomed = false, busy = false;
     let strips = [], extra = 0;                           // the strips under the plot, and the px they take
     let status = "", sideStatus = "", loaded = false, scene = null;
+    const byWidth = () => Math.round(Math.min(Math.max(el.clientWidth * (spec.aspect || 0.42), 220), 460));
     const size = () => ({width: el.clientWidth,                 // a fixed height (spec.height), or by the width
-                         height: extra + (spec.height ? spec.height(store)
-                                 : Math.round(Math.min(Math.max(el.clientWidth * (spec.aspect || 0.42), 220), 460)))});
+                         height: extra + (spec.height ? spec.height(store) : byWidth())});
     resizers.push(() => plot && plot.setSize(size()));
+
+    // Before the first draw, a grey shimmering box holds the chart's place at a guess of its height (the plot, its
+    // strips, one legend line), so the page doesn't jump when it arrives. The first draw measures the real one.
+    let skeleton = root.document.createElement("div");
+    const guess = spec.loadingHeight ?? byWidth() + (spec.loadingExtra || 0) + LEGEND_LINE;
+    skeleton.className = "skeleton";
+    skeleton.style.height = `${guess}px`;
+    el.style.minHeight = `${guess}px`;
+    el.appendChild(skeleton);
+    /**
+     * The placeholder gone, if it's still there (the chart or the night sky
+     * is in its place now, or the load failed).
+     * @returns {void}
+     */
+    function ready() {
+      if (skeleton === null) return;
+      skeleton.remove();
+      skeleton = null;
+      el.style.minHeight = "";
+    }
 
     // uPlot asks for the x span with the data's ends when it fits the data (at first, and on a double-click), and
     // with the selection when zooming in: so this also tells whether the chart is zoomed in.
@@ -966,7 +993,10 @@
         plot.setData(data, !zoomed);                      // zoomed in: stay there (redraws the strips too)
         return b;
       }
-      if (plot !== null) plot.destroy();                  // a load came or went, or the strips came: a new chart
+      if (plot !== null) {                                // a load came or went, or the strips came: a new chart
+        el.style.minHeight = `${el.offsetHeight}px`;      // the page keeps its length while the old one is gone
+        plot.destroy();
+      }
       key = shape;
       zoomed = false;
       const hooks = {...(b.hooks || {})};
@@ -987,6 +1017,7 @@
       const rows = plot.root.querySelectorAll(".u-legend .u-series");
       for (const i of b.hidden || []) if (rows[i]) rows[i].style.display = "none";
       if (strips.length) lay.cursor.line = Strips.cursorLine(plot);
+      if (skeleton === null) el.style.minHeight = "";     // (the placeholder's own hold is let go by ready())
       return b;
     }
 
@@ -1030,11 +1061,13 @@
     function render() {
       if (night()) {
         showNight();
+        ready();
         setNote(note, `Before sunrise (${hhmm(env.sunrise)}).` + status + sideStatus);
         return;
       }
       hideNight();
       const b = draw();
+      ready();
       let text = spec.whole ? b.note || "" : "";
       if (!spec.whole) {
         const t = store.main.t, n = t.length;
@@ -1088,6 +1121,7 @@
         loaded = true;
         render();
       } catch (e) {
+        ready();
         setError(note, `Checked at ${when(checked)}: failed (${e.message})` +
                        (env.live ? `; trying again in ${env.every} s.` : "."));
       } finally {
@@ -1115,12 +1149,31 @@
   function sankeyChart(env, resizers) {
     const canvas = root.document.getElementById("sankey"), note = root.document.getElementById("note-sankey");
     let data = null;
+    // Until the numbers come, a loading box stands in for the canvas, at the height the diagram will have.
+    let skeleton = root.document.createElement("div");
+    skeleton.className = "skeleton";
+    skeleton.style.margin = "12px 0";
+    canvas.style.display = "none";
+    canvas.before(skeleton);
+    /**
+     * The loading box gone, if it's still there (the diagram or its failure
+     * is in its place now).
+     * @returns {void}
+     */
+    function ready() {
+      if (skeleton === null) return;
+      skeleton.remove();
+      skeleton = null;
+    }
     const draw = () => {
-      const s = data && data.sankey;
+      if (skeleton !== null) skeleton.style.height = `${root.MySankey.heightFor(skeleton.clientWidth)}px`;
+      if (data === null) return;
+      const s = data.sankey;
       canvas.style.display = s && s.sources.length ? "block" : "none";
       if (s && s.sources.length) root.MySankey.draw(canvas, s);
     };
     resizers.push(draw);
+    draw();
     /**
      * Fetch the diagram ({first, last, sankey: charts.sankey's, or null with
      * no readings}), draw it and write its note.
@@ -1130,6 +1183,7 @@
       const checked = Date.now() / 1000;
       try {
         data = await getJSON(env.data.sankey);
+        ready();
         draw();
         const s = data.sankey;
         let text = s ? `${when(Date.parse(data.first) / 1000)} to ${when(Date.parse(data.last) / 1000)}.`
@@ -1140,6 +1194,7 @@
         }
         setNote(note, text + (env.live ? ` Checked at ${when(checked)}.` : ""));
       } catch (e) {
+        ready();
         setError(note, `Checked at ${when(checked)}: failed (${e.message})` +
                        (env.live ? `; trying again in ${env.sankey_every} s.` : "."));
       }

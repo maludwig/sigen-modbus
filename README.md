@@ -218,8 +218,10 @@ Reads every unit on a schedule (lined up with the clock: `--interval 15` polls a
 `--count`. `--weather` and `--radar` also record the weather at your site in the
 background, and `--satellite` NOAA's cloud over it (see `sigen satellite`); `--alerts` watches the
 battery and pushes problems to your phone (see "Alerts").
-It also stores each finished day's energy (see `sigen db daily`). When logging its output to a
-file, set `PYTHONUNBUFFERED=1`.
+It also stores each finished day's energy (see `sigen db daily`). Every line `poll` prints, from
+any of its threads, starts with the time it was logged in UTC, e.g. `[2026-10-21T01:18:33.589Z]`;
+information goes to stdout and warnings to stderr. A reading's own time is its `started_at` in the
+database. When logging its output to a file, set `PYTHONUNBUFFERED=1`.
 
 When something goes wrong, `poll` carries on where it can:
 - the device doesn't answer, drops the connection or is busy: the reading is stored with its

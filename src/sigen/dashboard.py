@@ -38,6 +38,7 @@ from sigen.config import Config, Site
 from sigen.errors import DatabaseError
 from sigen.goes import sun_rise_set
 
+SLOW_LOAD = False  # True: every /data/<name>.json waits 3 s first, to see the charts' loading boxes
 REFRESH_SECONDS = 300  # the daily page reloads this often while its day is today
 MAX_HOURS = 24 * 31
 CHARTS = {  # name -> its title on the page; each has a data endpoint (DATA) and a spec in live_charts.js
@@ -543,6 +544,8 @@ def create_app(config: Config) -> Flask:
         """A chart's numbers (DATA), for today by default."""
         if name not in DATA:
             abort(404)
+        if SLOW_LOAD:
+            time.sleep(8)
         what, read = DATA[name]
         return data_response(what, read, {})
 

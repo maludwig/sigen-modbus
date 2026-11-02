@@ -33,7 +33,12 @@ button.help[aria-expanded="true"] { background: #666; color: #fff; }
 
 /* charts and tables */
 .plot { width: 100%; }
-#sankey { width: 100%; display: block; margin: 12px 0; }
+/* a chart's place while it loads: a rounded box with a grey gradient sweeping across it (live_charts.js) */
+/* The gradient repeats every 200 px along its 135° line, and the loop slides it 200 × √2 px sideways: one period,
+   so the last frame is the first and there's no twitch. The 4000 px tile always covers the box. */
+.skeleton { width: 100%; border-radius: 10px; background: repeating-linear-gradient(135deg, #e2e2e2 0, #f6f6f6 100px, #e2e2e2 200px);
+            background-size: 4000px 4000px; animation: skeleton-sweep 1.6s linear infinite; }
+@keyframes skeleton-sweep { from { background-position: -282.84px 0; } to { background-position: 0 0; } }#sankey { width: 100%; display: block; margin: 12px 0; }
 #pv { width: 100%; margin: 4px 0 0; }table { border-collapse: collapse; margin: 10px 0; }
 td { padding: 3px 14px 3px 0; }
 td.kwh, th.kwh { text-align: right; font-variant-numeric: tabular-nums; }

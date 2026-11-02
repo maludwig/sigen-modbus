@@ -56,7 +56,22 @@
       <div class="meta note" id="note-{{ name }}" hidden>Loading…</div>
       <div class="plot" id="plot-{{ name }}"></div>
     {% endfor %}
+    <p><button id="measure-plots">Measure plots (console)</button></p>
     <script>
+      // TEMPORARY: logs each plot div's height, split into uPlot's canvas area and its legend
+      document.getElementById("measure-plots").addEventListener("click", () => {
+        const rows = [...document.querySelectorAll("div.plot")].map((el) => {
+          const wrap = el.querySelector(".u-wrap"), legend = el.querySelector(".u-legend");
+          return {id: el.id, width: el.clientWidth, div: el.offsetHeight,
+                  wrap: wrap ? wrap.offsetHeight : null, legend: legend ? legend.offsetHeight : null};
+        });
+        const sankey = document.getElementById("sankey");
+        console.log("viewport", innerWidth, "x", innerHeight, "dpr", devicePixelRatio,
+                    "mouse", matchMedia("(hover: hover) and (pointer: fine)").matches,
+                    "sankey", sankey.clientWidth, "x", sankey.clientHeight);
+        console.table(rows);
+        console.log(JSON.stringify(rows));
+      });
       // each title's ⓘ shows or hides its chart's note (live_charts.js keeps it so as it rewrites the note)
       document.querySelectorAll("button.help").forEach((button) => button.addEventListener("click", () => {
         const note = document.getElementById(button.getAttribute("aria-controls")), open = note.hidden;
